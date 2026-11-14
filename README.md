@@ -30,24 +30,51 @@ development dependency for validating the embedded WGSL shader.
 The workflow runs on the standard `macos-15` runner and explicitly selects
 `/Applications/Xcode_16.4.app/Contents/Developer`. Xcode 16.4 includes the iOS 18.5
 SDK; the deployment target is **iPadOS 18.0**, and the device architecture is **arm64**.
-The runner must continue to offer that Xcode installation. Its first step checks this;
+The runner must continue to offer that Xcode installation. An early step checks this;
 if GitHub removes it, deliberately update both workflow copies and the cache key to a
 supported Xcode version. No Apple account, signing certificate, paid membership or
 GitHub signing secrets are used to build the unsigned IPA.
 
-1. Put this experiment in a GitHub repository, either alongside reRBR or by itself.
-   The workflow paths assume it is a directory named `ios-probe` at the repository root.
+1. Put the **contents** of this experiment directly at the root of your standalone
+   `ReRBR-iOS-Probe` repository. `Cargo.toml`, `Cargo.lock`, `scripts/`, `src/`, `tests/`
+   and `xcode/` must be at the root. Do not create another `ios-probe/` directory there.
 2. GitHub discovers workflows **only** under the repository root's `.github/workflows/`.
    The activated file must be `.github/workflows/ios-probe.yml`, copied from
-   `ios-probe/github-actions/ios-probe.yml`. The template alone is not discoverable.
-   Keep the two copies identical. Writing outside `ios-probe` requires the owner's permission.
-3. Commit the new files, including `ios-probe/Cargo.lock`, and push to your own repository.
+   `github-actions/ios-probe.yml`. The template alone is not discoverable.
+   Keep the two copies identical. This workflow targets the standalone repository;
+   its layout check deliberately fails at the root of the original reRBR repository.
+3. Commit the new files, including the root `Cargo.lock`, and push to your own repository.
    Ensure the workflow is present on the **default branch** so the manual Run workflow
    button appears. Enable Actions if this is a fork with workflows disabled.
 4. Open **Actions > ReRBRProbe unsigned iPadOS > Run workflow**.
 5. Download `ReRBRProbe-unsigned-<run number>`. Extract the artifact ZIP on Windows to obtain
    `ReRBRProbe-unsigned.ipa` and `SHA256SUMS`. The artifact ZIP itself is not the IPA.
 6. Check the IPA hash with `Get-FileHash .\ReRBRProbe-unsigned.ipa -Algorithm SHA256`.
+
+The expected standalone layout is:
+
+```text
+ReRBR-iOS-Probe/
+  .github/workflows/ios-probe.yml
+  github-actions/ios-probe.yml
+  Cargo.toml
+  Cargo.lock
+  rust-toolchain.toml
+  rustfmt.toml
+  scripts/build-ios.sh
+  scripts/verify.py
+  src/
+  tests/
+  xcode/
+```
+
+All workflow paths are relative to that repository root: the cache uses `. -> target`,
+the build runs `bash scripts/build-ios.sh`, and artifacts come from `build/`.
+The build script finds its own parent directory and passes that directory's manifest
+explicitly to Cargo. Xcode's `../target/aarch64-apple-ios/release/librerbr_probe.a`
+is relative to `xcode/`, so it already resolves to the root `target/` directory.
+`scripts/verify.py` also finds the root from its own location; neither requires an
+`ios-probe` directory name.
 
 The job installs the pinned Rust toolchain and `aarch64-apple-ios`, caches only this
 project's target directory, runs source preflight, formatting, a shader validation test
@@ -119,7 +146,8 @@ project has no production icons, menus, automated visual captures or distributio
 
 ## Optional local checks
 
-From `ios-probe`, on a machine with Rust 1.97.1 and the required build tools:
+From the standalone repository root (or the local `ios-probe` directory), on a machine
+with Rust 1.97.1 and the required build tools:
 
 ```sh
 cargo fmt --all -- --check
@@ -138,13 +166,13 @@ DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer bash scripts/build
 ```
 
 The script writes only this directory's `target/` and `build/`. It refuses to overwrite a
-previous Payload/IPA; start from a fresh checkout or move `ios-probe/build` aside to rerun.
+previous Payload/IPA; start from a fresh checkout or move the probe's `build/` aside to rerun.
 Do not run the parent reRBR build/check script for this isolated experiment.
 
 ## Validation status
 
 The iOS/Xcode build, unsigned IPA generation, installation, Metal rendering and visual
-checks **have not been executed in this Windows environment**. The first Actions run is
+checks **have not been executed in this Windows environment**. A successful Actions run is
 required to validate Apple-specific compilation, native framework linking and storyboard
 compilation. Hardware verification then requires the actual iPad. Local check results are
 recorded in `VALIDATION.md`; they do not establish iOS compatibility.

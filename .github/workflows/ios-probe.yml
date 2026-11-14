@@ -1,4 +1,5 @@
-# Manual unsigned device build. Template: ios-probe/github-actions/ios-probe.yml.
+# Standalone repository layout: Cargo.toml, scripts/ and xcode/ are at the root.
+# Manual unsigned device build. Template: github-actions/ios-probe.yml.
 # GitHub discovers the activated copy at .github/workflows/ios-probe.yml only.
 name: ReRBRProbe unsigned iPadOS
 
@@ -23,6 +24,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check standalone repository layout
+        run: |
+          for file in Cargo.toml Cargo.lock scripts/build-ios.sh scripts/verify.py xcode/ReRBRProbe.xcodeproj/project.pbxproj; do
+            if [[ ! -f "$file" ]]; then
+              echo "::error::Expected $file at the repository root. Copy the contents of the probe, without an ios-probe wrapper directory."
+              exit 1
+            fi
+          done
+
       - name: Check Xcode and iPhoneOS SDK
         run: |
           test -d "$DEVELOPER_DIR"
@@ -38,19 +48,19 @@ jobs:
       - name: Cache only the independent probe build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ios-probe -> target
-          key: ios-probe-xcode-16.4
+          workspaces: . -> target
+          key: ios-probe-root-xcode-16.4
 
       - name: Compile and inspect unsigned device IPA
-        run: bash ios-probe/scripts/build-ios.sh
+        run: bash scripts/build-ios.sh
 
       - name: Upload unsigned IPA and checksum
         uses: actions/upload-artifact@v4
         with:
           name: ReRBRProbe-unsigned-${{ github.run_number }}
           path: |
-            ios-probe/build/ReRBRProbe-unsigned.ipa
-            ios-probe/build/SHA256SUMS
+            build/ReRBRProbe-unsigned.ipa
+            build/SHA256SUMS
           if-no-files-found: error
           retention-days: 7
 
@@ -60,7 +70,7 @@ jobs:
         with:
           name: ReRBRProbe-logs-${{ github.run_number }}
           path: |
-            ios-probe/build/*.log
-            ios-probe/build/*.txt
+            build/*.log
+            build/*.txt
           if-no-files-found: ignore
           retention-days: 7

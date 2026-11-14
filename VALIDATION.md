@@ -38,3 +38,30 @@ Not run here:
 The workflow is prepared to run the remaining build/package checks on macOS. A first
 successful Actions run is required before calling the Apple build successful. Hardware
 checks in `README.md` must then be performed on the iPad mini A17 Pro.
+
+## Standalone repository path correction
+
+The owner reported that the first Actions run failed before invoking the build script:
+`bash: ios-probe/scripts/build-ios.sh: No such file or directory`. Their public
+`ReRBR-iOS-Probe` repository contains the probe files at its root.
+
+Both workflow copies now use root-relative script, cache and artifact paths. All four
+Cargo commands in the build script explicitly select the manifest beside `scripts/`.
+The workflow checks for the standalone input files before installing Rust or caching.
+The Xcode and Python verifier paths already resolve relative to the probe and needed
+no changes. `Cargo.toml`, `Cargo.lock`, Rust sources and Xcode files were not modified.
+
+Windows checks for this correction:
+
+| Check | Result |
+| --- | --- |
+| Standalone relocation | Copied Cargo files, scripts, sources, tests and Xcode files into an ignored `.validation/root-layout-check/` directory, without an `ios-probe` wrapper |
+| Relocated `cargo metadata --offline --locked --no-deps` | PASS: workspace and target resolve under the relocated root; only `rerbr-probe` is a workspace package |
+| Workflow copies and root paths | PASS: SHA-256 matches; build uses `scripts/build-ios.sh`, cache uses `. -> target`, and IPA/checksum/logs use `build/` |
+| Script and Xcode paths | PASS: four explicit Cargo manifest arguments; Xcode's `../target/.../librerbr_probe.a` resolves to the relocated root's `target/`; shader and verifier source paths exist |
+| Relocated plist/storyboard/scheme | PASS: XML parsing with PowerShell |
+| Shell line endings | PASS: LF |
+
+No Rust or shader implementation changed, so their earlier checks were not repeated.
+These are path/metadata checks, not a Bash, Xcode, IPA or hardware test. The corrected
+workflow must be copied to the standalone repository, committed, pushed and run again.

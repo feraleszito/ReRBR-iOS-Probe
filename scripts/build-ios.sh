@@ -9,7 +9,9 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     exit 1
 fi
 
-# These paths deliberately stay inside ios-probe. This never builds the parent workspace.
+# Resolve everything from the script's parent, whether the probe is a repository root
+# or a local subdirectory. Never use the caller's Cargo workspace or target directory.
+MANIFEST="$PROBE_ROOT/Cargo.toml"
 export CARGO_TARGET_DIR="$PROBE_ROOT/target"
 export IPHONEOS_DEPLOYMENT_TARGET=18.0
 export SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
@@ -24,12 +26,12 @@ mkdir -p build
 } | tee build/environment.txt
 
 python3 scripts/verify.py
-cargo fmt --all -- --check
+cargo fmt --manifest-path "$MANIFEST" --all -- --check
 # Run shader validation on the macOS host. This is not a device/rendering test.
 # SDKROOT must not point to iPhoneOS when compiling macOS test executables.
-env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET cargo test --locked --test shader 2>&1 | tee build/shader-test.log
-cargo clippy --locked --lib --target aarch64-apple-ios -- -D warnings
-cargo rustc --locked --release --lib --target aarch64-apple-ios -- --print native-static-libs 2>&1 | tee build/rust-build.log
+env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET cargo test --manifest-path "$MANIFEST" --locked --test shader 2>&1 | tee build/shader-test.log
+cargo clippy --manifest-path "$MANIFEST" --locked --lib --target aarch64-apple-ios -- -D warnings
+cargo rustc --manifest-path "$MANIFEST" --locked --release --lib --target aarch64-apple-ios -- --print native-static-libs 2>&1 | tee build/rust-build.log
 
 plutil -lint xcode/ReRBRProbe/Info.plist xcode/ReRBRProbe.xcodeproj/project.pbxproj
 xcodebuild -list -project xcode/ReRBRProbe.xcodeproj
@@ -54,7 +56,7 @@ grep -Eq 'platform[[:space:]]+IOS$' build/macho-build.txt
 # A directory called .ipa is not sufficient: this must be a zip with Payload/*.app.
 # Refuse a leftover package so a failed rerun cannot upload an old IPA.
 if [[ -e build/Payload || -e build/ReRBRProbe-unsigned.ipa ]]; then
-    echo "Old package exists. Use a fresh checkout or move ios-probe/build aside before retrying." >&2
+    echo "Old package exists. Use a fresh checkout or move $PROBE_ROOT/build aside before retrying." >&2
     exit 1
 fi
 mkdir build/Payload
