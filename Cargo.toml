@@ -15,7 +15,7 @@ resolver = "2"
 
 [features]
 default = []
-# First integration batch: compile the original camera/math code without changing the triangle.
+# Optional procedural 3D scene using the original camera/math; default stays triangle.
 rerbr-3d = ["dep:rerbr-render-core"]
 
 [lib]

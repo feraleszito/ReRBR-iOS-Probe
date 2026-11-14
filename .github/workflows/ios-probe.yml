@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       build_mode:
-        description: Build configuration (both modes display the triangle)
+        description: Triangle fallback or fixed 3D floor and cube
         required: true
         default: triangle
         type: choice

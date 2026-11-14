@@ -28,7 +28,7 @@ def verify_sources():
     require(dependencies["rerbr-render-core"] == {"path": "vendor/rerbr-render-core", "optional": True},
             "render core must be a local optional dependency")
     require(manifest["features"]["default"] == [], "triangle must remain the default")
-    require(manifest["features"]["rerbr-3d"] == ["dep:rerbr-render-core"], "math-only integration feature")
+    require(manifest["features"]["rerbr-3d"] == ["dep:rerbr-render-core"], "unexpected 3D feature dependencies")
     require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core"], "unexpected workspace member")
     require(manifest["workspace"]["default-members"] == ["."], "default build must select the triangle app")
     require(dependencies["wgpu"]["version"] == "=30.0.1", "wgpu version must match the probe")
@@ -73,6 +73,8 @@ def verify_sources():
     references = set(re.findall(r"\b[A-F0-9]{24}\b", project))
     require(references == set(definitions), "unresolved Xcode object reference")
     require((ROOT / "src/triangle.wgsl").is_file(), "missing embedded shader")
+    for relative in ("src/scene3d.rs", "src/scene_geometry.rs", "src/scene3d.wgsl"):
+        require((ROOT / relative).is_file(), f"missing optional scene source: {relative}")
     print("PASS: independent manifest, optional math core, upstream hashes, locked versions, Xcode references, plist and XML")
 
 

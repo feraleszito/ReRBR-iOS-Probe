@@ -231,3 +231,56 @@ build were not executed here. Commit and push the updated files, start a new man
 Actions run and select `rerbr-3d`. Only a successful run with that selection can confirm
 the Apple-target feature compilation and IPA packaging; device behavior remains a
 separate check.
+
+## First procedural 3D scene
+
+Implemented a separate app-side `scene3d` pass and pure `scene_geometry` module behind
+`rerbr-3d`. The scene is a one-unit cube resting at Y=0 on a flat ground quad. It uses
+28 position/colour vertices, 42 u16 indices and no assets or textures. Vertex/index
+bytes are serialized explicitly, without unsafe casts or new dependencies. A new WGSL
+shader transforms positions and outputs face colours; this is not the full stage shader.
+
+The original imported `FreeFly` and coordinate module provide the fixed eye/target,
+horizontal FOV and left-handed Y-up view/projection. GPU state uses `coords::FRONT_FACE`
+(clockwise, back-face culling), `Depth32Float`, clear 0 and `Greater` with depth writes.
+Depth is allocated lazily for an active nonzero drawable and recreated when its size
+changes. The original host's suspension, zero-size handling, surface recovery, touch
+background toggle and submission/presentation code are retained.
+
+The default triangle's pipeline, uniform animation and draw pass are wrapped in
+`cfg(not(feature = "rerbr-3d"))`; the shader itself is untouched. Feature builds construct
+only the 3D pass. They reuse the same Metal device and surface and do not change the
+native/Xcode integration, IPA packaging or corrected lipo invocation.
+
+Windows checks with Rust 1.97.1 and the existing private offline Cargo cache:
+
+| Check | Result |
+| --- | --- |
+| First geometry-only test step | PASS: index/finite/area checks, outward normals, complete cube framing, reverse-depth ordering |
+| `cargo check --offline --locked --lib --no-default-features --features rerbr-3d` | PASS |
+| `cargo test --offline --locked --workspace --no-default-features --features rerbr-3d` | PASS: 30 tests (21 imported, 2 existing math integration, 5 geometry/camera tests, 2 WGSL validations) |
+| `cargo clippy --offline --locked --workspace --all-targets --no-default-features --features rerbr-3d -- -D warnings` | PASS |
+| `cargo test --offline --locked -p rerbr-probe --no-default-features` | PASS: unchanged triangle shader test; feature-specific tests disabled |
+| `cargo clippy --offline --locked -p rerbr-probe --all-targets --no-default-features -- -D warnings` | PASS |
+| `cargo fmt --all -- --check` | PASS |
+| Triangle and host source comparison | PASS: after ignoring formatting whitespace, triangle initialization, animation and draw calculations match the preceding source; lifecycle/touch handlers and submission/presentation tail also match |
+| Import/fallback integrity | PASS: all eight vendor files match the prior snapshot byte-for-byte; triangle shader SHA-256 unchanged |
+| Workflow copies | PASS: hashes match; only selector description changed to describe floor/cube mode |
+
+The geometry tests check finite vertices, valid indices/nondegenerate triangles, outward
+cube/upward floor normals, clockwise projected front faces, whole-cube visibility across
+portrait/landscape aspects, and a shared camera ray where the cube must win the reverse
+depth comparison against the floor. These are CPU/shader checks, not rendered-image tests.
+
+Created `src/scene3d.rs`, `src/scene3d.wgsl`, `src/scene_geometry.rs` and
+`tests/scene_geometry.rs`. Modified `src/lib.rs`, `tests/shader.rs`, the Cargo feature
+comment (no dependency/lockfile changes), preflight source checks, workflow descriptions,
+README and this record. No original engine or vendor files were edited. The build script,
+Xcode project, native entry, signing/package checks and triangle shader were not changed.
+
+The updated Python preflight was not run locally (no usable Python interpreter).
+Neither Bash/Xcode/iOS compilation nor Metal pipeline creation and drawing were run
+on this Windows host. There is no before/after render or iPad screenshot for this step.
+A new Actions run with `rerbr-3d`, installation on the iPad, portrait/landscape captures,
+depth/touch/lifecycle checks and a triangle-fallback comparison are still required.
+Do not treat these local results as confirmation that the scene works on iPadOS.

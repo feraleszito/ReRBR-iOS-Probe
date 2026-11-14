@@ -1,10 +1,10 @@
 # ReRBRProbe
 
 An independent iPadOS graphics experiment: Rust, winit **0.30.13**, wgpu **30.0.1**,
-and the **Metal** backend. It draws a dark background and a rotating, coloured triangle.
-Touch the screen to switch the background. The optional `rerbr-3d` feature now compiles
-original reRBR coordinate and camera mathematics from a small local library. It does not
-change the triangle or introduce a 3D drawing mode in this batch. There are no original
+and the **Metal** backend. By default it draws a dark background and a rotating, coloured
+triangle. With `rerbr-3d`, it draws a procedural floor and cube through a fixed camera
+using the original reRBR coordinate/camera library. Touch the screen to switch the
+background in either configuration. There are no original
 game-system crates, physics, SDL, audio, Richard Burns Rally files, RallySimFans files,
 textures or downloads of game content.
 
@@ -20,8 +20,11 @@ development dependency for validating the embedded WGSL shader.
 | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml` | Independent Rust build and fixed versions |
 | `src/lib.rs` | C entry point, winit lifecycle, Metal device, drawing and touch handling |
 | `src/triangle.wgsl` | Embedded animated triangle shader; no optional GPU features |
+| `src/scene3d.rs`, `src/scene3d.wgsl` | Optional indexed 3D pass, fixed camera uniform and reversed-depth target |
+| `src/scene_geometry.rs` | Procedural floor/cube and fixed camera; no commercial data |
 | `tests/shader.rs` | Naga parsing and validation without optional shader capabilities |
 | `tests/core_math.rs` | Optional-dependency projection/orbit integration tests, enabled by `rerbr-3d` |
+| `tests/scene_geometry.rs` | Geometry, visibility, clockwise winding and depth-order checks |
 | `vendor/rerbr-render-core/` | Original coordinate/camera sources and tests, license and provenance hashes |
 | `xcode/ReRBRProbe/main.m` | Native entry, diagnostic file, call into the Rust static library |
 | `xcode/ReRBRProbe/Info.plist`, `LaunchScreen.storyboard` | iPad bundle configuration and launch screen |
@@ -30,13 +33,14 @@ development dependency for validating the embedded WGSL shader.
 | `scripts/verify.py` | Standard-library source/package checks (Python 3.11+) |
 | `github-actions/ios-probe.yml` | Manual GitHub Actions workflow template |
 
-## First reRBR integration batch: camera and coordinates only
+## ReRBR camera library and optional procedural 3D scene
 
 The app's default feature set is empty. Its default workspace member is the app itself,
 so the existing build still selects the triangle. `rerbr-3d` enables the optional path
-dependency `vendor/rerbr-render-core`; **both feature configurations still show the
-same triangle**. The app's `src/lib.rs`, shader, touch handling and native/Xcode files
-were not changed for this batch.
+dependency `vendor/rerbr-render-core` and the app's separate floor/cube pass. The original
+triangle shader, pipeline state and animation/draw calculations are retained behind
+`cfg(not(feature = "rerbr-3d"))`. The touch and lifecycle handlers, native entry and Xcode
+files are unchanged. No 3D buffers or depth target are created in triangle mode.
 
 The core library contains verbatim copies of `coords.rs`, `camera.rs` and `triple.rs`
 from the original `rbr-render` source. `triple.rs` supplies types used by the camera;
@@ -44,8 +48,21 @@ it is only mathematics and does not create windows. The files retain their 21 up
 unit tests. The two additional host integration tests check reverse-depth ordering and
 orbit projection across portrait/landscape aspect ratios without opening a GPU device.
 The library depends only on pinned `glam 0.33.12` and `wgpu 30.0.1` (the latter supplies
-the front-face enum; the core creates no GPU resources). No renderer pass, mesh, ground,
-cube, new shader, asset loader, physics or sound was added.
+the front-face enum; the core creates no GPU resources). No vendor file was changed
+for this new drawing step. Its `UPSTREAM.md` describes the original math-only import.
+
+The new geometry and draw pass live entirely in the app, not in the vendored library.
+They contain 28 vertices and 42 indices (12 cube triangles plus two ground triangles),
+constant face colours and a 64-byte view-projection uniform. The fixed eye is
+`(3, 2.5, -4)`, looking at `(0, 0.5, 0)` through reRBR's `FreeFly` camera and horizontal
+field of view. Projection follows the drawable's aspect after rotation/resize.
+
+The coordinate system is left-handed with Y up, faces use reRBR's `FrontFace::Cw`,
+and the `Depth32Float` target uses reverse-Z: clear to `coords::DEPTH_CLEAR` (0),
+compare `Greater`, write depth. The target is recreated for the drawable's new size
+when drawing resumes. The host still skips zero-sized/suspended drawables. This is a
+new diagnostic pass using reRBR mathematics, not the complete original stage renderer.
+There are no textures, lighting systems, physics, audio, asset files or new dependencies.
 
 See `vendor/rerbr-render-core/UPSTREAM.md` for original paths and SHA-256 hashes, and
 `vendor/rerbr-render-core/LICENSE` for the retained license. The preflight verifier allows
@@ -56,7 +73,7 @@ From the standalone repository root, run:
 ```sh
 # Existing app and triangle test, without enabling the imported library.
 cargo test --locked -p rerbr-probe --no-default-features
-# Imported unit tests, two integration tests, and the unchanged triangle shader test.
+# Imported math tests, projection/geometry tests and both shader validations.
 cargo test --locked --workspace --all-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
@@ -68,12 +85,13 @@ selection from `PROBE_MODE` (default `triangle`) and rejects any other value:
 | Selection | Cargo feature flags | macOS host tests | Image shown |
 | --- | --- | --- | --- |
 | `triangle` (default) | `--no-default-features` | Existing triangle shader test | Triangle |
-| `rerbr-3d` | `--no-default-features --features rerbr-3d` | Full workspace: upstream math, integration and shader tests | Same triangle |
+| `rerbr-3d` | `--no-default-features --features rerbr-3d` | Full workspace: math, geometry and shader tests | Fixed floor and cube |
 
 The selected feature flags are passed to the host tests, iOS Clippy, the **release
 static-library build for `aarch64-apple-ios`**, and a dependency-tree diagnostic. The
 existing Xcode library search path, ARM64 checks, unsigned IPA packaging and signing
-restrictions are unchanged. The feature still adds no geometry or drawing pass.
+restrictions are unchanged. The workflow's selector description is updated for the
+new scene; its commands and artifact paths are unchanged. The build script is unchanged.
 
 On a macOS host with Xcode and the iOS target, an explicit feature-only type check is:
 
@@ -107,8 +125,8 @@ GitHub signing secrets are used to build the unsigned IPA.
    Ensure the workflow is present on the **default branch** so the manual Run workflow
    button appears. Enable Actions if this is a fork with workflows disabled.
 4. Open **Actions > ReRBRProbe unsigned iPadOS > Run workflow**. Choose `build_mode`:
-   **triangle** for the default configuration, or **rerbr-3d** to compile the optional
-   coordinate/camera library for the iPad target. Start a new run using the updated
+   **triangle** for the existing fallback, or **rerbr-3d** for the floor/cube scene using
+   the coordinate/camera library. Start a new run using the updated
    commit; re-running an old job uses its old workflow/script revision.
 5. Download `ReRBRProbe-unsigned-<build_mode>-<run number>`. Extract the artifact ZIP on Windows to obtain
    `ReRBRProbe-unsigned.ipa` and `SHA256SUMS`. The artifact ZIP itself is not the IPA.
@@ -210,10 +228,15 @@ configured here. A macOS ad-hoc signature is not an iPad provisioning profile.
 
 ## Verify on the iPad
 
-1. A dark blue background and a smoothly rotating, colour-pulsing triangle appear.
-   The launch screen alone is a static dark background: it does **not** prove rendering.
+1. In `triangle`, a dark blue background and a rotating, colour-pulsing triangle should
+   appear exactly as before. In `rerbr-3d`, expect a stationary cube with orange, blue
+   and yellow visible faces, resting on a green floor under perspective. The camera
+   and cube do not animate. The launch screen alone is a static dark background:
+   it does **not** prove either render mode.
 2. Touch the screen: the background changes between blue and red tones.
-3. Rotate between portrait and landscape: the triangle keeps its shape and stays centred.
+3. Rotate between portrait and landscape: the triangle keeps its original behavior;
+   in 3D, the cube must stay completely visible and undistorted, above the floor. The
+   floor must not draw over cube faces despite being submitted after them.
 4. Switch apps, lock/unlock, and return several times: drawing resumes without a black
    screen or crash. GPU work stops while the app is suspended. This is a manual requirement,
    not a claim that lifecycle handling has already passed on hardware.
@@ -221,6 +244,9 @@ configured here. A macOS ad-hoc signature is not an iPad provisioning profile.
    Look for the native main-thread diagnostic, `GPU: ... / Metal`, surface dimensions,
    `presented frame 1`, touches, and suspend/resume messages. The BC-support line is
    diagnostic only and does not affect drawing. Export the log when reporting a failure.
+   For 3D, also look for `scene: rerbr-3d; fixed reRBR camera; 28 vertices, 14 triangles;
+   reverse-Z` and depth-resize messages. Capture the scene in both orientations and
+   compare the triangle fallback with the preceding working build.
 
 The animation aims for roughly 60 redraws per second; no hardware frame-rate measurement
 has been made. Device loss beyond surface recreation is not recovered automatically.
@@ -246,7 +272,7 @@ macOS with full Xcode and the iPhoneOS SDK can perform the intended Apple build 
 ```sh
 rustup target add aarch64-apple-ios
 DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer bash scripts/build-ios.sh
-# Optional camera/math feature; the same unsigned IPA packaging and triangle image.
+# Optional floor/cube scene; the same unsigned IPA packaging.
 PROBE_MODE=rerbr-3d DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer bash scripts/build-ios.sh
 ```
 
@@ -260,10 +286,11 @@ The owner reports that the triangle runs on their iPad mini A17 Pro, and that th
 default Actions build also succeeded after adding the local math library. Those are
 the baseline results, not new hardware results from this editing environment.
 
-The new selector and the `rerbr-3d` configuration have only been checked from Windows.
-A new Actions run selecting `rerbr-3d` is required before claiming that feature compiles
-for iOS. Subsequent device checks remain separate. Local results are recorded in
-`VALIDATION.md`; they do not establish new iPadOS compatibility.
+The new floor/cube pass has only been checked from Windows. A new Actions run selecting
+`rerbr-3d` is required to validate the Apple build, followed by physical-iPad checks of
+the image, depth, touch and lifecycle. The fallback also needs a new default build and
+visual comparison. Local results are recorded in `VALIDATION.md`; they do not establish
+that this scene compiles or renders on iPadOS.
 
 ## References
 

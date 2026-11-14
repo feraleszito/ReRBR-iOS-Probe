@@ -11,6 +11,11 @@ use winit::event::{TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+#[cfg(feature = "rerbr-3d")]
+mod scene3d;
+#[cfg(feature = "rerbr-3d")]
+mod scene_geometry;
+
 const FRAME_PERIOD: Duration = Duration::from_nanos(16_666_667);
 
 /// Called once by xcode/ReRBRProbe/main.m on the process's main thread.
@@ -123,11 +128,17 @@ struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    #[cfg(not(feature = "rerbr-3d"))]
     pipeline: wgpu::RenderPipeline,
+    #[cfg(not(feature = "rerbr-3d"))]
     uniform: wgpu::Buffer,
+    #[cfg(not(feature = "rerbr-3d"))]
     bind_group: wgpu::BindGroup,
+    #[cfg(feature = "rerbr-3d")]
+    scene: scene3d::Scene3d,
     size: PhysicalSize<u32>,
     reconfigure: bool,
+    #[cfg(not(feature = "rerbr-3d"))]
     started: Instant,
     frames: u64,
     alternate_background: bool,
@@ -174,45 +185,51 @@ impl Renderer {
             config.width, config.height, config.format
         );
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("animated triangle"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("triangle.wgsl").into()),
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("probe triangle pipeline"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(config.format.into())],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("16-byte animation uniform"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("animation"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform.as_entire_binding(),
-            }],
-        });
+        #[cfg(not(feature = "rerbr-3d"))]
+        let (pipeline, uniform, bind_group) = {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("animated triangle"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("triangle.wgsl").into()),
+            });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("probe triangle pipeline"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(config.format.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+            let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("16-byte animation uniform"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("animation"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                }],
+            });
+            (pipeline, uniform, bind_group)
+        };
+        #[cfg(feature = "rerbr-3d")]
+        let scene = scene3d::Scene3d::new(&device, config.format);
         Ok(Self {
             surface,
             window,
@@ -220,11 +237,17 @@ impl Renderer {
             device,
             queue,
             config,
+            #[cfg(not(feature = "rerbr-3d"))]
             pipeline,
+            #[cfg(not(feature = "rerbr-3d"))]
             uniform,
+            #[cfg(not(feature = "rerbr-3d"))]
             bind_group,
+            #[cfg(feature = "rerbr-3d")]
+            scene,
             size,
             reconfigure: true,
+            #[cfg(not(feature = "rerbr-3d"))]
             started: Instant::now(),
             frames: 0,
             alternate_background: false,
@@ -271,19 +294,22 @@ impl Renderer {
                 panic!("surface acquisition validation error")
             }
         };
-        let seconds = self.started.elapsed().as_secs_f32();
-        let angle = seconds * 0.7;
-        let values = [
-            angle.cos(),
-            angle.sin(),
-            self.config.width as f32 / self.config.height as f32,
-            0.85 + 0.15 * seconds.sin(),
-        ];
-        let mut bytes = [0u8; 16];
-        for (out, value) in bytes.chunks_exact_mut(4).zip(values) {
-            out.copy_from_slice(&value.to_ne_bytes());
+        #[cfg(not(feature = "rerbr-3d"))]
+        {
+            let seconds = self.started.elapsed().as_secs_f32();
+            let angle = seconds * 0.7;
+            let values = [
+                angle.cos(),
+                angle.sin(),
+                self.config.width as f32 / self.config.height as f32,
+                0.85 + 0.15 * seconds.sin(),
+            ];
+            let mut bytes = [0u8; 16];
+            for (out, value) in bytes.chunks_exact_mut(4).zip(values) {
+                out.copy_from_slice(&value.to_ne_bytes());
+            }
+            self.queue.write_buffer(&self.uniform, 0, &bytes);
         }
-        self.queue.write_buffer(&self.uniform, 0, &bytes);
         let view = frame.texture.create_view(&Default::default());
         let background = if self.alternate_background {
             wgpu::Color {
@@ -301,6 +327,16 @@ impl Renderer {
             }
         };
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        #[cfg(feature = "rerbr-3d")]
+        self.scene.draw(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &view,
+            (self.config.width, self.config.height),
+            background,
+        );
+        #[cfg(not(feature = "rerbr-3d"))]
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("probe frame"),
