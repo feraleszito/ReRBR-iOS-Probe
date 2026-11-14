@@ -134,3 +134,55 @@ Only `scripts/build-ios.sh` and this validation record changed. No local executi
 of `lipo`, Xcode or the IPA was possible on Windows. The reported ARM64 archive is
 evidence from the owner's run, not a successful IPA build. A fresh Actions run and
 subsequent device installation/rendering checks remain required.
+
+## First camera/coordinate integration batch
+
+The owner reports that the preceding triangle build now runs on their iPad mini A17 Pro,
+including animation and touch-driven background changes. This report establishes the
+baseline; the checks below were performed locally on Windows, not on the iPad.
+
+Added the optional local `vendor/rerbr-render-core` workspace package and the `rerbr-3d`
+feature. The app's default features remain empty and its default workspace member is
+the app itself. This feature only compiles the imported mathematics; it does not change
+the triangle or add a scene, mesh, shader or drawing pass.
+
+The original `coords.rs`, `camera.rs`, `triple.rs`, GPLv3 license text and formatting
+configuration were copied byte-for-byte and documented with hashes in `UPSTREAM.md`.
+The additional crate scaffolding uses the upstream GPL-3.0-or-later package license.
+The mathematical triple-screen types are a dependency of the original camera API,
+not an implementation of additional iPad windows. No game-system crate is imported.
+
+Before editing the preflight verifier, the owner was informed that its existing closed
+dependency list would reject the newly authorized library. Only `scripts/verify.py`
+was adjusted to allow the exact local optional dependency, check the disabled-by-default
+feature and validate the provenance hashes. The workflow and `scripts/build-ios.sh`
+were not changed.
+
+| Windows check (Rust 1.97.1, existing private offline Cargo cache) | Result |
+| --- | --- |
+| `cargo check --offline --lib --features rerbr-3d` | PASS; lockfile added the local package and pinned glam 0.33.12 |
+| `cargo test --offline --locked --workspace --all-features` | PASS: 21 upstream math tests, 2 feature-gated integration tests, 1 unchanged triangle shader test; 24 total |
+| `cargo test --offline --locked -p rerbr-probe --no-default-features` | PASS: triangle shader test; optional math integration tests disabled |
+| `cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings` | PASS |
+| `cargo clippy --offline --locked -p rerbr-probe --all-targets --no-default-features -- -D warnings` | PASS |
+| `cargo fmt --all -- --check` | PASS, including unchanged imported sources under their original formatting configuration |
+| Import identity and provenance | PASS: five copied files match their originals and all five documented SHA-256 values |
+| Dependency selection | PASS: default normal dependency tree contains only futures-executor, wgpu and winit; the optional tree adds rerbr-render-core and glam |
+| Standalone-root relocation | PASS: copied sources/manifests/vendor package into an ignored directory with no ios-probe wrapper; `cargo metadata --offline --locked --no-deps --features rerbr-3d` resolves that root, both workspace packages and the app-only default member |
+
+The two new mathematical tests exercise near/middle/far reverse-depth ordering and an
+orbit camera's target/eye projection across portrait and landscape aspect ratios. They
+open no GPU device, window or commercial data file. The original triangle implementation,
+shader, touch code, native entry, Xcode project, workflows and iOS build script were not
+edited. The original reRBR engine and parent workspace files were not edited.
+
+The updated Python preflight itself was not executed locally: no usable Python
+interpreter is available in this Windows environment. The provenance regex and all five
+hashes were checked with PowerShell instead. All Cargo commands used `.validation/`
+for cache, build and temporary files and required no dependency downloads.
+
+The existing workflow still builds only the default triangle and does not enable the
+new feature or run the imported core's tests. Neither the updated default package nor
+the optional feature has been built for iOS in this editing environment. A new Actions
+default build and a later explicitly enabled Apple-target feature build are required
+before making new iPadOS compatibility claims.

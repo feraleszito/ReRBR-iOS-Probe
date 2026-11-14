@@ -2,8 +2,11 @@
 
 An independent iPadOS graphics experiment: Rust, winit **0.30.13**, wgpu **30.0.1**,
 and the **Metal** backend. It draws a dark background and a rotating, coloured triangle.
-Touch the screen to switch the background. It includes no reRBR crates, physics, SDL,
-audio, Richard Burns Rally files, RallySimFans files, textures or downloads of game content.
+Touch the screen to switch the background. The optional `rerbr-3d` feature now compiles
+original reRBR coordinate and camera mathematics from a small local library. It does not
+change the triangle or introduce a 3D drawing mode in this batch. There are no original
+game-system crates, physics, SDL, audio, Richard Burns Rally files, RallySimFans files,
+textures or downloads of game content.
 
 The Cargo manifest declares its own workspace, lockfile and toolchain (**Rust 1.97.1**).
 Building this directory does not build or alter the parent workspace. Runtime dependencies
@@ -18,12 +21,58 @@ development dependency for validating the embedded WGSL shader.
 | `src/lib.rs` | C entry point, winit lifecycle, Metal device, drawing and touch handling |
 | `src/triangle.wgsl` | Embedded animated triangle shader; no optional GPU features |
 | `tests/shader.rs` | Naga parsing and validation without optional shader capabilities |
+| `tests/core_math.rs` | Optional-dependency projection/orbit integration tests, enabled by `rerbr-3d` |
+| `vendor/rerbr-render-core/` | Original coordinate/camera sources and tests, license and provenance hashes |
 | `xcode/ReRBRProbe/main.m` | Native entry, diagnostic file, call into the Rust static library |
 | `xcode/ReRBRProbe/Info.plist`, `LaunchScreen.storyboard` | iPad bundle configuration and launch screen |
 | `xcode/ReRBRProbe.xcodeproj/` | Minimal Xcode project and shared Release scheme |
 | `scripts/build-ios.sh` | Build the static library and app, package and inspect the unsigned IPA |
 | `scripts/verify.py` | Standard-library source/package checks (Python 3.11+) |
 | `github-actions/ios-probe.yml` | Manual GitHub Actions workflow template |
+
+## First reRBR integration batch: camera and coordinates only
+
+The app's default feature set is empty. Its default workspace member is the app itself,
+so the existing build still selects the triangle. `rerbr-3d` enables the optional path
+dependency `vendor/rerbr-render-core`; **both feature configurations still show the
+same triangle**. The app's `src/lib.rs`, shader, touch handling and native/Xcode files
+were not changed for this batch.
+
+The core library contains verbatim copies of `coords.rs`, `camera.rs` and `triple.rs`
+from the original `rbr-render` source. `triple.rs` supplies types used by the camera;
+it is only mathematics and does not create windows. The files retain their 21 upstream
+unit tests. The two additional host integration tests check reverse-depth ordering and
+orbit projection across portrait/landscape aspect ratios without opening a GPU device.
+The library depends only on pinned `glam 0.33.12` and `wgpu 30.0.1` (the latter supplies
+the front-face enum; the core creates no GPU resources). No renderer pass, mesh, ground,
+cube, new shader, asset loader, physics or sound was added.
+
+See `vendor/rerbr-render-core/UPSTREAM.md` for original paths and SHA-256 hashes, and
+`vendor/rerbr-render-core/LICENSE` for the retained license. The preflight verifier allows
+only this additional local optional dependency and checks the imported source hashes.
+
+From the standalone repository root, run:
+
+```sh
+# Existing app and triangle test, without enabling the imported library.
+cargo test --locked -p rerbr-probe --no-default-features
+# Imported unit tests, two integration tests, and the unchanged triangle shader test.
+cargo test --locked --workspace --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+```
+
+The workflow and iOS build script are unchanged. Their default build still produces
+the triangle app; they do **not** enable `rerbr-3d` or run the imported core's tests yet.
+On a macOS host with Xcode and the iOS target, an explicit feature compilation would be:
+
+```sh
+cargo check --locked --lib --target aarch64-apple-ios --features rerbr-3d
+```
+
+That Apple-target feature check has not been performed here. Windows mathematics and
+type checks do not establish iPadOS compatibility. Automated Apple-target feature
+verification is a separate next step, requiring a deliberate workflow/script change.
 
 ## Build on GitHub Actions from Windows
 
@@ -36,8 +85,8 @@ supported Xcode version. No Apple account, signing certificate, paid membership 
 GitHub signing secrets are used to build the unsigned IPA.
 
 1. Put the **contents** of this experiment directly at the root of your standalone
-   `ReRBR-iOS-Probe` repository. `Cargo.toml`, `Cargo.lock`, `scripts/`, `src/`, `tests/`
-   and `xcode/` must be at the root. Do not create another `ios-probe/` directory there.
+   `ReRBR-iOS-Probe` repository. `Cargo.toml`, `Cargo.lock`, `scripts/`, `src/`, `tests/`,
+   `vendor/` and `xcode/` must be at the root. Do not create another `ios-probe/` directory there.
 2. GitHub discovers workflows **only** under the repository root's `.github/workflows/`.
    The activated file must be `.github/workflows/ios-probe.yml`, copied from
    `github-actions/ios-probe.yml`. The template alone is not discoverable.
@@ -65,6 +114,7 @@ ReRBR-iOS-Probe/
   scripts/verify.py
   src/
   tests/
+  vendor/rerbr-render-core/
   xcode/
 ```
 
@@ -183,11 +233,14 @@ Do not run the parent reRBR build/check script for this isolated experiment.
 
 ## Validation status
 
-The iOS/Xcode build, unsigned IPA generation, installation, Metal rendering and visual
-checks **have not been executed in this Windows environment**. A successful Actions run is
-required to validate Apple-specific compilation, native framework linking and storyboard
-compilation. Hardware verification then requires the actual iPad. Local check results are
-recorded in `VALIDATION.md`; they do not establish iOS compatibility.
+The owner reports that the preceding triangle build compiled through Actions and runs
+on their iPad mini A17 Pro, including touch-driven background changes. That is the
+functional baseline, not a new hardware result from this editing environment.
+
+This camera/coordinate integration batch has only been checked on Windows. A new Actions
+run is still needed for the updated package's default build, and a future explicit
+`rerbr-3d` Apple-target build is needed before claiming that feature compiles for iOS.
+Local check results are recorded in `VALIDATION.md`; they do not establish iOS compatibility.
 
 ## References
 

@@ -1,6 +1,7 @@
 """Source/package preflight using only Python 3.11+ standard-library modules."""
 
 import argparse
+import hashlib
 import plistlib
 import re
 import struct
@@ -22,16 +23,41 @@ def verify_sources():
     require("workspace" in manifest, "probe must have an independent workspace")
     require("staticlib" in manifest["lib"]["crate-type"], "Rust library must include staticlib")
     dependencies = manifest["dependencies"]
-    require(set(dependencies) == {"wgpu", "winit", "futures-executor"}, "unexpected runtime dependency")
+    require(set(dependencies) == {"wgpu", "winit", "futures-executor", "rerbr-render-core"},
+            "unexpected runtime dependency")
+    require(dependencies["rerbr-render-core"] == {"path": "vendor/rerbr-render-core", "optional": True},
+            "render core must be a local optional dependency")
+    require(manifest["features"]["default"] == [], "triangle must remain the default")
+    require(manifest["features"]["rerbr-3d"] == ["dep:rerbr-render-core"], "math-only integration feature")
+    require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core"], "unexpected workspace member")
+    require(manifest["workspace"]["default-members"] == ["."], "default build must select the triangle app")
     require(dependencies["wgpu"]["version"] == "=30.0.1", "wgpu version must match the probe")
     require(dependencies["winit"]["version"] == "=0.30.13", "winit version must match the probe")
     require(set(dependencies["wgpu"]["features"]) == {"std", "metal", "wgsl"}, "Metal-only wgpu features")
     require(dependencies["wgpu"]["default-features"] is False, "disable default wgpu backends")
     lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
     versions = {p["name"]: p["version"] for p in lock["package"]}
-    for name, version in (("wgpu", "30.0.1"), ("winit", "0.30.13"), ("futures-executor", "0.3.34")):
+    for name, version in (("wgpu", "30.0.1"), ("winit", "0.30.13"), ("futures-executor", "0.3.34"),
+                          ("rerbr-render-core", "0.1.0"), ("glam", "0.33.12")):
         require(versions.get(name) == version, f"locked {name} version")
     require(not any(name.startswith("rbr-") for name in versions), "probe must not depend on game crates")
+    core = ROOT / "vendor/rerbr-render-core"
+    core_manifest = tomllib.loads((core / "Cargo.toml").read_text())
+    require(core_manifest["package"]["license"] == "GPL-3.0-or-later", "retain the upstream license")
+    require(core_manifest["dependencies"] == {
+        "glam": "=0.33.12",
+        "wgpu": {"version": "=30.0.1", "default-features": False, "features": ["std"]},
+    }, "render core must contain only coordinate/camera dependencies")
+    provenance = (core / "UPSTREAM.md").read_text()
+    imported = dict(re.findall(
+        r"^\| (src/\S+|LICENSE|rustfmt\.toml) \| [^|]+ \| `([0-9a-f]{64})` \|$",
+        provenance, re.MULTILINE,
+    ))
+    require(set(imported) == {"src/coords.rs", "src/camera.rs", "src/triple.rs", "LICENSE", "rustfmt.toml"},
+            "missing upstream provenance hashes")
+    for relative, expected in imported.items():
+        require(hashlib.sha256((core / relative).read_bytes()).hexdigest() == expected,
+                f"upstream bytes changed: {relative}")
     for relative in (
         "xcode/ReRBRProbe/LaunchScreen.storyboard",
         "xcode/ReRBRProbe.xcodeproj/xcshareddata/xcschemes/ReRBRProbe.xcscheme",
@@ -47,7 +73,7 @@ def verify_sources():
     references = set(re.findall(r"\b[A-F0-9]{24}\b", project))
     require(references == set(definitions), "unresolved Xcode object reference")
     require((ROOT / "src/triangle.wgsl").is_file(), "missing embedded shader")
-    print("PASS: independent manifest, locked versions, Xcode references, plist and XML")
+    print("PASS: independent manifest, optional math core, upstream hashes, locked versions, Xcode references, plist and XML")
 
 
 def verify_ipa(path):

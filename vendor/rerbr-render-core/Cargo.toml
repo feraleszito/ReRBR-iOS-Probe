@@ -1,0 +1,14 @@
+[package]
+name = "rerbr-render-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+publish = false
+description = "Original reRBR coordinate and camera mathematics, without game systems or assets"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+glam = "=0.33.12"
+# coords::FRONT_FACE uses wgpu's public type. This crate creates no GPU resources;
+# the host app remains responsible for enabling Metal and initializing its device.
+wgpu = { version = "=30.0.1", default-features = false, features = ["std"] }
