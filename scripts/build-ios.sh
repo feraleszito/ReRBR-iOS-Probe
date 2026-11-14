@@ -12,7 +12,10 @@ fi
 # Resolve everything from the script's parent, whether the probe is a repository root
 # or a local subdirectory. Never use the caller's Cargo workspace or target directory.
 MANIFEST="$PROBE_ROOT/Cargo.toml"
+RUST_TARGET=aarch64-apple-ios
 export CARGO_TARGET_DIR="$PROBE_ROOT/target"
+RUST_LIBRARY_DIR="$CARGO_TARGET_DIR/$RUST_TARGET/release"
+RUST_STATIC_LIBRARY="$RUST_LIBRARY_DIR/librerbr_probe.a"
 export IPHONEOS_DEPLOYMENT_TARGET=18.0
 export SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
 mkdir -p build
@@ -30,22 +33,41 @@ cargo fmt --manifest-path "$MANIFEST" --all -- --check
 # Run shader validation on the macOS host. This is not a device/rendering test.
 # SDKROOT must not point to iPhoneOS when compiling macOS test executables.
 env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET cargo test --manifest-path "$MANIFEST" --locked --test shader 2>&1 | tee build/shader-test.log
-cargo clippy --manifest-path "$MANIFEST" --locked --lib --target aarch64-apple-ios -- -D warnings
-cargo rustc --manifest-path "$MANIFEST" --locked --release --lib --target aarch64-apple-ios -- --print native-static-libs 2>&1 | tee build/rust-build.log
+cargo clippy --manifest-path "$MANIFEST" --locked --lib --target "$RUST_TARGET" -- -D warnings
+cargo rustc --manifest-path "$MANIFEST" --locked --release --lib --target "$RUST_TARGET" -- --print native-static-libs 2>&1 | tee build/rust-build.log
+
+# Xcode links the archive as -lrerbr_probe. Verify Cargo produced it before asking
+# Xcode to link, and supply the same directory to its LIBRARY_SEARCH_PATHS setting.
+if [[ ! -s "$RUST_STATIC_LIBRARY" ]]; then
+    echo "::error::Cargo did not produce the expected static library: $RUST_STATIC_LIBRARY" >&2
+    exit 1
+fi
+{
+    echo "Rust target: $RUST_TARGET"
+    echo "Cargo target directory: $CARGO_TARGET_DIR"
+    echo "Static library: $RUST_STATIC_LIBRARY"
+    ls -lh "$RUST_STATIC_LIBRARY"
+    xcrun lipo -info "$RUST_STATIC_LIBRARY"
+    xcrun lipo -verify_arch arm64 "$RUST_STATIC_LIBRARY"
+} 2>&1 | tee build/rust-library.txt
 
 plutil -lint xcode/ReRBRProbe/Info.plist xcode/ReRBRProbe.xcodeproj/project.pbxproj
 xcodebuild -list -project xcode/ReRBRProbe.xcodeproj
-xcodebuild \
-    -project xcode/ReRBRProbe.xcodeproj \
-    -scheme ReRBRProbe \
-    -configuration Release \
-    -sdk iphoneos \
-    -destination 'generic/platform=iOS' \
-    -derivedDataPath "$PROBE_ROOT/build/DerivedData" \
-    CODE_SIGNING_ALLOWED=NO \
-    CODE_SIGNING_REQUIRED=NO \
-    'CODE_SIGN_IDENTITY=' \
-    build 2>&1 | tee build/xcode-build.log
+XCODE_ARGS=(
+    -project "$PROBE_ROOT/xcode/ReRBRProbe.xcodeproj"
+    -scheme ReRBRProbe
+    -configuration Release
+    -sdk iphoneos
+    -destination 'generic/platform=iOS'
+    -derivedDataPath "$PROBE_ROOT/build/DerivedData"
+    "RUST_LIBRARY_DIR=$RUST_LIBRARY_DIR"
+    CODE_SIGNING_ALLOWED=NO
+    CODE_SIGNING_REQUIRED=NO
+    'CODE_SIGN_IDENTITY='
+)
+# Use identical arguments for diagnosis and build, including the absolute Rust path.
+xcodebuild "${XCODE_ARGS[@]}" -showBuildSettings > build/xcode-settings.txt
+xcodebuild "${XCODE_ARGS[@]}" build 2>&1 | tee build/xcode-build.log
 
 APP="$PROBE_ROOT/build/DerivedData/Build/Products/Release-iphoneos/ReRBRProbe.app"
 test -f "$APP/ReRBRProbe"

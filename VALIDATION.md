@@ -65,3 +65,44 @@ Windows checks for this correction:
 No Rust or shader implementation changed, so their earlier checks were not repeated.
 These are path/metadata checks, not a Bash, Xcode, IPA or hardware test. The corrected
 workflow must be copied to the standalone repository, committed, pushed and run again.
+
+## Static library linker search correction
+
+The owner reported that the next Actions run reached Xcode and failed with
+`ld: library 'rerbr_probe' not found` (exit 65). The available project referenced
+`../target/aarch64-apple-ios/release/librerbr_probe.a` in its Frameworks link phase,
+but did not declare `LIBRARY_SEARCH_PATHS`. The reported error is consistent with
+Xcode linking by name (`-lrerbr_probe`) without the Cargo output directory in the
+linker's search paths. The supplied error excerpt does not independently establish
+whether the archive existed in that run; the new build guard checks this explicitly.
+
+Changes:
+
+- Xcode now defines `RUST_LIBRARY_DIR` and adds it to `LIBRARY_SEARCH_PATHS`.
+- The script derives the expected archive path from its own `CARGO_TARGET_DIR`, the
+  `aarch64-apple-ios` target and the release profile. It passes that same absolute
+  directory to Xcode as a build setting override.
+- Before invoking Xcode, the script rejects a missing/empty archive and uses `lipo`
+  to inspect it and verify ARM64. The archive path/architecture and effective Xcode
+  build settings are saved as `build/rust-library.txt` and `build/xcode-settings.txt`.
+  Existing workflow globs already upload these files, so neither workflow was changed.
+- `cargo rustc --print native-static-libs` is retained. This print mode performs
+  compilation when used to produce a static library; it is not itself evidence that
+  compilation was skipped ([Rust documentation](https://doc.rust-lang.org/rustc/command-line-arguments/print-options.html#native-static-libs)).
+
+Windows checks for this correction:
+
+| Check | Result |
+| --- | --- |
+| Relocated `cargo metadata --offline --locked --no-deps` | PASS: the copied standalone root resolves `rerbr-probe` and its own target directory |
+| Cargo/Xcode directory resolution | PASS: the script's expected release directory and Xcode's `SRCROOT/../target/aarch64-apple-ios/release` normalize to the same location |
+| Search path wiring | PASS: project adds `RUST_LIBRARY_DIR` to `LIBRARY_SEARCH_PATHS`; script supplies the absolute override |
+| Early archive diagnostics | Source inspection confirms missing/empty-file rejection and ARM64 inspection precede Xcode; effective settings use the same argument array as the build |
+| Relocated plist and shared scheme | PASS: XML parsing with PowerShell |
+| Line endings and diagnostic upload paths | PASS: shell script has LF; existing `build/*.txt` and `build/*.log` globs cover the added logs |
+
+Only `scripts/build-ios.sh`, `xcode/ReRBRProbe.xcodeproj/project.pbxproj`, `README.md`
+and this validation record changed. Cargo files, dependencies, Rust sources, workflows
+and the original reRBR engine were not modified. No iOS compilation, `lipo`, Xcode
+link, IPA creation or hardware execution was performed locally. The fix still requires
+a new Actions run using the updated files; iOS build success has not been confirmed.

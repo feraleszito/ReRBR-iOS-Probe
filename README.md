@@ -76,6 +76,18 @@ is relative to `xcode/`, so it already resolves to the root `target/` directory.
 `scripts/verify.py` also finds the root from its own location; neither requires an
 `ios-probe` directory name.
 
+The archive reference alone is not sufficient for linking: Xcode links it by name as
+`-lrerbr_probe`, so the project explicitly adds `$(RUST_LIBRARY_DIR)` to
+`LIBRARY_SEARCH_PATHS`. That setting defaults to
+`$(SRCROOT)/../target/aarch64-apple-ios/release`. The build script passes the matching
+absolute `RUST_LIBRARY_DIR` to Xcode after checking that Cargo actually created a
+nonempty `librerbr_probe.a` containing ARM64 code. It records that archive's location
+and architecture in `build/rust-library.txt`, and Xcode's effective build settings in
+`build/xcode-settings.txt`. Both files are included in the existing diagnostics artifact.
+If `ld: library 'rerbr_probe' not found` recurs, compare `Static library:` in the first
+file with `RUST_LIBRARY_DIR` and `LIBRARY_SEARCH_PATHS` in the second, then inspect the
+link command in `build/xcode-build.log` for the corresponding `-L` argument.
+
 The job installs the pinned Rust toolchain and `aarch64-apple-ios`, caches only this
 project's target directory, runs source preflight, formatting, a shader validation test
 on the macOS host, iOS clippy, the iOS release build and Xcode. It checks that the IPA
@@ -184,3 +196,4 @@ recorded in `VALIDATION.md`; they do not establish iOS compatibility.
 - [Rust iOS device and simulator targets](https://doc.rust-lang.org/rustc/platform-support/apple-ios.html)
 - [macOS 15 ARM64 runner inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md)
 - [Apple Xcode requirements](https://developer.apple.com/xcode/system-requirements)
+- [Apple library search path build setting](https://developer.apple.com/documentation/xcode/build-settings-reference)

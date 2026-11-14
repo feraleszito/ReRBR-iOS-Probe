@@ -84,6 +84,11 @@
                 CODE_SIGN_IDENTITY = "";
                 GENERATE_INFOPLIST_FILE = NO;
                 INFOPLIST_FILE = ReRBRProbe/Info.plist;
+                RUST_LIBRARY_DIR = "$(SRCROOT)/../target/aarch64-apple-ios/release";
+                LIBRARY_SEARCH_PATHS = (
+                    "$(inherited)",
+                    "$(RUST_LIBRARY_DIR)"
+                );
                 OTHER_LDFLAGS = (
                     "$(inherited)", "-ObjC", "-lc++", "-liconv", "-lobjc", "-Wl,-no_adhoc_codesign",
                     "-framework", UIKit, "-framework", Foundation,
