@@ -1,0 +1,66 @@
+# Manual unsigned device build. Template: ios-probe/github-actions/ios-probe.yml.
+# GitHub discovers the activated copy at .github/workflows/ios-probe.yml only.
+name: ReRBRProbe unsigned iPadOS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      # Use a known installed Xcode, not the runner's changing default.
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Xcode and iPhoneOS SDK
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Install the pinned Rust toolchain and device target
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-apple-ios
+
+      - name: Cache only the independent probe build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ios-probe -> target
+          key: ios-probe-xcode-16.4
+
+      - name: Compile and inspect unsigned device IPA
+        run: bash ios-probe/scripts/build-ios.sh
+
+      - name: Upload unsigned IPA and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReRBRProbe-unsigned-${{ github.run_number }}
+          path: |
+            ios-probe/build/ReRBRProbe-unsigned.ipa
+            ios-probe/build/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReRBRProbe-logs-${{ github.run_number }}
+          path: |
+            ios-probe/build/*.log
+            ios-probe/build/*.txt
+          if-no-files-found: ignore
+          retention-days: 7

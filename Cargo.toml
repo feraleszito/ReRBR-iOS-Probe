@@ -1,0 +1,28 @@
+[package]
+name = "rerbr-probe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+publish = false
+description = "Standalone iPadOS winit/wgpu Metal experiment; no game code or assets"
+license = "GPL-3.0-or-later"
+
+# A nested workspace keeps this experiment independent of ../Cargo.toml and ../Cargo.lock.
+[workspace]
+resolver = "2"
+
+[lib]
+name = "rerbr_probe"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+futures-executor = "=0.3.34"
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "metal", "wgsl"] }
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
+
+[dev-dependencies]
+naga = { version = "=30.0.1", features = ["wgsl-in"] }
+
+[profile.release]
+panic = "abort"
+debug = 1
