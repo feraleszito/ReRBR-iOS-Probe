@@ -48,7 +48,8 @@ fi
     echo "Static library: $RUST_STATIC_LIBRARY"
     ls -lh "$RUST_STATIC_LIBRARY"
     xcrun lipo -info "$RUST_STATIC_LIBRARY"
-    xcrun lipo -verify_arch arm64 "$RUST_STATIC_LIBRARY"
+    # -verify_arch consumes all following arguments as architecture names.
+    xcrun lipo "$RUST_STATIC_LIBRARY" -verify_arch arm64
 } 2>&1 | tee build/rust-library.txt
 
 plutil -lint xcode/ReRBRProbe/Info.plist xcode/ReRBRProbe.xcodeproj/project.pbxproj

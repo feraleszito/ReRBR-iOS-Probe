@@ -106,3 +106,31 @@ and this validation record changed. Cargo files, dependencies, Rust sources, wor
 and the original reRBR engine were not modified. No iOS compilation, `lipo`, Xcode
 link, IPA creation or hardware execution was performed locally. The fix still requires
 a new Actions run using the updated files; iOS build success has not been confirmed.
+
+## lipo argument order correction
+
+The owner reported that the third Actions run found an 85 MB `librerbr_probe.a` and
+`lipo -info` identified it as ARM64, then `-verify_arch` interpreted the archive's
+path as an architecture name. The command had the input file after the architecture
+list. Apple's [lipo manual](https://github.com/apple-oss-distributions/cctools/blob/main/man/lipo.1)
+requires input files before `-verify_arch`, which consumes all following architecture
+arguments. The corrected call is:
+
+```sh
+xcrun lipo "$RUST_STATIC_LIBRARY" -verify_arch arm64
+```
+
+ARM64 validation remains mandatory: a failing `lipo` still stops the script through
+`set -euo pipefail`. The other `lipo -info` and `lipo -archs` calls are unchanged.
+
+Windows source/path checks passed: the corrected argument order is present, the old
+call is absent, fail-on-error remains enabled, and the script has LF line endings.
+For a standalone `ReRBR-iOS-Probe` root, Cargo's target/release directory and Xcode's
+`SRCROOT/../target/aarch64-apple-ios/release` resolve to the same directory; the script
+still supplies that absolute `RUST_LIBRARY_DIR` to Xcode. No Cargo, Xcode, workflow,
+dependency or original engine changes were needed.
+
+Only `scripts/build-ios.sh` and this validation record changed. No local execution
+of `lipo`, Xcode or the IPA was possible on Windows. The reported ARM64 archive is
+evidence from the owner's run, not a successful IPA build. A fresh Actions run and
+subsequent device installation/rendering checks remain required.
