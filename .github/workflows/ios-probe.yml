@@ -5,6 +5,15 @@ name: ReRBRProbe unsigned iPadOS
 
 on:
   workflow_dispatch:
+    inputs:
+      build_mode:
+        description: Build configuration (both modes display the triangle)
+        required: true
+        default: triangle
+        type: choice
+        options:
+          - triangle
+          - rerbr-3d
 
 permissions:
   contents: read
@@ -52,12 +61,14 @@ jobs:
           key: ios-probe-root-xcode-16.4
 
       - name: Compile and inspect unsigned device IPA
+        env:
+          PROBE_MODE: ${{ inputs.build_mode }}
         run: bash scripts/build-ios.sh
 
       - name: Upload unsigned IPA and checksum
         uses: actions/upload-artifact@v4
         with:
-          name: ReRBRProbe-unsigned-${{ github.run_number }}
+          name: ReRBRProbe-unsigned-${{ inputs.build_mode }}-${{ github.run_number }}
           path: |
             build/ReRBRProbe-unsigned.ipa
             build/SHA256SUMS
@@ -68,7 +79,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ReRBRProbe-logs-${{ github.run_number }}
+          name: ReRBRProbe-logs-${{ inputs.build_mode }}-${{ github.run_number }}
           path: |
             build/*.log
             build/*.txt

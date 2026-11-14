@@ -186,3 +186,48 @@ new feature or run the imported core's tests. Neither the updated default packag
 the optional feature has been built for iOS in this editing environment. A new Actions
 default build and a later explicitly enabled Apple-target feature build are required
 before making new iPadOS compatibility claims.
+
+## Optional-feature Actions selector
+
+The owner reports that Actions succeeded with the vendored library present in the
+default triangle configuration. This does not establish that `rerbr-3d` was enabled
+in that build.
+
+Both workflow copies now declare a manual `build_mode` choice: `triangle` (default)
+or `rerbr-3d`. The value is passed as the build step's `PROBE_MODE` environment variable,
+not interpolated into shell commands. The script defaults to `triangle`, whitelists
+the two values and rejects unknown values before invoking the SDK tools.
+
+The selected Cargo argument array always includes `--no-default-features`; only
+`rerbr-3d` appends `--features rerbr-3d`. Nonempty arrays avoid macOS system Bash 3.2's
+empty-array/nounset issue. The same arguments reach the host tests, target Clippy,
+release static-library compilation and dependency-tree diagnostic. In feature mode,
+host tests select the complete workspace; default mode retains the triangle shader test.
+
+The logs record the selected flags in `environment.txt`, dependencies in
+`rust-dependencies.txt` and test results in `host-tests.log`. Artifact labels include
+the selected mode. The IPA filename, Payload layout, checksum, unsigned packaging,
+Xcode settings and corrected file-before-`-verify_arch arm64` order are preserved.
+
+Windows checks using Rust 1.97.1 and the private offline Cargo cache:
+
+| Check | Result |
+| --- | --- |
+| `cargo test --offline --manifest-path Cargo.toml --locked --no-default-features --test shader` | PASS: one existing triangle shader test |
+| `cargo test --offline --manifest-path Cargo.toml --locked --no-default-features --features rerbr-3d --workspace` | PASS: 24 tests, including 21 imported math tests and two feature-gated integration tests |
+| Host `cargo clippy --offline --manifest-path Cargo.toml --locked --lib` with each mode's feature flags and `-- -D warnings` | PASS in both configurations; iOS target compilation was not run |
+| `cargo fmt --all -- --check` | PASS |
+| Host dependency trees using each mode's flags | PASS: rerbr-render-core/glam appear only in feature mode |
+| Script inspection | All four feature-sensitive Cargo commands use the selected array; original Xcode/build/IPA section from `plutil -lint` onward is unchanged; corrected lipo call retained |
+| Workflow copies and line endings | PASS: workflow/template SHA-256 values match; script and both workflows have LF line endings |
+
+Changed only `scripts/build-ios.sh`, the two experimental workflow copies, `README.md`
+and this record. Cargo manifests/lockfile, app source, shader, vendored sources, Xcode
+project and original reRBR engine were not changed. No geometry or on-screen behavior
+was added. No dependencies were downloaded for these Windows checks.
+
+Bash/macOS/Xcode are unavailable locally, so the script itself and the iOS feature
+build were not executed here. Commit and push the updated files, start a new manual
+Actions run and select `rerbr-3d`. Only a successful run with that selection can confirm
+the Apple-target feature compilation and IPA packaging; device behavior remains a
+separate check.

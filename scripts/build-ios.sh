@@ -4,6 +4,21 @@ set -euo pipefail
 
 PROBE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROBE_ROOT"
+PROBE_MODE="${PROBE_MODE:-triangle}"
+# Keep arrays nonempty for macOS's system Bash 3.2 with `set -u`.
+CARGO_FEATURE_ARGS=(--no-default-features)
+HOST_TEST_ARGS=(--test shader)
+case "$PROBE_MODE" in
+    triangle) ;;
+    rerbr-3d)
+        CARGO_FEATURE_ARGS+=(--features rerbr-3d)
+        HOST_TEST_ARGS=(--workspace)
+        ;;
+    *)
+        echo "Unknown PROBE_MODE: $PROBE_MODE (expected triangle or rerbr-3d)." >&2
+        exit 1
+        ;;
+esac
 if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "This build requires macOS and full Xcode with the iPhoneOS SDK." >&2
     exit 1
@@ -21,6 +36,10 @@ export SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
 mkdir -p build
 
 {
+    echo "Probe build mode: $PROBE_MODE"
+    printf 'Cargo feature flags:'
+    printf ' %s' "${CARGO_FEATURE_ARGS[@]}"
+    printf '\n'
     uname -m
     xcodebuild -version
     xcrun --sdk iphoneos --show-sdk-version
@@ -30,11 +49,14 @@ mkdir -p build
 
 python3 scripts/verify.py
 cargo fmt --manifest-path "$MANIFEST" --all -- --check
-# Run shader validation on the macOS host. This is not a device/rendering test.
+# Run shader validation on the macOS host. With rerbr-3d, also run the imported
+# camera/coordinate unit tests and feature-gated integration tests.
+# These are not device/rendering tests.
 # SDKROOT must not point to iPhoneOS when compiling macOS test executables.
-env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET cargo test --manifest-path "$MANIFEST" --locked --test shader 2>&1 | tee build/shader-test.log
-cargo clippy --manifest-path "$MANIFEST" --locked --lib --target "$RUST_TARGET" -- -D warnings
-cargo rustc --manifest-path "$MANIFEST" --locked --release --lib --target "$RUST_TARGET" -- --print native-static-libs 2>&1 | tee build/rust-build.log
+env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET cargo test --manifest-path "$MANIFEST" --locked "${CARGO_FEATURE_ARGS[@]}" "${HOST_TEST_ARGS[@]}" 2>&1 | tee build/host-tests.log
+cargo clippy --manifest-path "$MANIFEST" --locked --lib --target "$RUST_TARGET" "${CARGO_FEATURE_ARGS[@]}" -- -D warnings
+cargo rustc --manifest-path "$MANIFEST" --locked --release --lib --target "$RUST_TARGET" "${CARGO_FEATURE_ARGS[@]}" -- --print native-static-libs 2>&1 | tee build/rust-build.log
+cargo tree --manifest-path "$MANIFEST" --locked --target "$RUST_TARGET" "${CARGO_FEATURE_ARGS[@]}" --edges normal --depth 2 > build/rust-dependencies.txt
 
 # Xcode links the archive as -lrerbr_probe. Verify Cargo produced it before asking
 # Xcode to link, and supply the same directory to its LIBRARY_SEARCH_PATHS setting.

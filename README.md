@@ -62,17 +62,28 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
-The workflow and iOS build script are unchanged. Their default build still produces
-the triangle app; they do **not** enable `rerbr-3d` or run the imported core's tests yet.
-On a macOS host with Xcode and the iOS target, an explicit feature compilation would be:
+The workflow now offers a manual `build_mode` choice. The build script reads the same
+selection from `PROBE_MODE` (default `triangle`) and rejects any other value:
+
+| Selection | Cargo feature flags | macOS host tests | Image shown |
+| --- | --- | --- | --- |
+| `triangle` (default) | `--no-default-features` | Existing triangle shader test | Triangle |
+| `rerbr-3d` | `--no-default-features --features rerbr-3d` | Full workspace: upstream math, integration and shader tests | Same triangle |
+
+The selected feature flags are passed to the host tests, iOS Clippy, the **release
+static-library build for `aarch64-apple-ios`**, and a dependency-tree diagnostic. The
+existing Xcode library search path, ARM64 checks, unsigned IPA packaging and signing
+restrictions are unchanged. The feature still adds no geometry or drawing pass.
+
+On a macOS host with Xcode and the iOS target, an explicit feature-only type check is:
 
 ```sh
 cargo check --locked --lib --target aarch64-apple-ios --features rerbr-3d
 ```
 
-That Apple-target feature check has not been performed here. Windows mathematics and
-type checks do not establish iPadOS compatibility. Automated Apple-target feature
-verification is a separate next step, requiring a deliberate workflow/script change.
+The new Apple-target feature build has not been performed here. Windows mathematics
+and type checks do not establish iPadOS compatibility; run Actions with `rerbr-3d` to
+verify the selected configuration.
 
 ## Build on GitHub Actions from Windows
 
@@ -95,8 +106,11 @@ GitHub signing secrets are used to build the unsigned IPA.
 3. Commit the new files, including the root `Cargo.lock`, and push to your own repository.
    Ensure the workflow is present on the **default branch** so the manual Run workflow
    button appears. Enable Actions if this is a fork with workflows disabled.
-4. Open **Actions > ReRBRProbe unsigned iPadOS > Run workflow**.
-5. Download `ReRBRProbe-unsigned-<run number>`. Extract the artifact ZIP on Windows to obtain
+4. Open **Actions > ReRBRProbe unsigned iPadOS > Run workflow**. Choose `build_mode`:
+   **triangle** for the default configuration, or **rerbr-3d** to compile the optional
+   coordinate/camera library for the iPad target. Start a new run using the updated
+   commit; re-running an old job uses its old workflow/script revision.
+5. Download `ReRBRProbe-unsigned-<build_mode>-<run number>`. Extract the artifact ZIP on Windows to obtain
    `ReRBRProbe-unsigned.ipa` and `SHA256SUMS`. The artifact ZIP itself is not the IPA.
 6. Check the IPA hash with `Get-FileHash .\ReRBRProbe-unsigned.ipa -Algorithm SHA256`.
 
@@ -149,6 +163,13 @@ directly; it does not use signing-dependent archive export.
 Logs are uploaded separately even if a build step fails. Artifacts expire after seven
 days. A green job proves compilation and package checks, **not** execution on an iPad.
 There is no simulator or physical-device execution in this workflow.
+
+For the feature build, `build/environment.txt` should report `Probe build mode: rerbr-3d`
+and `Cargo feature flags: --no-default-features --features rerbr-3d`.
+`build/rust-dependencies.txt` should include `rerbr-render-core` and `glam`; the default
+configuration's normal dependency tree should not. Host-test results are in
+`build/host-tests.log`, and iOS Rust compilation output is in `build/rust-build.log`.
+These files appear in `ReRBRProbe-logs-<build_mode>-<run number>`.
 
 Standard GitHub-hosted runners are free for public repositories; private repositories
 consume the account's included usage and may incur charges. Larger runners are not
@@ -225,6 +246,8 @@ macOS with full Xcode and the iPhoneOS SDK can perform the intended Apple build 
 ```sh
 rustup target add aarch64-apple-ios
 DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer bash scripts/build-ios.sh
+# Optional camera/math feature; the same unsigned IPA packaging and triangle image.
+PROBE_MODE=rerbr-3d DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer bash scripts/build-ios.sh
 ```
 
 The script writes only this directory's `target/` and `build/`. It refuses to overwrite a
@@ -233,14 +256,14 @@ Do not run the parent reRBR build/check script for this isolated experiment.
 
 ## Validation status
 
-The owner reports that the preceding triangle build compiled through Actions and runs
-on their iPad mini A17 Pro, including touch-driven background changes. That is the
-functional baseline, not a new hardware result from this editing environment.
+The owner reports that the triangle runs on their iPad mini A17 Pro, and that the
+default Actions build also succeeded after adding the local math library. Those are
+the baseline results, not new hardware results from this editing environment.
 
-This camera/coordinate integration batch has only been checked on Windows. A new Actions
-run is still needed for the updated package's default build, and a future explicit
-`rerbr-3d` Apple-target build is needed before claiming that feature compiles for iOS.
-Local check results are recorded in `VALIDATION.md`; they do not establish iOS compatibility.
+The new selector and the `rerbr-3d` configuration have only been checked from Windows.
+A new Actions run selecting `rerbr-3d` is required before claiming that feature compiles
+for iOS. Subsequent device checks remain separate. Local results are recorded in
+`VALIDATION.md`; they do not establish new iPadOS compatibility.
 
 ## References
 
