@@ -8,8 +8,14 @@ use wgpu::util::DeviceExt;
 
 #[cfg(not(feature = "harwood-benchmark"))]
 type Payload = LoadedBlock;
-#[cfg(feature = "harwood-benchmark")]
+#[cfg(all(feature = "harwood-benchmark", not(feature = "car-chase-benchmark")))]
 type Payload = super::benchmark::Prepared;
+#[cfg(feature = "car-chase-benchmark")]
+type Payload = crate::car::Prepared;
+#[cfg(all(feature = "harwood-benchmark", not(feature = "car-chase-benchmark")))]
+use super::benchmark::Runtime as BenchmarkRuntime;
+#[cfg(feature = "car-chase-benchmark")]
+use crate::car::runtime::Runtime as BenchmarkRuntime;
 
 pub(crate) struct Scene {
     pending: Option<mpsc::Receiver<Result<Payload, String>>>,
@@ -19,7 +25,7 @@ pub(crate) struct Scene {
     render_scope: Option<wgpu::ErrorScopeGuard>,
     first_frame: bool,
     #[cfg(feature = "harwood-benchmark")]
-    benchmark: super::benchmark::Runtime,
+    benchmark: BenchmarkRuntime,
 }
 
 impl Scene {
@@ -32,7 +38,7 @@ impl Scene {
             render_scope: None,
             first_frame: true,
             #[cfg(feature = "harwood-benchmark")]
-            benchmark: super::benchmark::Runtime::new(),
+            benchmark: BenchmarkRuntime::new(),
         };
         if !bc_enabled {
             scene.fail("DEVICE: BC is unavailable; texture upload not attempted".into());
@@ -42,6 +48,8 @@ impl Scene {
             scene.fail("READ: native Documents path unavailable".into());
             return scene;
         };
+        #[cfg(feature = "car-chase-benchmark")]
+        let car_root = crate::car::private_root(std::path::Path::new(&documents));
         let maps = PathBuf::from(documents).join("Harwood/Maps");
         let (tx, rx) = mpsc::channel();
         match std::thread::Builder::new()
@@ -51,8 +59,10 @@ impl Scene {
                 let result = super::load(&maps);
                 #[cfg(all(feature = "harwood-neighbors", not(feature = "harwood-benchmark")))]
                 let result = super::neighbors::load(&maps).map(|set| set.render);
-                #[cfg(feature = "harwood-benchmark")]
+                #[cfg(all(feature = "harwood-benchmark", not(feature = "car-chase-benchmark")))]
                 let result = super::benchmark::load(&maps);
+                #[cfg(feature = "car-chase-benchmark")]
+                let result = crate::car::prepare(&car_root, &maps);
                 let _ = tx.send(result);
             }) {
             Ok(_) => scene.pending = Some(rx),
@@ -85,10 +95,22 @@ impl Scene {
         format: wgpu::TextureFormat,
         data: Payload,
     ) -> Result<Block, String> {
-        #[cfg(feature = "harwood-benchmark")]
+        #[cfg(all(feature = "harwood-benchmark", not(feature = "car-chase-benchmark")))]
         let data = {
             self.benchmark.install(data.route);
             data.render
+        };
+        #[cfg(feature = "car-chase-benchmark")]
+        let data = {
+            let stats = crate::car::mesh::Stats {
+                vertices: data.terrain.mesh.vertices.len(),
+                triangles: data.terrain.mesh.indices.len() / 3,
+                draws: data.terrain.mesh.draws.len(),
+                textures: data.terrain.textures.len(),
+            };
+            self.benchmark
+                .install(data.path, data.car, stats, device, queue, format)?;
+            data.terrain
         };
         Block::new(device, queue, format, data)
     }
@@ -153,6 +175,15 @@ impl Scene {
                 self.mode,
                 format.is_srgb(),
                 background,
+            );
+            #[cfg(feature = "car-chase-benchmark")]
+            self.benchmark.draw_car(
+                queue,
+                encoder,
+                target,
+                block.depth.as_ref().expect("shared active terrain depth"),
+                size,
+                format,
             );
         } else {
             let color = if self.failed {
@@ -420,9 +451,11 @@ impl Block {
                 size.0, size.1
             );
         }
-        let mut bytes: Vec<_> = self
-            .camera
-            .view_projection(size.0 as f32 / size.1 as f32)
+        #[cfg(not(feature = "car-chase-benchmark"))]
+        let vp = self.camera.view_projection(size.0 as f32 / size.1 as f32);
+        #[cfg(feature = "car-chase-benchmark")]
+        let vp = crate::car::placement::view_projection(self.camera, size.0 as f32 / size.1 as f32);
+        let mut bytes: Vec<_> = vp
             .to_cols_array()
             .into_iter()
             .flat_map(f32::to_ne_bytes)
@@ -465,7 +498,7 @@ impl Block {
     }
 }
 
-fn upload(
+pub(crate) fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     data: &TextureData,

@@ -23,8 +23,14 @@ Actions and physical testing. See [HARWOOD-NEIGHBORS.md](HARWOOD-NEIGHBORS.md).
 `harwood-benchmark` uses that same workload for a 20-second automatic camera run
 along the original LBS route, after a two-second warmup. It adds an original ASCII
 HUD, restart by touch, wall-clock cadence statistics and separate CPU preparation
-timing. GPU execution timing is unavailable. This new mode still needs its own
-Apple build and physical validation. See [HARWOOD-BENCHMARK.md](HARWOOD-BENCHMARK.md).
+timing. GPU execution timing is unavailable. The owner confirms it compiled and
+ran at 60 FPS with V-sync on the iPad. See [HARWOOD-BENCHMARK.md](HARWOOD-BENCHMARK.md).
+
+`car-chase-benchmark` adds the original Toyota Corolla [Car06], four gravel wheels,
+shared terrain depth, opaque/transparent materials and a 20-second chase run.
+Private car files stay under Documents/RBR; they are never bundled. A/B suppresses
+only the car draws with the same camera/resources. This new mode still needs its
+Apple build and physical test. See [CAR-CHASE-BENCHMARK.md](CAR-CHASE-BENCHMARK.md).
 
 The Cargo manifest declares its own workspace, lockfile and toolchain (**Rust 1.97.1**).
 Building this directory does not build or alter the parent workspace. Runtime dependencies
@@ -42,6 +48,7 @@ development dependency for validating the embedded WGSL shader.
 | `src/scene_geometry.rs` | Procedural floor/cube and fixed camera; no commercial data |
 | `src/asset_probe.rs` | Optional CPU-only Harwood audit from private Documents files |
 | `src/harwood/` | Shared real-terrain conversion/Metal pass, single-block loader, optional connected selection, BC upload and provenance |
+| `src/car/`, `examples/car-chase-diagnostic.rs`, `tests/car_chase.rs` | Original Corolla CPU conversion, geometric pose/chase, GPU pass, A/B HUD, provenance and tests |
 | `examples/harwood-diagnostic.rs` | Read-only Windows/macOS command-line entry for the same audit |
 | `examples/harwood-block-diagnostic.rs`, `tests/harwood_block.rs` | Single-block CPU diagnostic and synthetic/opt-in real-data tests |
 | `examples/harwood-neighbors-diagnostic.rs`, `tests/harwood_neighbors.rs`, `src/harwood/neighbors_tests.rs` | Connected-region CPU diagnostic, spatial/budget tests and opt-in real-data checks |
@@ -119,14 +126,16 @@ selection from `PROBE_MODE` (default `triangle`) and rejects any other value:
 | `harwood-block` | `--no-default-features --features harwood-block` | Full workspace: readers, math, block conversion, BC layout and shaders | One private Harwood block; touch cycles material/colour/UV views |
 | `harwood-neighbors` | `--no-default-features --features harwood-neighbors` | Full workspace: readers, math, connected selection/budgets, BC layout and shaders | Connected private terrain/road region; same three diagnostic views |
 | `harwood-benchmark` | `--no-default-features --features harwood-benchmark` | Full workspace plus camera/ground, timing, metrics, restart and HUD tests | Automatic 20-second textured run, live HUD and final summary; tap restarts |
+| `car-chase-benchmark` | `--no-default-features --features car-chase-benchmark` | Full workspace plus SGC/car, support/chase, materials, shader and A/B tests | Real Corolla on Harwood, chase HUD; tap restarts, completion/tap alternates A/B |
 
 The selected feature flags are passed to the host tests, iOS Clippy, the **release
 static-library build for `aarch64-apple-ios`**, and a dependency-tree diagnostic. The
 existing Xcode library search path, ARM64 checks, unsigned IPA packaging and signing
 restrictions are unchanged. The local workflow template and script now accept all
-five selections. The active parent-workspace workflow and the GitHub Desktop
+six selections. The active parent-workspace workflow and the GitHub Desktop
 repository have not been synchronized for this step. No Actions run was started.
-If multiple visual features are enabled, priority is `harwood-benchmark`, then `harwood-neighbors`, then
+If multiple visual features are enabled, priority is `car-chase-benchmark`, then
+`harwood-benchmark`, then `harwood-neighbors`, then
 `harwood-block`, then `rerbr-3d`; the
 separate `rerbr-3d` selection retains the cube and stage-1 audit.
 
@@ -136,7 +145,7 @@ On a macOS host with Xcode and the iOS target, an explicit feature-only type che
 cargo check --locked --lib --target aarch64-apple-ios --features rerbr-3d
 ```
 
-The new `harwood-benchmark` Apple-target build has not been performed here.
+The new `car-chase-benchmark` Apple-target build has not been performed here.
 Windows mathematics and type checks do not establish iPadOS compatibility; a
 subsequent authorized sync and Actions run must verify that configuration.
 
@@ -164,7 +173,8 @@ GitHub signing secrets are used to build the unsigned IPA.
 4. Open **Actions > ReRBRProbe unsigned iPadOS > Run workflow**. Choose `build_mode`:
    **triangle** for the fallback, **rerbr-3d** for floor/cube, **harwood-block** for
    one real block, **harwood-neighbors** for the connected region, or
-   **harwood-benchmark** for the timed camera run. Start a new run using the updated
+   **harwood-benchmark** for the timed camera run, or **car-chase-benchmark** for
+   the original Corolla chase/A-B experiment. Start a new run using the updated
    commit; re-running an old job uses its old workflow/script revision.
 5. Download `ReRBRProbe-unsigned-<build_mode>-<run number>`. Extract the artifact ZIP on Windows to obtain
    `ReRBRProbe-unsigned.ipa` and `SHA256SUMS`. The artifact ZIP itself is not the IPA.
@@ -320,15 +330,17 @@ Do not run the parent reRBR build/check script for this isolated experiment.
 
 ## Validation status
 
-The owner reports that the triangle runs on their iPad mini A17 Pro, and that the
-default Actions build also succeeded after adding the local math library. Those are
-the baseline results, not new hardware results from this editing environment.
+The owner reports successful Actions/device results for triangle, the original
+Harwood block, its connected neighbors and the stage-4 moving benchmark, including
+60 FPS with V-sync on the iPad mini A17 Pro for stage 4. These are reported baseline
+results, not new hardware measurements from this editing environment.
 
-The new floor/cube pass has only been checked from Windows. A new Actions run selecting
-`rerbr-3d` is required to validate the Apple build, followed by physical-iPad checks of
-the image, depth, touch and lifecycle. The fallback also needs a new default build and
-visual comparison. Local results are recorded in `VALIDATION.md`; they do not establish
-that this scene compiles or renders on iPadOS.
+The new `car-chase-benchmark` has Windows CPU/compiler/shader checks only. It still
+requires an authorized Apple build, private-file import and physical inspection
+of the car, depth, transparency, support, chase camera, touch and lifecycle. Previous
+modes need a device regression comparison after this change. Local results are
+recorded in `VALIDATION.md`; they do not establish that the new car mode compiles
+or renders on iPadOS.
 
 ## References
 

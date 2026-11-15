@@ -17,6 +17,7 @@ on:
           - harwood-block
           - harwood-neighbors
           - harwood-benchmark
+          - car-chase-benchmark
 
 permissions:
   contents: read

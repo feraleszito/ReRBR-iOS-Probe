@@ -8,12 +8,16 @@ pub mod mesh;
 pub mod neighbors;
 pub mod texture;
 
-#[cfg(feature = "harwood-benchmark")]
+#[cfg(feature = "car-chase-benchmark")]
+pub const MODE_NAME: &str = "car-chase-benchmark";
+#[cfg(all(feature = "harwood-benchmark", not(feature = "car-chase-benchmark")))]
 pub const MODE_NAME: &str = "harwood-benchmark";
 #[cfg(all(feature = "harwood-neighbors", not(feature = "harwood-benchmark")))]
 pub const MODE_NAME: &str = "harwood-neighbors";
 #[cfg(not(feature = "harwood-neighbors"))]
 pub const MODE_NAME: &str = "harwood-block";
+#[cfg(feature = "car-chase-benchmark")]
+pub(crate) use gpu::upload;
 pub(crate) use gpu::Scene;
 
 use crate::asset_probe::{self, TextureData};

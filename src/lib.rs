@@ -11,6 +11,9 @@ use winit::event::{TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+#[cfg(feature = "car-chase-benchmark")]
+pub mod car;
+
 #[cfg(any(
     feature = "rerbr-3d",
     feature = "harwood-block",

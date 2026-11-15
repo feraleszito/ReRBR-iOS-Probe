@@ -10,9 +10,94 @@ const STEP: f32 = 0.25;
 pub struct Ground {
     triangles: Vec<[Vec3; 3]>,
     cells: BTreeMap<(i32, i32), Vec<usize>>,
+    cell_size: f32,
+    #[cfg(feature = "car-chase-benchmark")]
+    planes: Vec<Option<SupportPlane>>,
+}
+#[cfg(feature = "car-chase-benchmark")]
+struct SupportPlane {
+    origin: Vec3,
+    b: Vec3,
+    c: Vec3,
+    inverse: f32,
+}
+#[cfg(feature = "car-chase-benchmark")]
+impl SupportPlane {
+    fn new([a, b, c]: [Vec3; 3]) -> Option<Self> {
+        let b = b - a;
+        let c = c - a;
+        let det = b.x * c.z - b.z * c.x;
+        (det.abs() >= 1e-7).then(|| Self {
+            origin: a,
+            b,
+            c,
+            inverse: det.recip(),
+        })
+    }
+    fn height(&self, p: Vec3) -> Option<f32> {
+        let d = p - self.origin;
+        let u = (d.x * self.c.z - d.z * self.c.x) * self.inverse;
+        let v = (self.b.x * d.z - self.b.z * d.x) * self.inverse;
+        (u >= -1e-5 && v >= -1e-5 && u + v <= 1.00001)
+            .then_some(self.origin.y + self.b.y * u + self.c.y * v)
+    }
 }
 impl Ground {
+    #[cfg(feature = "car-chase-benchmark")]
+    pub fn support_height(&self, p: Vec3) -> Option<f32> {
+        self.cells
+            .get(&cell(p, self.cell_size))?
+            .iter()
+            .filter_map(|&i| self.planes[i].as_ref()?.height(p))
+            .max_by(f32::total_cmp)
+    }
+    #[cfg(feature = "car-chase-benchmark")]
+    pub fn segment_clear(&self, from: Vec3, to: Vec3) -> bool {
+        let direction = to - from;
+        // Conservative XZ segment bounds: use the existing triangle grid instead
+        // of tracing every terrain triangle for each near-plane corner.
+        let lo = cell(from.min(to), self.cell_size);
+        let hi = cell(from.max(to), self.cell_size);
+        let mut candidates = std::collections::BTreeSet::new();
+        for x in lo.0..=hi.0 {
+            for z in lo.1..=hi.1 {
+                if let Some(ids) = self.cells.get(&(x, z)) {
+                    candidates.extend(ids.iter().copied());
+                }
+            }
+        }
+        !candidates.into_iter().any(|i| {
+            let [a, b, c] = self.triangles[i];
+            let e1 = b - a;
+            let e2 = c - a;
+            let p = direction.cross(e2);
+            let det = e1.dot(p);
+            if det.abs() < 1e-7 {
+                return false;
+            }
+            let inv = det.recip();
+            let s = from - a;
+            let u = s.dot(p) * inv;
+            if !(0.0..=1.0).contains(&u) {
+                return false;
+            }
+            let q = s.cross(e1);
+            let v = direction.dot(q) * inv;
+            if v < 0.0 || u + v > 1.0 {
+                return false;
+            }
+            let t = e2.dot(q) * inv;
+            (0.001..0.999).contains(&t)
+        })
+    }
     pub fn new(triangles: Vec<[Vec3; 3]>) -> Result<Self, String> {
+        Self::build(triangles, CELL)
+    }
+    #[cfg(feature = "car-chase-benchmark")]
+    pub fn for_vehicle(triangles: Vec<[Vec3; 3]>) -> Result<Self, String> {
+        Self::build(triangles, 2.0)
+    }
+    fn build(triangles: Vec<[Vec3; 3]>, cell_size: f32) -> Result<Self, String> {
         let mut cells: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for (id, tri) in triangles.iter().enumerate() {
             if !tri.iter().all(|p| p.is_finite()) {
@@ -20,7 +105,7 @@ impl Ground {
             }
             let lo = tri.iter().copied().reduce(Vec3::min).unwrap();
             let hi = tri.iter().copied().reduce(Vec3::max).unwrap();
-            let (a, b) = (cell(lo), cell(hi));
+            let (a, b) = (cell(lo, cell_size), cell(hi, cell_size));
             if (b.0 - a.0 + 1) as i64 * (b.1 - a.1 + 1) as i64 > 100_000 {
                 return Err("GROUND: excessive triangle extent".into());
             }
@@ -30,21 +115,29 @@ impl Ground {
                 }
             }
         }
-        Ok(Self { triangles, cells })
+        #[cfg(feature = "car-chase-benchmark")]
+        let planes = triangles.iter().copied().map(SupportPlane::new).collect();
+        Ok(Self {
+            triangles,
+            cells,
+            cell_size,
+            #[cfg(feature = "car-chase-benchmark")]
+            planes,
+        })
     }
 
     /// Highest actual triangle intersected by a vertical ray at this XZ.
     /// No nearest-box/nearest-vertex height guess and no 3m coverage tolerance.
     pub fn height(&self, p: Vec3) -> Option<f32> {
         self.cells
-            .get(&cell(p))?
+            .get(&cell(p, self.cell_size))?
             .iter()
             .filter_map(|&id| triangle_height(p, self.triangles[id]))
             .max_by(f32::total_cmp)
     }
 }
-fn cell(p: Vec3) -> (i32, i32) {
-    ((p.x / CELL).floor() as i32, (p.z / CELL).floor() as i32)
+fn cell(p: Vec3, step: f32) -> (i32, i32) {
+    ((p.x / step).floor() as i32, (p.z / step).floor() as i32)
 }
 
 pub fn triangle_height(p: Vec3, [a, b, c]: [Vec3; 3]) -> Option<f32> {

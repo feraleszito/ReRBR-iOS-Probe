@@ -17,11 +17,12 @@ resolver = "2"
 default = []
 # Optional 3D scene and private-file diagnostic; default stays triangle.
 rerbr-3d = ["dep:rerbr-render-core", "dep:rerbr-asset-formats"]
-# Visual priority: benchmark > neighbors > block > procedural 3D > triangle.
+# Visual priority: car chase > benchmark > neighbors > block > procedural 3D > triangle.
 harwood-block = ["dep:rerbr-render-core", "dep:rerbr-asset-formats"]
 harwood-neighbors = ["dep:rerbr-render-core", "dep:rerbr-asset-formats"]
 # Separate app mode; shares the exact neighbor workload and its optional dependencies.
 harwood-benchmark = ["harwood-neighbors"]
+car-chase-benchmark = ["harwood-benchmark"]
 
 [lib]
 name = "rerbr_probe"
@@ -52,6 +53,10 @@ required-features = ["harwood-neighbors"]
 [[example]]
 name = "harwood-benchmark-diagnostic"
 required-features = ["harwood-benchmark"]
+
+[[example]]
+name = "car-chase-diagnostic"
+required-features = ["car-chase-benchmark"]
 
 [profile.release]
 panic = "abort"

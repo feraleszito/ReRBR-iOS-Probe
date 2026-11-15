@@ -5,7 +5,7 @@ Selected file readers from the owner's local ReRBR source snapshot, inspected on
 <https://github.com/JodusNodus/rerbr>. The original rbr-formats package and this
 integration are **GPL-3.0-or-later**; the complete license is in LICENSE.
 
-The local source checkout has no Git metadata and Git is unavailable here.
+The local source checkout has no Git metadata.
 No upstream commit ID is claimed. These SHA-256 values identify the imported
 bytes. Every listed file, including unit tests and formatting configuration,
 is copied unchanged.
@@ -43,4 +43,20 @@ These adapter files are new GPL-3.0-or-later code, not byte-identical imports.
 
 No proprietary data, extracted textures, game binaries or RSF content is included.
 Runtime files stay in the owner's installation or the iPad app's Documents folder.
+
+Stage 5 adds the following byte-identical original readers, including their
+synthetic unit tests. They use the existing INI/le helpers and the standard library,
+with no new dependency. The framing cursor retains unused SGS/SGA methods under a
+module-level dead-code allowance in our lib.rs; no imported file is edited.
+
+| Local file | Original source | SHA-256 |
+| --- | --- | --- |
+| src/sgc.rs | crates/rbr-formats/src/sgc.rs | `1a4304016a9a8b90f0f52893540e585575da67155ec7b74efc8e980a04a7129e` |
+| src/sg_framing.rs | crates/rbr-formats/src/sg_framing.rs | `7612205644acdafe07c3d39793308b15ed2791b5b21653445080321a1306dfe8` |
+| src/cars.rs | crates/rbr-formats/src/cars.rs | `96223b1f147579d2fccf8f3a84e3550d7999ed50899a8e98c4e7912d56696c6f` |
+| src/car_parts.rs | crates/rbr-formats/src/car_parts.rs | `62570b710fa93e00283bfb2a2de9a524f7ad3a660309da989c82da6c91082846` |
+
+The app adapts car mesh conversion/material states under src/car/UPSTREAM.md.
+Only data parsing is added here: no executable game code, DirectX shader loader,
+car physics, RSF importer or renderer is pulled into this crate.
 

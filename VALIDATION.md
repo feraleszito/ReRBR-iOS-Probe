@@ -638,3 +638,118 @@ Python/Bash preflight could not be executed locally: available commands include
 only WindowsApps Python aliases, with no usable Python/Bash interpreter found.
 The updated preflight source was reviewed; macOS must execute it during the next
 authorized Actions build. No stage-4 iPad FPS, GPU timing or visual success is claimed.
+
+## Original Corolla chase benchmark: stage 5
+
+Owner report, 2026-11-15: stage 4 now compiles and runs on the iPad mini A17 Pro,
+covering approximately 588.53m in 20 seconds at 60 FPS with V-sync. This supersedes
+the pending stage-4 device status above. Stage 5 has no Apple build or device result.
+
+Added independent `car-chase-benchmark = ["harwood-benchmark"]`, with triangle still
+the default. Four byte-identical original parsers (cars.rs, car_parts.rs, sgc.rs,
+sg_framing.rs) retain their license and provenance in the asset-format vendor.
+App-owned exterior selection, conversion and material states are adapted from
+reRBR car/{parts,meshes,shading}.rs and lights.rs, with source hashes and differences
+in src/car/UPSTREAM.md. No dependency or Cargo.lock change was needed.
+
+Actual Windows read-only diagnostic against the private original installation:
+
+```text
+[Car06] COROLLA; SGC bytes=2029757; decoded records=636
+converted exterior meshes=75; skipped meshes=47; shader/material pairs=16
+car vertices=11225; triangles=11166; draws=99; unique DDS=3
+opaque vertices=10851; triangles=10756; draws=83; unique DDS used=2
+blended vertices=374; triangles=410; draws=16; unique DDS used=1
+external DDS=BC2 1024x1024, 11 mips
+dynamic DDS=BC1 512x256, 10 mips
+transparent DDS=BC2 512x512, 10 mips
+required private car files=8; all converted exterior diffuse paths resolved
+car VB+IB payload=493192 bytes; BC mip payload=1835080 bytes
+unchanged terrain vertices=18983; triangles=9539; draws=124; unique DDS=8
+pose samples=1179; minimum wheel-vertex clearance=0.004989624m
+maximum geometric wheel travel=0.06560516m; minimum accepted chase boom=6m
+```
+
+All eight private paths and transfer instructions are in CAR-CHASE-BENCHMARK.md.
+The app accepts only Documents/RBR for the car and Documents/Harwood/Maps for the
+terrain. Missing material/file/additional dependency fails explicitly. No source
+fixture contains extracted model data, texture bytes, route coordinates or original
+INI contents. The explicit CPU example accepts the owner's installation path;
+there is no installation fallback inside the iOS app.
+
+The original -Z car orientation, Y up, hierarchy, UVs, face ranges, absolute indices,
+wheel pivots and inverse-transpose normals are retained. Four gravel wheels, body
+and visible exterior parts are selected; interior, ghost, shadow planes, overlays,
+unused surface variants and hidden initial lights are excluded. Draw ordering,
+culling, blend and depth-write rules retain the original material states. The car
+loads the terrain's reverse-Z depth; HUD draws last. The first WGSL is unlit diffuse
+and opacity, without DirectX shaders. Full original lighting/reflections/Fresnel,
+dirt/damage, shadows and dynamic lamps remain out of scope.
+
+Vehicle support uses a separate geometric pose, not the old driver eye height.
+Four contacts set pitch/roll; low body and wheel vertices query real terrain planes.
+Wheel/brake presentation travel is bounded at 0.25m. This is not suspension physics,
+a full swept-volume collision solver, steering or wheel rotation. A 2m cached-plane
+candidate grid and exact terrain-segment tests avoid brute-force camera rays; the
+previous benchmark keeps its 8m grid and original height arithmetic.
+
+The path/clock/20-second session and cadence statistics are retained. Chase uses
+6m distance, nominal 2.5m road-relative height, 0.5m target and original 65-degree
+horizontal FOV. Support, line of sight and near-plane corners are checked at load
+and on each frame. An initial real-data frustum test caught a small clip using the
+old 50-degree driver FOV; the dedicated 65-degree chase projection fixed it without
+changing other modes. All drawn car vertices pass three aspect ratios (0.65, 1.55,
+2.0) at 41 route positions. Terrain-only A and terrain+car B use the same resources,
+pose queries and camera; only car submissions are suppressed in A. HUD/log counters
+separate terrain, opaque car, blended car and actual generated HUD geometry.
+
+Windows checks used Rust 1.97.1 MSVC, existing cache, `--offline --locked`, and
+build/log/temp outputs only in ignored .validation/:
+
+| Check | Result |
+| --- | --- |
+| car-chase-diagnostic against private RBR | PASS: eight files, actual geometry/material/DDS conversion and full support path; no GPU |
+| Workspace tests, car-chase-benchmark only | PASS: 130 tests; four private tests ignored |
+| Workspace tests, all-features | PASS: 149 tests; six private tests ignored |
+| Explicit all-features ignored tests with RBR_CAR_DATA/HARWOOD_MAPS | PASS: all six private tests; new car/route/frustum test completed in 30.04s in Windows debug |
+| Independent harwood-benchmark / harwood-neighbors / harwood-block / rerbr-3d workspace tests | PASS: 115 / 104 / 103 / 111 tests respectively |
+| Default triangle app tests | PASS: one shader test |
+| Workspace/all-targets Clippy, each optional mode and all-features; default app Clippy | PASS: all with -D warnings |
+| cargo fmt --all -- --check | PASS |
+| SHA-256 provenance check | PASS: all 20 vendor provenance entries; four new parser copies equal original source bytes |
+
+Fourteen new synthetic car tests cover parser-to-converter wiring, hierarchy,
+cycles, selection/hidden switches, indices/UVs/normals/materials, wheel pivots,
+pose transforms, ground clearance, exact visibility, unsupported cameras, A/B,
+restart and cleared metrics. Existing real-time-duration/statistics tests remain
+active. Naga validates the new car WGSL. These checks type-check the wgpu code but
+do not create a Windows GPU device or establish Metal behavior.
+
+Modified: Cargo.toml, README.md, HARWOOD-BENCHMARK.md, this record,
+github-actions/ios-probe.yml (secondary template only), scripts/{build-ios.sh,
+verify.py}, src/lib.rs, src/harwood/{mod.rs,gpu.rs},
+src/harwood/benchmark/{mod.rs,hud.rs,route.rs}, tests/shader.rs and
+vendor/rerbr-asset-formats/{src/lib.rs,UPSTREAM.md}.
+Added: CAR-CHASE-BENCHMARK.md, examples/car-chase-diagnostic.rs,
+tests/car_chase.rs, src/car/{mod.rs,selection.rs,materials.rs,mesh.rs,placement.rs,
+gpu.rs,runtime.rs,shader.wgsl,tests.rs,UPSTREAM.md}, and
+vendor/rerbr-asset-formats/src/{cars.rs,car_parts.rs,sgc.rs,sg_framing.rs}.
+
+SHA-256 against the saved 73-file baseline leaves 57 existing files unchanged,
+including Cargo.lock, render-core vendor, previously imported format readers,
+native/Xcode, asset diagnostic, procedural scene, triangle/terrain shaders,
+terrain mesh/texture converters and timing metrics. The 90-file source inventory
+contains no proprietary resource, binary or temporary artifact; .validation/
+contains ignored local build products and diagnostic logs only. Source/IPA
+preflight now also rejects INI and DirectX shader resources. The script still
+passes --no-default-features --features car-chase-benchmark to Cargo for this mode;
+Xcode/lipo paths, signature settings and IPA packaging are retained.
+
+Pending: macOS/iOS build and package preflight, actual Metal BC uploads, car image,
+alpha/culling/depth inspection, support and camera motion on the physical iPad,
+portrait/landscape, interruption/restart, repeated A/B timings, CPU cost, memory
+and thermals. GPU timestamps are not implemented and are reported unavailable.
+Python/Bash preflight could not run here because no usable local interpreter was
+found; reviewed source must run on macOS. No new iPad FPS or visual success is
+claimed. Original engine, RBR installation, GitHub clone and active workflow were
+not modified. No commit, push, synchronization or Actions run was performed.

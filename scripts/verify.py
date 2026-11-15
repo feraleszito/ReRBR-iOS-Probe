@@ -12,12 +12,13 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PRIVATE_ASSET_SUFFIXES = {".lbs", ".dds", ".rbz", ".sgc", ".trk", ".dls", ".col", ".fnc", ".mat", ".zip"}
+PRIVATE_ASSET_SUFFIXES = {".lbs", ".dds", ".rbz", ".sgc", ".trk", ".dls", ".col", ".fnc", ".mat", ".zip", ".vso", ".pso"}
 
 
 def is_private_asset(name):
     path = Path(name)
     return (path.suffix.lower() in PRIVATE_ASSET_SUFFIXES
+            or path.suffix.lower() == ".ini"
             or path.name.lower() == "texturefilenamemap.dat"
             or (path.name.lower().startswith("track-") and path.suffix.lower() == ".ini"))
 
@@ -47,6 +48,8 @@ def verify_sources():
             "unexpected neighbor feature dependencies")
     require(manifest["features"]["harwood-benchmark"] == ["harwood-neighbors"],
             "benchmark must reuse the same neighbor workload dependencies")
+    require(manifest["features"]["car-chase-benchmark"] == ["harwood-benchmark"],
+            "car benchmark must reuse the current terrain/clock dependencies")
     require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats"],
             "unexpected workspace member")
     require(manifest["workspace"]["default-members"] == ["."], "default build must select the triangle app")
@@ -91,6 +94,7 @@ def verify_sources():
     require(set(asset_imports) == {
         "LICENSE", "rustfmt.toml", "src/le.rs", "src/ini.rs", "src/dds.rs", "src/rbz.rs",
         "src/stage_textures.rs", "src/damage.rs", "src/lbs/mod.rs", "src/lbs/read.rs", "src/lbs/tests.rs",
+        "src/sgc.rs", "src/sg_framing.rs", "src/cars.rs", "src/car_parts.rs",
     }, "missing asset-reader provenance hashes")
     for relative, expected in asset_imports.items():
         require(hashlib.sha256((assets / relative).read_bytes()).hexdigest() == expected,
@@ -124,6 +128,9 @@ def verify_sources():
         require((ROOT / "src/harwood" / relative).is_file(), f"missing Harwood source: {relative}")
     for relative in ("mod.rs", "route.rs", "metrics.rs", "hud.rs", "hud.wgsl", "tests.rs"):
         require((ROOT / "src/harwood/benchmark" / relative).is_file(), f"missing benchmark source: {relative}")
+    for relative in ("mod.rs", "selection.rs", "materials.rs", "mesh.rs", "placement.rs", "gpu.rs",
+                     "runtime.rs", "shader.wgsl", "UPSTREAM.md", "tests.rs"):
+        require((ROOT / "src/car" / relative).is_file(), f"missing Corolla source: {relative}")
     print("PASS: independent manifest, optional libraries, upstream hashes, no game resources, locked versions, Xcode references, plist and XML")
 
 

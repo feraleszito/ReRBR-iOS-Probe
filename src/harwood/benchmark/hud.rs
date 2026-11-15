@@ -126,7 +126,7 @@ impl Hud {
         target: &wgpu::TextureView,
         size: (u32, u32),
         lines: &[String],
-    ) {
+    ) -> usize {
         let bytes = vertices(lines, size);
         queue.write_buffer(&self.vertices, 0, &bytes);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -146,6 +146,7 @@ impl Hud {
         pass.set_bind_group(0, &self.group, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..(bytes.len() / 20) as u32, 0..1);
+        bytes.len() / 20
     }
 }
 

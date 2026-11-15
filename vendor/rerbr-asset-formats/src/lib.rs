@@ -7,8 +7,14 @@ mod damage;
 #[allow(dead_code)]
 mod le;
 
+pub mod car_parts;
+pub mod cars;
 pub mod dds;
+pub mod sgc;
+// Shared upstream cursor also contains SGS/SGA helpers not selected here.
 pub mod ini;
 pub mod lbs;
 pub mod rbz;
+#[allow(dead_code)]
+mod sg_framing;
 pub mod stage_textures;

@@ -1,9 +1,10 @@
 # Harwood Forest: automatic graphics benchmark, stage 4
 
 `harwood-benchmark` is a separate visual mode that reuses `harwood-neighbors`.
-The owner confirms stage 3 rendered on the iPad mini A17 Pro. Stage 4 has Windows
-CPU/compiler tests only; its Apple build, moving image, HUD and performance numbers
-must still be verified on the device. No measured iPad FPS or GPU times are claimed.
+The owner confirms stages 3 and 4 rendered on the iPad mini A17 Pro; stage 4
+reported 60 FPS average with V-sync. That does not establish GPU utilization or
+timing. The new original-car mode is separate and still awaits Apple/device
+validation: see [CAR-CHASE-BENCHMARK.md](CAR-CHASE-BENCHMARK.md).
 
 ## Workload and controls
 

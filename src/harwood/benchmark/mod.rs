@@ -1,5 +1,5 @@
 //! App-owned automatic graphics benchmark; no simulation or game data embedded.
-mod hud;
+pub(crate) mod hud;
 pub mod metrics;
 pub mod route;
 
@@ -29,6 +29,7 @@ pub fn load(maps: &Path) -> Result<Prepared, String> {
     })
 }
 
+#[cfg_attr(feature = "car-chase-benchmark", allow(dead_code))]
 pub(crate) struct Runtime {
     origin: Instant,
     route: Option<route::Route>,
@@ -38,6 +39,7 @@ pub(crate) struct Runtime {
     fatal: bool,
     reason: &'static str,
 }
+#[cfg_attr(feature = "car-chase-benchmark", allow(dead_code))]
 impl Runtime {
     pub fn new() -> Self {
         Self {

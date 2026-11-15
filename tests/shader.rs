@@ -48,3 +48,16 @@ fn benchmark_hud_shader_validates_without_optional_shader_capabilities() {
     .validate(&module)
     .expect("HUD WGSL validates");
 }
+
+#[cfg(feature = "car-chase-benchmark")]
+#[test]
+fn original_car_shader_validates_without_optional_capabilities() {
+    let module = naga::front::wgsl::parse_str(include_str!("../src/car/shader.wgsl"))
+        .expect("car shader parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .expect("car shader validates");
+}
