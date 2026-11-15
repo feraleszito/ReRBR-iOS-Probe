@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import os
 import plistlib
 import re
 import struct
@@ -11,6 +12,14 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+PRIVATE_ASSET_SUFFIXES = {".lbs", ".dds", ".rbz", ".sgc", ".trk", ".dls", ".col", ".fnc", ".mat", ".zip"}
+
+
+def is_private_asset(name):
+    path = Path(name)
+    return (path.suffix.lower() in PRIVATE_ASSET_SUFFIXES
+            or path.name.lower() == "texturefilenamemap.dat"
+            or (path.name.lower().startswith("track-") and path.suffix.lower() == ".ini"))
 
 
 def require(condition, message):
@@ -23,13 +32,17 @@ def verify_sources():
     require("workspace" in manifest, "probe must have an independent workspace")
     require("staticlib" in manifest["lib"]["crate-type"], "Rust library must include staticlib")
     dependencies = manifest["dependencies"]
-    require(set(dependencies) == {"wgpu", "winit", "futures-executor", "rerbr-render-core"},
+    require(set(dependencies) == {"wgpu", "winit", "futures-executor", "rerbr-render-core", "rerbr-asset-formats"},
             "unexpected runtime dependency")
     require(dependencies["rerbr-render-core"] == {"path": "vendor/rerbr-render-core", "optional": True},
             "render core must be a local optional dependency")
+    require(dependencies["rerbr-asset-formats"] == {"path": "vendor/rerbr-asset-formats", "optional": True},
+            "asset readers must be a local optional dependency")
     require(manifest["features"]["default"] == [], "triangle must remain the default")
-    require(manifest["features"]["rerbr-3d"] == ["dep:rerbr-render-core"], "unexpected 3D feature dependencies")
-    require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core"], "unexpected workspace member")
+    require(manifest["features"]["rerbr-3d"] == ["dep:rerbr-render-core", "dep:rerbr-asset-formats"],
+            "unexpected 3D feature dependencies")
+    require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats"],
+            "unexpected workspace member")
     require(manifest["workspace"]["default-members"] == ["."], "default build must select the triangle app")
     require(dependencies["wgpu"]["version"] == "=30.0.1", "wgpu version must match the probe")
     require(dependencies["winit"]["version"] == "=0.30.13", "winit version must match the probe")
@@ -38,7 +51,8 @@ def verify_sources():
     lock = tomllib.loads((ROOT / "Cargo.lock").read_text())
     versions = {p["name"]: p["version"] for p in lock["package"]}
     for name, version in (("wgpu", "30.0.1"), ("winit", "0.30.13"), ("futures-executor", "0.3.34"),
-                          ("rerbr-render-core", "0.1.0"), ("glam", "0.33.12")):
+                          ("rerbr-render-core", "0.1.0"), ("glam", "0.33.12"),
+                          ("rerbr-asset-formats", "0.1.0"), ("zip", "9.0.3")):
         require(versions.get(name) == version, f"locked {name} version")
     require(not any(name.startswith("rbr-") for name in versions), "probe must not depend on game crates")
     core = ROOT / "vendor/rerbr-render-core"
@@ -58,6 +72,27 @@ def verify_sources():
     for relative, expected in imported.items():
         require(hashlib.sha256((core / relative).read_bytes()).hexdigest() == expected,
                 f"upstream bytes changed: {relative}")
+    assets = ROOT / "vendor/rerbr-asset-formats"
+    asset_manifest = tomllib.loads((assets / "Cargo.toml").read_text())
+    require(asset_manifest["package"]["license"] == "GPL-3.0-or-later", "retain asset-reader license")
+    require(asset_manifest["dependencies"] == {
+        "zip": {"version": "=9.0.3", "default-features": False, "features": ["deflate-flate2-zlib-rs"]},
+    }, "asset readers must use only the selected pure-Rust ZIP backend")
+    asset_imports = dict(re.findall(
+        r"^\| (src/\S+|LICENSE|rustfmt\.toml) \| [^|]+ \| `([0-9a-f]{64})` \|$",
+        (assets / "UPSTREAM.md").read_text(), re.MULTILINE,
+    ))
+    require(set(asset_imports) == {
+        "LICENSE", "rustfmt.toml", "src/le.rs", "src/ini.rs", "src/dds.rs", "src/rbz.rs",
+        "src/stage_textures.rs", "src/damage.rs", "src/lbs/mod.rs", "src/lbs/read.rs", "src/lbs/tests.rs",
+    }, "missing asset-reader provenance hashes")
+    for relative, expected in asset_imports.items():
+        require(hashlib.sha256((assets / relative).read_bytes()).hexdigest() == expected,
+                f"asset-reader upstream bytes changed: {relative}")
+    for directory, children, files in os.walk(ROOT):
+        children[:] = [name for name in children if name not in {".git", ".validation", "target", "build"}]
+        for name in files:
+            require(not is_private_asset(name), f"private game resource in source tree: {Path(directory) / name}")
     for relative in (
         "xcode/ReRBRProbe/LaunchScreen.storyboard",
         "xcode/ReRBRProbe.xcodeproj/xcshareddata/xcschemes/ReRBRProbe.xcscheme",
@@ -67,6 +102,8 @@ def verify_sources():
         info = plistlib.load(stream)
     require(info["CFBundlePackageType"] == "APPL", "application package type")
     require("UIApplicationSceneManifest" not in info, "winit owns the application lifecycle")
+    require(info.get("UIFileSharingEnabled") is True and info.get("LSSupportsOpeningDocumentsInPlace") is True,
+            "private Documents transfer must remain enabled")
     project = (ROOT / "xcode/ReRBRProbe.xcodeproj/project.pbxproj").read_text()
     definitions = re.findall(r"^\s*([A-F0-9]{24})(?: /\*.*?\*/)? = \{", project, re.MULTILINE)
     require(len(definitions) == len(set(definitions)), "duplicate Xcode object IDs")
@@ -75,13 +112,15 @@ def verify_sources():
     require((ROOT / "src/triangle.wgsl").is_file(), "missing embedded shader")
     for relative in ("src/scene3d.rs", "src/scene_geometry.rs", "src/scene3d.wgsl"):
         require((ROOT / relative).is_file(), f"missing optional scene source: {relative}")
-    print("PASS: independent manifest, optional math core, upstream hashes, locked versions, Xcode references, plist and XML")
+    require((ROOT / "src/asset_probe.rs").is_file(), "missing optional private-file diagnostic")
+    print("PASS: independent manifest, optional libraries, upstream hashes, no game resources, locked versions, Xcode references, plist and XML")
 
 
 def verify_ipa(path):
     with zipfile.ZipFile(path) as archive:
         require(archive.testzip() is None, "corrupt IPA zip")
         names = set(archive.namelist())
+        require(not any(is_private_asset(name) for name in names), "private game resource found in IPA")
         prefix = "Payload/ReRBRProbe.app/"
         require(all(name.startswith("Payload/") for name in names), "IPA contains files outside Payload")
         require(not any("_CodeSignature/" in name or name.endswith("embedded.mobileprovision") for name in names),

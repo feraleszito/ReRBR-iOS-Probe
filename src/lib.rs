@@ -12,6 +12,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 #[cfg(feature = "rerbr-3d")]
+pub mod asset_probe;
+#[cfg(feature = "rerbr-3d")]
 mod scene3d;
 #[cfg(feature = "rerbr-3d")]
 mod scene_geometry;
@@ -175,6 +177,16 @@ impl Renderer {
                 ..Default::default()
             })
             .await?;
+        #[cfg(feature = "rerbr-3d")]
+        asset_probe::start_from_documents(
+            adapter
+                .features()
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
+            device
+                .features()
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
+            device.limits().max_texture_dimension_2d,
+        );
         let size = window.inner_size();
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))

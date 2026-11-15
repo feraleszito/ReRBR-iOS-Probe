@@ -4,19 +4,19 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.1"
 publish = false
-description = "Standalone iPadOS Metal experiment with an optional reRBR camera/math library; no game assets"
+description = "Standalone iPadOS Metal experiment with optional reRBR math and asset readers; no game assets"
 license = "GPL-3.0-or-later"
 
 # A nested workspace keeps this experiment independent of ../Cargo.toml and ../Cargo.lock.
 [workspace]
-members = ["vendor/rerbr-render-core"]
+members = ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats"]
 default-members = ["."]
 resolver = "2"
 
 [features]
 default = []
-# Optional procedural 3D scene using the original camera/math; default stays triangle.
-rerbr-3d = ["dep:rerbr-render-core"]
+# Optional 3D scene and private-file diagnostic; default stays triangle.
+rerbr-3d = ["dep:rerbr-render-core", "dep:rerbr-asset-formats"]
 
 [lib]
 name = "rerbr_probe"
@@ -25,11 +25,16 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 futures-executor = "=0.3.34"
 rerbr-render-core = { path = "vendor/rerbr-render-core", optional = true }
+rerbr-asset-formats = { path = "vendor/rerbr-asset-formats", optional = true }
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "metal", "wgsl"] }
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
 
 [dev-dependencies]
 naga = { version = "=30.0.1", features = ["wgsl-in"] }
+
+[[example]]
+name = "harwood-diagnostic"
+required-features = ["rerbr-3d"]
 
 [profile.release]
 panic = "abort"

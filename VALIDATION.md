@@ -284,3 +284,82 @@ on this Windows host. There is no before/after render or iPad screenshot for thi
 A new Actions run with `rerbr-3d`, installation on the iPad, portrait/landscape captures,
 depth/touch/lifecycle checks and a triangle-fallback comparison are still required.
 Do not treat these local results as confirmation that the scene works on iPadOS.
+
+## Harwood private-file diagnostic: stage 1
+
+Added `vendor/rerbr-asset-formats` with nine original Rust source/test files, LICENSE
+and rustfmt.toml copied byte-for-byte from the local reRBR snapshot. Its UPSTREAM.md
+records original paths, GPL-3.0-or-later licensing and all eleven import hashes.
+The new library exports only LBS, INI, texture-map, RBZ and DDS readers. Its one direct
+dependency is zip 9.0.3, pinned with the deflate-flate2-zlib-rs backend. The offline
+Cargo cache supplied all dependencies; no download or dependency installation was run.
+
+The app's optional `rerbr-3d` feature includes the readers and CPU-only diagnostic.
+The native entry passes Foundation's Documents path before Rust starts. After GPU
+creation, a one-shot background worker reads `Documents/Harwood/Maps` if present,
+otherwise logs SKIP. It uses bounded reads, case-insensitive lookups, original texture
+request/remapping rules, ZIP read-to-EOF/CRC checks, DDS parsing and basic advertised
+BC/texture-size checks. It never extracts or writes resources. Missing/corrupt assets
+report errors without selecting a different scene. Optional device features are not
+changed; no asset upload, Metal sampling or stage drawing is part of this batch.
+
+First ran the command-line example directly on the owner's installed Maps folder,
+then explicitly ran the ignored private-install integration test on the same folder.
+Both completed successfully with the original Rust parsers, not header-only probes:
+
+```text
+blocks=282 (expected 282), visibility=282, object items=442
+INI diffuse=39, specular=5; required DDS=38/38; declared DDS=44/44; redirected to N=41
+required asset diagnostic PASS
+```
+
+Texture counts are references, not unique files. The required set has 37 diffuse
+references and one specular reference; the audit also read all six remaining INI
+entries. Some dry/new requests intentionally redirect to N's damp folder, so the
+documented transfer keeps both complete RBZs. The diagnostic excludes global clouds
+and water's unresolved runtime-manager keys; it does not prove full render coverage.
+
+Windows checks with Rust 1.97.1 and the private offline Cargo cache:
+
+| Check | Result |
+| --- | --- |
+| `cargo run --offline --example harwood-diagnostic --no-default-features --features rerbr-3d -- <private Maps>` | PASS, exit 0; initial run also resolved the updated lockfile |
+| `HARWOOD_MAPS=<private Maps>` with `cargo test --offline --locked -p rerbr-probe --no-default-features --features rerbr-3d --test asset_loading real_harwood_installation -- --ignored --nocapture` | PASS: one explicitly executed test on the real installation |
+| `cargo test --offline --locked --workspace --no-default-features --features rerbr-3d` | PASS: 91 tests; one real-data test intentionally ignored in the ordinary run |
+| `cargo clippy --offline --locked --workspace --all-targets --no-default-features --features rerbr-3d -- -D warnings` | PASS |
+| `cargo test --offline --locked -p rerbr-probe --no-default-features` | PASS: unchanged triangle shader test; feature tests disabled |
+| `cargo clippy --offline --locked -p rerbr-probe --all-targets --no-default-features -- -D warnings` | PASS |
+| `cargo fmt --all -- --check` | PASS |
+| Default normal dependency tree | PASS: only futures-executor, wgpu and winit are direct dependencies; no asset or camera library enabled |
+| Asset dependency tree for aarch64-apple-ios | Inspected: ZIP/CRC/deflate/zlib-rs and Rust helpers; this is not a target compilation |
+| Source integrity | All eleven new import hashes match; the existing camera vendor files and all scene/shader files match the preceding snapshot |
+| Host integration integrity | After removing only the new module declaration and diagnostic call, src/lib.rs matches the preceding source exactly |
+
+The six generated-fixture tests cover complete O-to-N resolution, case/slash
+differences, GPU capability warnings, missing archives, bad DDS, CRC corruption,
+path traversal, wrong block counts, truncated LBS and unused-vs-required errors.
+No fixture was extracted from game files. Original upstream parser tests are retained.
+
+Changed only the experiment's `.gitignore`, Cargo manifest/lockfile, `src/lib.rs`,
+`xcode/ReRBRProbe/main.m`, `scripts/verify.py`, README and this record. New files are
+`HARWOOD.md`, `src/asset_probe.rs`, `examples/harwood-diagnostic.rs`,
+`tests/asset_loading.rs` and the complete new vendor directory. HARWOOD.md lists the
+copy destinations and the five private files needed on the device. Source/package
+preflight now also rejects private resource filenames and verifies the new imports.
+
+The workflows, build-ios.sh, Xcode project/settings, Info.plist, signing/IPA layout,
+corrected lipo invocation, original engine and RSF installation were not modified.
+No proprietary asset was copied into the workspace, bundled or uploaded. No commit
+or push was attempted; Git is unavailable and this checkout has no Git metadata.
+
+Python preflight could not be executed locally: only WindowsApps aliases are present,
+with no usable interpreter found. Its updated checks were reviewed, with hashes,
+dependency selection and absence of source assets independently inspected on Windows.
+The normal macOS Actions script will run it before the Apple build and against the IPA.
+Full original-engine checks were not run because the original engine is outside this
+isolated batch. No native Objective-C/Xcode/iOS build or physical-device check was run.
+
+Pending: Actions with `rerbr-3d`, normal signing/install, private-file transfer to
+Documents, relaunch, BC/log verification, and visual/touch/lifecycle comparison of
+both existing modes on the iPad. The app's actual BC flag, sandbox path, thread/log
+behavior and iOS compilation remain unverified on Apple hardware.

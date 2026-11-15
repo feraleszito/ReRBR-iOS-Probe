@@ -4,9 +4,11 @@ An independent iPadOS graphics experiment: Rust, winit **0.30.13**, wgpu **30.0.
 and the **Metal** backend. By default it draws a dark background and a rotating, coloured
 triangle. With `rerbr-3d`, it draws a procedural floor and cube through a fixed camera
 using the original reRBR coordinate/camera library. Touch the screen to switch the
-background in either configuration. There are no original
-game-system crates, physics, SDL, audio, Richard Burns Rally files, RallySimFans files,
-textures or downloads of game content.
+background in either configuration. The feature build also has a read-only Harwood
+file diagnostic using selected original reRBR readers. It does not display the stage.
+No physics, SDL, audio, Richard Burns Rally files, RallySimFans files, textures or
+downloads of game content are bundled. See [HARWOOD.md](HARWOOD.md) for private-file
+transfer and the actual Windows validation results.
 
 The Cargo manifest declares its own workspace, lockfile and toolchain (**Rust 1.97.1**).
 Building this directory does not build or alter the parent workspace. Runtime dependencies
@@ -22,11 +24,15 @@ development dependency for validating the embedded WGSL shader.
 | `src/triangle.wgsl` | Embedded animated triangle shader; no optional GPU features |
 | `src/scene3d.rs`, `src/scene3d.wgsl` | Optional indexed 3D pass, fixed camera uniform and reversed-depth target |
 | `src/scene_geometry.rs` | Procedural floor/cube and fixed camera; no commercial data |
+| `src/asset_probe.rs` | Optional CPU-only Harwood audit from private Documents files |
+| `examples/harwood-diagnostic.rs` | Read-only Windows/macOS command-line entry for the same audit |
 | `tests/shader.rs` | Naga parsing and validation without optional shader capabilities |
 | `tests/core_math.rs` | Optional-dependency projection/orbit integration tests, enabled by `rerbr-3d` |
 | `tests/scene_geometry.rs` | Geometry, visibility, clockwise winding and depth-order checks |
+| `tests/asset_loading.rs` | Generated fixture checks and an explicitly enabled private-install test |
 | `vendor/rerbr-render-core/` | Original coordinate/camera sources and tests, license and provenance hashes |
-| `xcode/ReRBRProbe/main.m` | Native entry, diagnostic file, call into the Rust static library |
+| `vendor/rerbr-asset-formats/` | Unmodified LBS/INI/texture-map/RBZ/DDS readers, license and provenance |
+| `xcode/ReRBRProbe/main.m` | Native entry, diagnostic file, sandbox Documents path, Rust entry |
 | `xcode/ReRBRProbe/Info.plist`, `LaunchScreen.storyboard` | iPad bundle configuration and launch screen |
 | `xcode/ReRBRProbe.xcodeproj/` | Minimal Xcode project and shared Release scheme |
 | `scripts/build-ios.sh` | Build the static library and app, package and inspect the unsigned IPA |
@@ -37,10 +43,13 @@ development dependency for validating the embedded WGSL shader.
 
 The app's default feature set is empty. Its default workspace member is the app itself,
 so the existing build still selects the triangle. `rerbr-3d` enables the optional path
-dependency `vendor/rerbr-render-core` and the app's separate floor/cube pass. The original
+dependencies `vendor/rerbr-render-core`, `vendor/rerbr-asset-formats`, and the app's
+separate floor/cube pass and background file audit. The original
 triangle shader, pipeline state and animation/draw calculations are retained behind
-`cfg(not(feature = "rerbr-3d"))`. The touch and lifecycle handlers, native entry and Xcode
-files are unchanged. No 3D buffers or depth target are created in triangle mode.
+`cfg(not(feature = "rerbr-3d"))`. The touch and lifecycle handlers and Xcode project
+are unchanged. The native entry now passes Foundation's Documents path before Rust
+starts; triangle mode does not start the file audit. No 3D buffers or depth target
+are created in triangle mode.
 
 The core library contains verbatim copies of `coords.rs`, `camera.rs` and `triple.rs`
 from the original `rbr-render` source. `triple.rs` supplies types used by the camera;
@@ -62,18 +71,18 @@ and the `Depth32Float` target uses reverse-Z: clear to `coords::DEPTH_CLEAR` (0)
 compare `Greater`, write depth. The target is recreated for the drawable's new size
 when drawing resumes. The host still skips zero-sized/suspended drawables. This is a
 new diagnostic pass using reRBR mathematics, not the complete original stage renderer.
-There are no textures, lighting systems, physics, audio, asset files or new dependencies.
+The procedural pass still uses no textures, lighting systems, physics, audio or asset files.
 
 See `vendor/rerbr-render-core/UPSTREAM.md` for original paths and SHA-256 hashes, and
 `vendor/rerbr-render-core/LICENSE` for the retained license. The preflight verifier allows
-only this additional local optional dependency and checks the imported source hashes.
+only the two selected local optional dependencies and checks their imported source hashes.
 
 From the standalone repository root, run:
 
 ```sh
 # Existing app and triangle test, without enabling the imported library.
 cargo test --locked -p rerbr-probe --no-default-features
-# Imported math tests, projection/geometry tests and both shader validations.
+# Imported reader/math tests, generated asset fixtures, geometry and WGSL validation.
 cargo test --locked --workspace --all-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
@@ -85,7 +94,7 @@ selection from `PROBE_MODE` (default `triangle`) and rejects any other value:
 | Selection | Cargo feature flags | macOS host tests | Image shown |
 | --- | --- | --- | --- |
 | `triangle` (default) | `--no-default-features` | Existing triangle shader test | Triangle |
-| `rerbr-3d` | `--no-default-features --features rerbr-3d` | Full workspace: math, geometry and shader tests | Fixed floor and cube |
+| `rerbr-3d` | `--no-default-features --features rerbr-3d` | Full workspace: readers, math, geometry and shaders | Fixed floor and cube; optional private-file audit in the log |
 
 The selected feature flags are passed to the host tests, iOS Clippy, the **release
 static-library build for `aarch64-apple-ios`**, and a dependency-tree diagnostic. The

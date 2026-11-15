@@ -3,3 +3,19 @@
 /.validation/
 *.xcuserstate
 xcuserdata/
+
+# Private game content belongs outside this repository and outside the IPA.
+/private-assets/
+/Harwood/
+/Maps/
+/Cars/
+*.lbs
+*.dds
+*.rbz
+*.sgc
+*.trk
+*.dls
+*.col
+*.fnc
+*.mat
+*.zip

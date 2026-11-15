@@ -1,0 +1,10 @@
+[package]
+name = "rerbr-asset-formats"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later"
+description = "Unmodified reRBR readers selected for a private Harwood asset diagnostic"
+
+[dependencies]
+zip = { version = "=9.0.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
