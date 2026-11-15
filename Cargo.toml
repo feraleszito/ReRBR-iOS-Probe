@@ -17,8 +17,9 @@ resolver = "2"
 default = []
 # Optional 3D scene and private-file diagnostic; default stays triangle.
 rerbr-3d = ["dep:rerbr-render-core", "dep:rerbr-asset-formats"]
-# Separate visual experiment. With both features enabled, this mode takes priority.
+# Independent visual experiments. Priority: neighbors > block > procedural 3D > triangle.
 harwood-block = ["dep:rerbr-render-core", "dep:rerbr-asset-formats"]
+harwood-neighbors = ["dep:rerbr-render-core", "dep:rerbr-asset-formats"]
 
 [lib]
 name = "rerbr_probe"
@@ -41,6 +42,10 @@ required-features = ["rerbr-3d"]
 [[example]]
 name = "harwood-block-diagnostic"
 required-features = ["harwood-block"]
+
+[[example]]
+name = "harwood-neighbors-diagnostic"
+required-features = ["harwood-neighbors"]
 
 [profile.release]
 panic = "abort"

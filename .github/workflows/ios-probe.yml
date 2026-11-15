@@ -15,6 +15,7 @@ on:
           - triangle
           - rerbr-3d
           - harwood-block
+          - harwood-neighbors
 
 permissions:
   contents: read

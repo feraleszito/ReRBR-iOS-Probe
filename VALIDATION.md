@@ -461,3 +461,83 @@ preflight on macOS (no usable local Python/Bash), Metal pipeline creation,
 actual device BC feature enablement, all texture uploads, screenshots in each
 view/orientation, depth/material appearance, touch/lifecycle and fallback-mode
 checks. The stage-2 docs explicitly do not claim physical iPad success.
+
+## Connected Harwood geometry: stage 3
+
+Subsequent owner report: stage 2 passed on the iPad mini A17 Pro with block 269,
+original geometry and BC1/BC2 textures. That supersedes the stage-2 pending status
+above. This environment has not compiled or rendered the new stage-3 mode for iOS.
+
+Added independent `harwood-neighbors`, a connected frontier selected from actual
+shared triangle-boundary segments and guided by original LBS driveline/road
+triangles. It reuses the unchanged mesh converter, camera maths, shader, BC upload
+and reverse-depth state. Original positions are retained. Only index/range offsets
+and texture aliases change when merging meshes. All imported vendor files remain
+byte-identical. The old block loader retains its non-deduplicated return contract.
+
+Read-only measurement of the owner's Windows Maps installation:
+
+```text
+IDs: 269,260,252,261,262,253,254,263,264,255,270,274,268,275,259,273,251,258,267,250
+blocks=20; vertices=18983; triangles=9539; draws=124
+material bindings=248; logical IDs=8; unique resolved DDS=8
+VB+IB=721924 bytes; stored BC mips=1827840; combined GPU payload=2549764
+source LBS=28014518 bytes; all converted mesh payload=7164920
+road coverage=71/71; one sampled run from 0 to 588.1199m; unmatched=0
+internal sampled gaps=0; all 19 tree connections have endpoint residual=0m
+```
+
+All 20 blocks fit the 400-draw/16-MiB-mesh/32-MiB-compressed-texture budgets; no
+reduction occurred. Memory values exclude driver/state/alignment, surface/depth
+images and CPU graph/parse overhead. Depth payload is separately logged on resize.
+These estimates are not a measured peak or resident-memory benchmark. Sampled
+coverage/edge matching cannot prove a watertight surface; see
+HARWOOD-NEIGHBORS.md for tolerances and other limits.
+
+Windows validation with the pinned Rust 1.97.1 MSVC toolchain and existing offline
+Cargo cache (all Cargo checks below used `--offline --locked`):
+
+| Check | Result |
+| --- | --- |
+| `cargo run --example harwood-neighbors-diagnostic --no-default-features --features harwood-neighbors -- <private Maps>` | PASS; actual selection, conversion, DDS resolution and CPU mip plans |
+| Workspace tests, `--no-default-features --features harwood-neighbors` | PASS: 84 tests; two private-data tests ignored by default |
+| Workspace tests, `--all-features` | PASS: 103 tests; four private-data tests ignored by default |
+| Explicit workspace `--all-features -- --ignored --nocapture` with HARWOOD_MAPS | PASS: all four real-data tests executed (stage-1 audit, single block, connected region and DDS aliases) |
+| Workspace tests, `harwood-block` alone | PASS: 83 tests; one private-data test ignored |
+| Workspace tests, `rerbr-3d` alone | PASS: 91 tests; one private-data test ignored |
+| Default triangle app tests with `--no-default-features` | PASS: one unchanged triangle shader test |
+| Workspace/all-targets Clippy for neighbors, block, rerbr-3d and all-features; default app Clippy | PASS with `-D warnings` |
+| `cargo fmt --all -- --check` | PASS |
+
+Six new synthetic tests cover genuine edge connectivity versus box/corner/ID
+coincidence, elevated disjoint surfaces, road-first selection, mesh/draw budget
+limits, connected-prefix texture pruning, index/range/world-position preservation
+and road-triangle height checks. The real-region test validates connectivity,
+budgets, unique resolved DDS, material/index ranges and all indexed vertices in
+four aspect-ratio frusta. The separate real-alias test loads IDs 0/12/22/23 and
+retains two DDS. These private tests require explicit opt-in; no private fixtures
+were added to normal CI.
+
+Changed local experiment files only: Cargo.toml, src/lib.rs, src/asset_probe.rs,
+src/harwood/{mod.rs,gpu.rs,UPSTREAM.md}, tests/shader.rs,
+scripts/{build-ios.sh,verify.py}, github-actions/ios-probe.yml, README.md,
+HARWOOD-BLOCK.md and this record. Added HARWOOD-NEIGHBORS.md,
+examples/harwood-neighbors-diagnostic.rs, src/harwood/{neighbors.rs,neighbors_tests.rs}
+and tests/harwood_neighbors.rs. Local `.validation/` contains ignored baselines,
+build products and check logs, not application resources or files for synchronization.
+
+The script/template change is limited to selecting the new mode, its feature and
+workspace host tests. Cargo/Xcode paths, previous lipo fix, signing and IPA packaging
+are retained. Cargo.lock, vendor sources, native/Xcode files, procedural scene,
+triangle and terrain shaders/converter are unchanged by SHA-256 comparison with
+the pre-stage-3 snapshot. No proprietary file was copied into this experiment.
+No original engine/RSF file, active workflow or GitHub Desktop clone was modified.
+No commit, push, Actions run or dependency installation was performed.
+
+Python/Bash preflight could not be run locally: no usable interpreter was found
+in the available commands. Source/hash/asset-presence checks were inspected on
+Windows; macOS must run the existing preflight during the eventual build.
+Pending: first stage-3 aarch64-apple-ios build, Metal uploads and panoramic image,
+three-view/orientation/lifecycle regressions, seamless-looking road/terrain, frame
+time and real peak/resident memory on the iPad. No screenshot, Metal execution or
+physical success is claimed for stage 3.

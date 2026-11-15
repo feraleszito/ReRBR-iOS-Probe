@@ -11,13 +11,23 @@ use winit::event::{TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-#[cfg(any(feature = "rerbr-3d", feature = "harwood-block"))]
+#[cfg(any(
+    feature = "rerbr-3d",
+    feature = "harwood-block",
+    feature = "harwood-neighbors"
+))]
 pub mod asset_probe;
-#[cfg(feature = "harwood-block")]
+#[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
 pub mod harwood;
-#[cfg(all(feature = "rerbr-3d", not(feature = "harwood-block")))]
+#[cfg(all(
+    feature = "rerbr-3d",
+    not(any(feature = "harwood-block", feature = "harwood-neighbors"))
+))]
 mod scene3d;
-#[cfg(all(feature = "rerbr-3d", not(feature = "harwood-block")))]
+#[cfg(all(
+    feature = "rerbr-3d",
+    not(any(feature = "harwood-block", feature = "harwood-neighbors"))
+))]
 mod scene_geometry;
 
 const FRAME_PERIOD: Duration = Duration::from_nanos(16_666_667);
@@ -97,7 +107,7 @@ impl ApplicationHandler for Probe {
             }
             WindowEvent::Touch(touch) if touch.phase == TouchPhase::Started => {
                 renderer.alternate_background = !renderer.alternate_background;
-                #[cfg(feature = "harwood-block")]
+                #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
                 renderer.harwood.cycle_mode();
                 eprintln!("touch: background changed");
             }
@@ -134,19 +144,38 @@ struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    #[cfg(not(any(feature = "rerbr-3d", feature = "harwood-block")))]
+    #[cfg(not(any(
+        feature = "rerbr-3d",
+        feature = "harwood-block",
+        feature = "harwood-neighbors"
+    )))]
     pipeline: wgpu::RenderPipeline,
-    #[cfg(not(any(feature = "rerbr-3d", feature = "harwood-block")))]
+    #[cfg(not(any(
+        feature = "rerbr-3d",
+        feature = "harwood-block",
+        feature = "harwood-neighbors"
+    )))]
     uniform: wgpu::Buffer,
-    #[cfg(not(any(feature = "rerbr-3d", feature = "harwood-block")))]
+    #[cfg(not(any(
+        feature = "rerbr-3d",
+        feature = "harwood-block",
+        feature = "harwood-neighbors"
+    )))]
     bind_group: wgpu::BindGroup,
-    #[cfg(all(feature = "rerbr-3d", not(feature = "harwood-block")))]
+    #[cfg(all(
+        feature = "rerbr-3d",
+        not(any(feature = "harwood-block", feature = "harwood-neighbors"))
+    ))]
     scene: scene3d::Scene3d,
-    #[cfg(feature = "harwood-block")]
+    #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
     harwood: harwood::Scene,
     size: PhysicalSize<u32>,
     reconfigure: bool,
-    #[cfg(not(any(feature = "rerbr-3d", feature = "harwood-block")))]
+    #[cfg(not(any(
+        feature = "rerbr-3d",
+        feature = "harwood-block",
+        feature = "harwood-neighbors"
+    )))]
     started: Instant,
     frames: u64,
     alternate_background: bool,
@@ -180,12 +209,15 @@ impl Renderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("ReRBRProbe Metal device"),
-                #[cfg(feature = "harwood-block")]
+                #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
                 required_features: adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC,
                 ..Default::default()
             })
             .await?;
-        #[cfg(all(feature = "rerbr-3d", not(feature = "harwood-block")))]
+        #[cfg(all(
+            feature = "rerbr-3d",
+            not(any(feature = "harwood-block", feature = "harwood-neighbors"))
+        ))]
         asset_probe::start_from_documents(
             adapter
                 .features()
@@ -195,9 +227,10 @@ impl Renderer {
                 .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
             device.limits().max_texture_dimension_2d,
         );
-        #[cfg(feature = "harwood-block")]
+        #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
         eprintln!(
-            "harwood-block DEVICE: adapter BC={}, device BC enabled={}",
+            "{} DEVICE: adapter BC={}, device BC enabled={}",
+            harwood::MODE_NAME,
             adapter
                 .features()
                 .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
@@ -215,7 +248,11 @@ impl Renderer {
             config.width, config.height, config.format
         );
 
-        #[cfg(not(any(feature = "rerbr-3d", feature = "harwood-block")))]
+        #[cfg(not(any(
+            feature = "rerbr-3d",
+            feature = "harwood-block",
+            feature = "harwood-neighbors"
+        )))]
         let (pipeline, uniform, bind_group) = {
             let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("animated triangle"),
@@ -258,9 +295,12 @@ impl Renderer {
             });
             (pipeline, uniform, bind_group)
         };
-        #[cfg(all(feature = "rerbr-3d", not(feature = "harwood-block")))]
+        #[cfg(all(
+            feature = "rerbr-3d",
+            not(any(feature = "harwood-block", feature = "harwood-neighbors"))
+        ))]
         let scene = scene3d::Scene3d::new(&device, config.format);
-        #[cfg(feature = "harwood-block")]
+        #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
         let harwood = harwood::Scene::new(
             device
                 .features()
@@ -273,19 +313,38 @@ impl Renderer {
             device,
             queue,
             config,
-            #[cfg(not(any(feature = "rerbr-3d", feature = "harwood-block")))]
+            #[cfg(not(any(
+                feature = "rerbr-3d",
+                feature = "harwood-block",
+                feature = "harwood-neighbors"
+            )))]
             pipeline,
-            #[cfg(not(any(feature = "rerbr-3d", feature = "harwood-block")))]
+            #[cfg(not(any(
+                feature = "rerbr-3d",
+                feature = "harwood-block",
+                feature = "harwood-neighbors"
+            )))]
             uniform,
-            #[cfg(not(any(feature = "rerbr-3d", feature = "harwood-block")))]
+            #[cfg(not(any(
+                feature = "rerbr-3d",
+                feature = "harwood-block",
+                feature = "harwood-neighbors"
+            )))]
             bind_group,
-            #[cfg(all(feature = "rerbr-3d", not(feature = "harwood-block")))]
+            #[cfg(all(
+                feature = "rerbr-3d",
+                not(any(feature = "harwood-block", feature = "harwood-neighbors"))
+            ))]
             scene,
-            #[cfg(feature = "harwood-block")]
+            #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
             harwood,
             size,
             reconfigure: true,
-            #[cfg(not(any(feature = "rerbr-3d", feature = "harwood-block")))]
+            #[cfg(not(any(
+                feature = "rerbr-3d",
+                feature = "harwood-block",
+                feature = "harwood-neighbors"
+            )))]
             started: Instant::now(),
             frames: 0,
             alternate_background: false,
@@ -332,7 +391,11 @@ impl Renderer {
                 panic!("surface acquisition validation error")
             }
         };
-        #[cfg(not(any(feature = "rerbr-3d", feature = "harwood-block")))]
+        #[cfg(not(any(
+            feature = "rerbr-3d",
+            feature = "harwood-block",
+            feature = "harwood-neighbors"
+        )))]
         {
             let seconds = self.started.elapsed().as_secs_f32();
             let angle = seconds * 0.7;
@@ -365,7 +428,7 @@ impl Renderer {
             }
         };
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        #[cfg(feature = "harwood-block")]
+        #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
         self.harwood.draw(
             &self.device,
             &self.queue,
@@ -375,7 +438,10 @@ impl Renderer {
             self.config.format,
             background,
         );
-        #[cfg(all(feature = "rerbr-3d", not(feature = "harwood-block")))]
+        #[cfg(all(
+            feature = "rerbr-3d",
+            not(any(feature = "harwood-block", feature = "harwood-neighbors"))
+        ))]
         self.scene.draw(
             &self.device,
             &self.queue,
@@ -384,7 +450,11 @@ impl Renderer {
             (self.config.width, self.config.height),
             background,
         );
-        #[cfg(not(any(feature = "rerbr-3d", feature = "harwood-block")))]
+        #[cfg(not(any(
+            feature = "rerbr-3d",
+            feature = "harwood-block",
+            feature = "harwood-neighbors"
+        )))]
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("probe frame"),
@@ -406,7 +476,7 @@ impl Renderer {
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.queue.present(frame);
-        #[cfg(feature = "harwood-block")]
+        #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
         self.harwood.finish_frame();
         self.frames += 1;
         if self.frames == 1 || self.frames.is_multiple_of(600) {

@@ -12,8 +12,13 @@ transfer and the actual Windows validation results.
 
 The independent `harwood-block` feature adds the first real road/terrain block,
 selected near the private stage's start, with BC texture uploads and diagnostic
-views. See [HARWOOD-BLOCK.md](HARWOOD-BLOCK.md). Stage 1 is owner-confirmed on the
-iPad; this new rendering path still requires its own Actions build and device test.
+views. See [HARWOOD-BLOCK.md](HARWOOD-BLOCK.md). The owner confirms that block 269
+and its BC1/BC2 textures work on the iPad mini A17 Pro.
+
+The independent `harwood-neighbors` feature expands that same pass to a connected
+road/terrain region, with shared DDS allocations and a fixed panoramic camera.
+Windows selected 20 blocks around 269; this new mode still needs its own Actions
+build and physical test. See [HARWOOD-NEIGHBORS.md](HARWOOD-NEIGHBORS.md).
 
 The Cargo manifest declares its own workspace, lockfile and toolchain (**Rust 1.97.1**).
 Building this directory does not build or alter the parent workspace. Runtime dependencies
@@ -30,9 +35,10 @@ development dependency for validating the embedded WGSL shader.
 | `src/scene3d.rs`, `src/scene3d.wgsl` | Optional indexed 3D pass, fixed camera uniform and reversed-depth target |
 | `src/scene_geometry.rs` | Procedural floor/cube and fixed camera; no commercial data |
 | `src/asset_probe.rs` | Optional CPU-only Harwood audit from private Documents files |
-| `src/harwood/` | Optional single-block CPU conversion, BC upload, fixed camera, GPU pass and provenance |
+| `src/harwood/` | Shared real-terrain conversion/Metal pass, single-block loader, optional connected selection, BC upload and provenance |
 | `examples/harwood-diagnostic.rs` | Read-only Windows/macOS command-line entry for the same audit |
 | `examples/harwood-block-diagnostic.rs`, `tests/harwood_block.rs` | Single-block CPU diagnostic and synthetic/opt-in real-data tests |
+| `examples/harwood-neighbors-diagnostic.rs`, `tests/harwood_neighbors.rs`, `src/harwood/neighbors_tests.rs` | Connected-region CPU diagnostic, spatial/budget tests and opt-in real-data checks |
 | `tests/shader.rs` | Naga parsing and validation without optional shader capabilities |
 | `tests/core_math.rs` | Optional-dependency projection/orbit integration tests, enabled by `rerbr-3d` |
 | `tests/scene_geometry.rs` | Geometry, visibility, clockwise winding and depth-order checks |
@@ -53,8 +59,8 @@ so the existing build still selects the triangle. `rerbr-3d` enables the optiona
 dependencies `vendor/rerbr-render-core`, `vendor/rerbr-asset-formats`, and the app's
 separate floor/cube pass and background file audit. The original
 triangle shader, pipeline state and animation/draw calculations are retained for
-the configuration that enables neither optional visual feature. Touch/lifecycle
-behavior in the two existing modes and the Xcode project are unchanged.
+the configuration that enables none of the optional visual features. Existing
+touch/lifecycle behavior and the Xcode project are retained.
 The native entry passes Foundation's Documents path before Rust
 starts; triangle mode does not start the file audit. No 3D buffers or depth target
 are created in triangle mode.
@@ -104,14 +110,16 @@ selection from `PROBE_MODE` (default `triangle`) and rejects any other value:
 | `triangle` (default) | `--no-default-features` | Existing triangle shader test | Triangle |
 | `rerbr-3d` | `--no-default-features --features rerbr-3d` | Full workspace: readers, math, geometry and shaders | Fixed floor and cube; optional private-file audit in the log |
 | `harwood-block` | `--no-default-features --features harwood-block` | Full workspace: readers, math, block conversion, BC layout and shaders | One private Harwood block; touch cycles material/colour/UV views |
+| `harwood-neighbors` | `--no-default-features --features harwood-neighbors` | Full workspace: readers, math, connected selection/budgets, BC layout and shaders | Connected private terrain/road region; same three diagnostic views |
 
 The selected feature flags are passed to the host tests, iOS Clippy, the **release
 static-library build for `aarch64-apple-ios`**, and a dependency-tree diagnostic. The
 existing Xcode library search path, ARM64 checks, unsigned IPA packaging and signing
-restrictions are unchanged. The local workflow template and script now accept the
-third selection. The active parent-workspace workflow and the GitHub Desktop
+restrictions are unchanged. The local workflow template and script now accept all
+four selections. The active parent-workspace workflow and the GitHub Desktop
 repository have not been synchronized for this step. No Actions run was started.
-When both optional features are enabled, `harwood-block` takes priority; the
+If multiple visual features are enabled, priority is `harwood-neighbors`, then
+`harwood-block`, then `rerbr-3d`; the
 separate `rerbr-3d` selection retains the cube and stage-1 audit.
 
 On a macOS host with Xcode and the iOS target, an explicit feature-only type check is:
@@ -120,9 +128,9 @@ On a macOS host with Xcode and the iOS target, an explicit feature-only type che
 cargo check --locked --lib --target aarch64-apple-ios --features rerbr-3d
 ```
 
-The new `harwood-block` Apple-target build has not been performed here. Windows mathematics
-and type checks do not establish iPadOS compatibility; run Actions with `rerbr-3d` to
-verify the selected configuration.
+The new `harwood-neighbors` Apple-target build has not been performed here.
+Windows mathematics and type checks do not establish iPadOS compatibility; a
+subsequent authorized sync and Actions run must verify that configuration.
 
 ## Build on GitHub Actions from Windows
 
@@ -146,8 +154,8 @@ GitHub signing secrets are used to build the unsigned IPA.
    Ensure the workflow is present on the **default branch** so the manual Run workflow
    button appears. Enable Actions if this is a fork with workflows disabled.
 4. Open **Actions > ReRBRProbe unsigned iPadOS > Run workflow**. Choose `build_mode`:
-   **triangle** for the existing fallback, or **rerbr-3d** for the floor/cube scene using
-   the coordinate/camera library. Start a new run using the updated
+   **triangle** for the fallback, **rerbr-3d** for floor/cube, **harwood-block** for
+   one real block, or **harwood-neighbors** for the connected region. Start a new run using the updated
    commit; re-running an old job uses its old workflow/script revision.
 5. Download `ReRBRProbe-unsigned-<build_mode>-<run number>`. Extract the artifact ZIP on Windows to obtain
    `ReRBRProbe-unsigned.ipa` and `SHA256SUMS`. The artifact ZIP itself is not the IPA.

@@ -49,3 +49,17 @@ in vendor/rerbr-asset-formats/UPSTREAM.md and camera provenance in
 vendor/rerbr-render-core/UPSTREAM.md. The shared app asset reader now exposes a
 selected-diffuse byte path so the audit and the visual mode use the same mapping
 and archive/CRC rules; stage-1 requests and required/unused semantics are retained.
+
+Stage 3 adds app-owned neighbors.rs selection and tests. It calls the same
+unchanged block converter for each selected LBS geometry block. Connectivity is
+measured on triangle boundary edges in original world coordinates; the LBS's
+already-parsed DrivelinePoints guide static selection and coverage diagnostics.
+No physics, object-lane or tree renderer is added. Merging offsets only vertex
+indices and draw ranges, never positions, colours or UVs. The unchanged WGSL,
+BC upload and reverse-depth pipeline render the resulting mesh.
+
+The shared asset reader deduplicates normalized resolved archive paths before
+inflating/retaining DDS data in neighbor mode. Logical texture IDs are mapped to
+canonical IDs in draw records, so the existing GPU texture map uploads each
+resolved DDS once. The previous single-block loader retains its non-aliasing
+return contract. Existing vendor files and original engine files remain unchanged.

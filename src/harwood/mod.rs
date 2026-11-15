@@ -1,8 +1,15 @@
-//! Stage 2: one real stage block, not a complete stage renderer.
+//! Real terrain diagnostics: single block or optional connected neighbors.
 
 mod gpu;
 pub mod mesh;
+#[cfg(feature = "harwood-neighbors")]
+pub mod neighbors;
 pub mod texture;
+
+#[cfg(feature = "harwood-neighbors")]
+pub const MODE_NAME: &str = "harwood-neighbors";
+#[cfg(not(feature = "harwood-neighbors"))]
+pub const MODE_NAME: &str = "harwood-block";
 pub(crate) use gpu::Scene;
 
 use crate::asset_probe::{self, TextureData};

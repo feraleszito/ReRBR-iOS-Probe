@@ -16,7 +16,10 @@ const MIB: u64 = 1024 * 1024;
 
 /// Runs once on a background thread after GPU creation. Missing, partial or
 /// unreadable private data never changes the scene or prevents app startup.
-#[cfg(all(feature = "rerbr-3d", not(feature = "harwood-block")))]
+#[cfg(all(
+    feature = "rerbr-3d",
+    not(any(feature = "harwood-block", feature = "harwood-neighbors"))
+))]
 pub(crate) fn start_from_documents(bc_supported: bool, bc_enabled: bool, max_dimension: u32) {
     static START: std::sync::Once = std::sync::Once::new();
     START.call_once(|| {
@@ -338,21 +341,45 @@ fn texture(
 
 pub(crate) struct TextureData {
     pub info: TextureInfo,
-    #[cfg(feature = "harwood-block")]
+    #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
     pub bytes: Vec<u8>,
 }
 
 /// Stage 2 reads the same private files and rules as the existing audit.
-#[cfg(feature = "harwood-block")]
+#[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
 pub(crate) fn read_stage(maps: &Path) -> Result<Vec<u8>, String> {
     read_limited(Files::new(maps)?.find("track-20_O.lbs")?, 96 * MIB)
 }
 
-#[cfg(feature = "harwood-block")]
+#[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
 pub(crate) fn load_diffuse(
     maps: &Path,
     indices: &BTreeSet<u32>,
 ) -> Result<BTreeMap<u32, TextureData>, String> {
+    load_diffuse_impl(maps, indices, false).map(|shared| shared.textures)
+}
+
+#[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
+pub(crate) struct SharedTextures {
+    pub textures: BTreeMap<u32, TextureData>,
+    #[cfg_attr(not(feature = "harwood-neighbors"), allow(dead_code))]
+    pub aliases: BTreeMap<u32, u32>,
+}
+
+#[cfg(feature = "harwood-neighbors")]
+pub(crate) fn load_diffuse_shared(
+    maps: &Path,
+    indices: &BTreeSet<u32>,
+) -> Result<SharedTextures, String> {
+    load_diffuse_impl(maps, indices, true)
+}
+
+#[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
+fn load_diffuse_impl(
+    maps: &Path,
+    indices: &BTreeSet<u32>,
+    deduplicate: bool,
+) -> Result<SharedTextures, String> {
     let files = Files::new(maps)?;
     let ini_bytes = read_limited(files.find("track-20_O.ini")?, 2 * MIB)?;
     let sections = ini::parse(&String::from_utf8_lossy(&ini_bytes)).map_err(|e| e.to_string())?;
@@ -363,20 +390,31 @@ pub(crate) fn load_diffuse(
         files: &files,
         open: BTreeMap::new(),
     };
-    indices
-        .iter()
-        .map(|&index| {
-            let data = texture_data(
-                &mut archives,
-                &remap,
-                &sections,
-                info,
-                TextureKind::Diffuse,
-                index,
-            )?;
-            Ok((index, data))
-        })
-        .collect()
+    let mut textures = BTreeMap::new();
+    let mut aliases = BTreeMap::new();
+    let mut canonical = BTreeMap::new();
+    for &index in indices {
+        let request = texture_requests(&sections, info, TextureKind::Diffuse, index)?;
+        let resolved = normalized(&remap.resolve(&request[0]))?;
+        if deduplicate {
+            if let Some(&id) = canonical.get(&resolved) {
+                aliases.insert(index, id);
+                continue; // Do not inflate or retain the same DDS a second time.
+            }
+        }
+        let data = texture_data(
+            &mut archives,
+            &remap,
+            &sections,
+            info,
+            TextureKind::Diffuse,
+            index,
+        )?;
+        canonical.insert(resolved, index);
+        aliases.insert(index, index);
+        textures.insert(index, data);
+    }
+    Ok(SharedTextures { textures, aliases })
 }
 
 fn texture_data(
@@ -387,19 +425,7 @@ fn texture_data(
     kind: TextureKind,
     index: u32,
 ) -> Result<TextureData, String> {
-    let key = format!("{}{index}", kind.prefix());
-    let name = info.get(&key).ok_or_else(|| format!("missing {key}"))?;
-    let ground = section(sections, name)
-        .and_then(|s| s.get("IsGroundTexture"))
-        .is_some_and(|s| s.eq_ignore_ascii_case("true"));
-    let requests = match kind {
-        TextureKind::Diffuse => vec![stage_textures::texture_request(
-            STAGE, name, ground, "dry", "new",
-        )],
-        TextureKind::Specular => {
-            stage_textures::specular_requests(STAGE, name, "dry", "new").to_vec()
-        }
-    };
+    let requests = texture_requests(sections, info, kind, index)?;
     let mut errors = String::new();
     for request in requests {
         let resolved = remap.resolve(&request);
@@ -416,7 +442,7 @@ fn texture_data(
                     };
                     return Ok(TextureData {
                         info,
-                        #[cfg(feature = "harwood-block")]
+                        #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
                         bytes,
                     });
                 }
@@ -430,6 +456,45 @@ fn texture_data(
         }
     }
     Err(errors)
+}
+
+fn texture_requests(
+    sections: &[ini::Section],
+    info: &ini::Section,
+    kind: TextureKind,
+    index: u32,
+) -> Result<Vec<String>, String> {
+    let key = format!("{}{index}", kind.prefix());
+    let name = info.get(&key).ok_or_else(|| format!("missing {key}"))?;
+    let ground = section(sections, name)
+        .and_then(|s| s.get("IsGroundTexture"))
+        .is_some_and(|s| s.eq_ignore_ascii_case("true"));
+    Ok(match kind {
+        TextureKind::Diffuse => vec![stage_textures::texture_request(
+            STAGE, name, ground, "dry", "new",
+        )],
+        TextureKind::Specular => {
+            stage_textures::specular_requests(STAGE, name, "dry", "new").to_vec()
+        }
+    })
+}
+
+#[cfg(feature = "harwood-neighbors")]
+pub(crate) fn diffuse_names(maps: &Path) -> Result<BTreeMap<u32, String>, String> {
+    let files = Files::new(maps)?;
+    let bytes = read_limited(files.find("track-20_O.ini")?, 2 * MIB)?;
+    let sections = ini::parse(&String::from_utf8_lossy(&bytes)).map_err(|e| e.to_string())?;
+    let info = section(&sections, "TextureInfo").ok_or("missing TextureInfo")?;
+    (0..count(info, "NumTextures")?)
+        .map(|id| {
+            Ok((
+                id,
+                info.get(&format!("Texture{id}"))
+                    .ok_or("missing texture name")?
+                    .to_ascii_lowercase(),
+            ))
+        })
+        .collect()
 }
 
 struct Files(BTreeMap<String, PathBuf>);

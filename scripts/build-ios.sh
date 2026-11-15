@@ -18,8 +18,12 @@ case "$PROBE_MODE" in
         CARGO_FEATURE_ARGS+=(--features harwood-block)
         HOST_TEST_ARGS=(--workspace)
         ;;
+    harwood-neighbors)
+        CARGO_FEATURE_ARGS+=(--features harwood-neighbors)
+        HOST_TEST_ARGS=(--workspace)
+        ;;
     *)
-        echo "Unknown PROBE_MODE: $PROBE_MODE (expected triangle, rerbr-3d or harwood-block)." >&2
+        echo "Unknown PROBE_MODE: $PROBE_MODE (expected triangle, rerbr-3d, harwood-block or harwood-neighbors)." >&2
         exit 1
         ;;
 esac
@@ -53,8 +57,8 @@ mkdir -p build
 
 python3 scripts/verify.py
 cargo fmt --manifest-path "$MANIFEST" --all -- --check
-# Run shader validation on the macOS host. With rerbr-3d, also run the imported
-# camera/coordinate unit tests and feature-gated integration tests.
+# Run shader validation on the macOS host. Optional modes also run the imported
+# camera/reader unit tests and their feature-gated integration tests.
 # These are not device/rendering tests.
 # SDKROOT must not point to iPhoneOS when compiling macOS test executables.
 env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET cargo test --manifest-path "$MANIFEST" --locked "${CARGO_FEATURE_ARGS[@]}" "${HOST_TEST_ARGS[@]}" 2>&1 | tee build/host-tests.log

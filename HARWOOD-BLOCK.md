@@ -8,7 +8,9 @@ audio, scenery lanes or game assets are included in this batch.
 
 The owner reports that stage 1 passed on the physical iPad mini A17 Pro, including
 282 blocks/cells, 442 objects, 38/38 required DDS references and adapter BC=true.
-That validates the previous CPU diagnostic, not this new GPU path.
+Subsequent owner report: stage 2 also passed physically on the same device, with
+block 269, original geometry and BC1/BC2 textures. The expanded stage-3 selection
+is separate: see [HARWOOD-NEIGHBORS.md](HARWOOD-NEIGHBORS.md).
 
 ## What was checked on Windows
 
@@ -115,10 +117,10 @@ Specular lighting, original negative mip bias and shadows are deferred. This is
 only terrain/road geometry: no full forest, sky, props or animated objects yet.
 Source provenance and adaptations are in `src/harwood/UPSTREAM.md`.
 
-## Pending validation
+## Physical validation and remaining regression checks
 
-A successful new aarch64-apple-ios build is required, followed by a physical run
-with BC enabled. Verify that road and terrain are visible, facing correctly and
-textured; capture all three diagnostic views in portrait and landscape. Check touch,
-suspend/resume, depth and both fallback modes. If a phase fails, retain the first
-validation error from the log. No iOS success or screenshot is claimed for stage 2.
+The owner confirms a successful stage-2 Actions build and physical rendering of
+block 269 with BC1/BC2 textures. This environment did not run Metal or produce a
+device capture. After shared-code changes, compare this mode with the established
+device result, including all three views, rotation, touch and suspend/resume.
+The separate stage-3 region still requires its first Apple build and physical run.

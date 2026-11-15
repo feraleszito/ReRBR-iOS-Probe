@@ -43,6 +43,8 @@ def verify_sources():
             "unexpected 3D feature dependencies")
     require(manifest["features"]["harwood-block"] == ["dep:rerbr-render-core", "dep:rerbr-asset-formats"],
             "unexpected Harwood feature dependencies")
+    require(manifest["features"]["harwood-neighbors"] == ["dep:rerbr-render-core", "dep:rerbr-asset-formats"],
+            "unexpected neighbor feature dependencies")
     require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats"],
             "unexpected workspace member")
     require(manifest["workspace"]["default-members"] == ["."], "default build must select the triangle app")
@@ -115,7 +117,8 @@ def verify_sources():
     for relative in ("src/scene3d.rs", "src/scene_geometry.rs", "src/scene3d.wgsl"):
         require((ROOT / relative).is_file(), f"missing optional scene source: {relative}")
     require((ROOT / "src/asset_probe.rs").is_file(), "missing optional private-file diagnostic")
-    for relative in ("mod.rs", "mesh.rs", "texture.rs", "gpu.rs", "shader.wgsl", "UPSTREAM.md"):
+    for relative in ("mod.rs", "mesh.rs", "texture.rs", "gpu.rs", "shader.wgsl", "UPSTREAM.md",
+                     "neighbors.rs", "neighbors_tests.rs"):
         require((ROOT / "src/harwood" / relative).is_file(), f"missing Harwood source: {relative}")
     print("PASS: independent manifest, optional libraries, upstream hashes, no game resources, locked versions, Xcode references, plist and XML")
 

@@ -1,5 +1,5 @@
-//! Optional one-block Metal pass. No changes to the triangle/cube passes.
-use super::{texture::upload_plan, Camera, LoadedBlock};
+//! Shared block/connected-terrain Metal pass. Triangle/cube passes remain separate.
+use super::{texture::upload_plan, Camera, LoadedBlock, MODE_NAME};
 use crate::asset_probe::TextureData;
 use rerbr_asset_formats::dds;
 use rerbr_render_core::coords;
@@ -36,9 +36,12 @@ impl Scene {
         let maps = PathBuf::from(documents).join("Harwood/Maps");
         let (tx, rx) = mpsc::channel();
         match std::thread::Builder::new()
-            .name("harwood-block-load".into())
+            .name(format!("{MODE_NAME}-load"))
             .spawn(move || {
+                #[cfg(not(feature = "harwood-neighbors"))]
                 let result = super::load(&maps);
+                #[cfg(feature = "harwood-neighbors")]
+                let result = super::neighbors::load(&maps).map(|set| set.render);
                 let _ = tx.send(result);
             }) {
             Ok(_) => scene.pending = Some(rx),
@@ -48,7 +51,7 @@ impl Scene {
     }
 
     fn fail(&mut self, error: String) {
-        eprintln!("harwood-block FAIL: {error}; red background; see log; existing fallback modes remain separate");
+        eprintln!("{MODE_NAME} FAIL: {error}; red background; see log; existing fallback modes remain separate");
         self.failed = true;
         self.gpu = None;
     }
@@ -56,7 +59,7 @@ impl Scene {
     pub fn cycle_mode(&mut self) {
         self.mode = (self.mode + 1) % 3;
         eprintln!(
-            "harwood-block VIEW: {} (0=textures, 1=vertex colours, 2=UV checker)",
+            "{MODE_NAME} VIEW: {} (0=textures, 1=vertex colours, 2=UV checker)",
             self.mode
         );
     }
@@ -91,7 +94,7 @@ impl Scene {
         if let Some(block) = &mut self.gpu {
             if self.first_frame {
                 self.render_scope = Some(device.push_error_scope(wgpu::ErrorFilter::Validation));
-                eprintln!("harwood-block RENDER: encoding first frame with {} indexed draws; CW/back cull, Depth32Float Greater clear=0", block.draws.len());
+                eprintln!("{MODE_NAME} RENDER: encoding first frame with {} indexed draws; CW/back cull, Depth32Float Greater clear=0", block.draws.len());
             }
             block.draw(
                 device,
@@ -136,7 +139,7 @@ impl Scene {
             self.first_frame = false;
             match futures_executor::block_on(scope.pop()) {
                 Some(error) => self.fail(format!("RENDER validation: {error}")),
-                None => eprintln!("harwood-block RENDER validation PASS: commands submitted; present requested; image must be checked physically"),
+                None => eprintln!("{MODE_NAME} RENDER validation PASS: commands submitted; present requested; image must be checked physically"),
             }
         }
     }
@@ -162,7 +165,7 @@ impl Block {
         data: LoadedBlock,
     ) -> Result<Self, String> {
         eprintln!(
-            "harwood-block UPLOAD: begin block {} with {} DDS references",
+            "{MODE_NAME} UPLOAD: payload anchored at block {} with {} unique DDS allocations",
             data.index,
             data.textures.len()
         );
@@ -172,7 +175,7 @@ impl Block {
             return Err(format!("UPLOAD/pipeline validation: {error}"));
         }
         if result.is_ok() {
-            eprintln!("harwood-block UPLOAD validation PASS: write_texture calls accepted; GPU completion/visible result not established");
+            eprintln!("{MODE_NAME} UPLOAD validation PASS: write_texture calls accepted; GPU completion/visible result not established");
         }
         result
     }
@@ -228,7 +231,7 @@ impl Block {
         if let Some(error) = futures_executor::block_on(pipeline_scope.pop()) {
             return Err(format!("PIPELINE/shader validation: {error}"));
         }
-        eprintln!("harwood-block PIPELINE validation PASS: diffuse/vertex-colour/UV views");
+        eprintln!("{MODE_NAME} PIPELINE validation PASS: diffuse/vertex-colour/UV views");
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("harwood camera and view options"),
             size: 80,
@@ -354,8 +357,15 @@ impl Block {
                     .create_view(&Default::default()),
             );
             self.depth_size = size;
+            #[cfg(feature = "harwood-neighbors")]
             eprintln!(
-                "harwood-block RENDER: depth resized {}x{}; surface sRGB={srgb}",
+                "harwood-neighbors MEMORY: depth={} bytes at {}x{}; one shared depth target",
+                u64::from(size.0) * u64::from(size.1) * 4,
+                size.0,
+                size.1
+            );
+            eprintln!(
+                "{MODE_NAME} RENDER: depth resized {}x{}; surface sRGB={srgb}",
                 size.0, size.1
             );
         }
@@ -417,7 +427,7 @@ fn upload(
         _ => return Err("unsupported BC format".into()),
     };
     eprintln!(
-        "harwood-block UPLOAD: {} | {format:?} {}x{} mips={}",
+        "{MODE_NAME} UPLOAD: {} | {format:?} {}x{} mips={}",
         data.info.resolved,
         first.width,
         first.height,

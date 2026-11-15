@@ -23,7 +23,7 @@ fn scene_shader_validates_without_optional_gpu_capabilities() {
     .expect("3D scene WGSL must validate without optional GPU capabilities");
 }
 
-#[cfg(feature = "harwood-block")]
+#[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
 #[test]
 fn harwood_shader_validates_without_optional_shader_capabilities() {
     let module = naga::front::wgsl::parse_str(include_str!("../src/harwood/shader.wgsl"))
