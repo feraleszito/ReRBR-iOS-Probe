@@ -1,5 +1,9 @@
 # Harwood Forest: private-file diagnostic, stage 1
 
+The owner reports that this stage passed on the physical iPad mini A17 Pro on
+2026-11-15, with the counts below, adapter BC=true and device BC=false. The new
+independent visual experiment is documented in [HARWOOD-BLOCK.md](HARWOOD-BLOCK.md).
+
 This batch parses real files without drawing them. The default triangle and the
 feature's procedural floor/cube retain their existing shaders, buffers and drawing.
 `rerbr-3d` also starts a one-shot file audit on a background thread after GPU creation.
@@ -104,7 +108,7 @@ harwood: required asset diagnostic PASS
 harwood: parsed data fits advertised capabilities; upload/rendering UNTESTED
 ```
 
-The first line is an expected example, **not a measurement made on the iPad**.
+The first line matches the owner's physical stage-1 report; the app queries it again on each run.
 The adapter's actual flag is queried at runtime. The device's optional features
 remain unchanged, so BC is not requested in this CPU-only batch; `enabled=false`
 is expected and does not mean the adapter lacks BC. A capability warning reports
@@ -115,10 +119,9 @@ Without private data, expect `SKIP: copy private files ... then relaunch`. A mis
 archive or invalid entry produces a readable error instead of changing the scene.
 Triangle builds do not start the Harwood diagnostic.
 
-The new native entry, background audit and imported readers still need a successful
-`aarch64-apple-ios` Actions build and physical-iPad log check. Windows results do not
-establish iPadOS compatibility. No workflow, build script, Xcode project, lipo command,
-signature handling or IPA layout was changed for this batch.
+Stage 1's Apple build and CPU audit are now owner-confirmed. That does not verify
+the new stage-2 upload/render path. The stage-1 batch did not change the workflow,
+build script, Xcode project, lipo command, signature handling or IPA layout.
 
 ## Source changes to copy
 

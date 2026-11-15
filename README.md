@@ -10,6 +10,11 @@ No physics, SDL, audio, Richard Burns Rally files, RallySimFans files, textures 
 downloads of game content are bundled. See [HARWOOD.md](HARWOOD.md) for private-file
 transfer and the actual Windows validation results.
 
+The independent `harwood-block` feature adds the first real road/terrain block,
+selected near the private stage's start, with BC texture uploads and diagnostic
+views. See [HARWOOD-BLOCK.md](HARWOOD-BLOCK.md). Stage 1 is owner-confirmed on the
+iPad; this new rendering path still requires its own Actions build and device test.
+
 The Cargo manifest declares its own workspace, lockfile and toolchain (**Rust 1.97.1**).
 Building this directory does not build or alter the parent workspace. Runtime dependencies
 are pinned exactly; `Cargo.lock` also fixes transitive dependencies. Naga 30.0.1 is a
@@ -25,7 +30,9 @@ development dependency for validating the embedded WGSL shader.
 | `src/scene3d.rs`, `src/scene3d.wgsl` | Optional indexed 3D pass, fixed camera uniform and reversed-depth target |
 | `src/scene_geometry.rs` | Procedural floor/cube and fixed camera; no commercial data |
 | `src/asset_probe.rs` | Optional CPU-only Harwood audit from private Documents files |
+| `src/harwood/` | Optional single-block CPU conversion, BC upload, fixed camera, GPU pass and provenance |
 | `examples/harwood-diagnostic.rs` | Read-only Windows/macOS command-line entry for the same audit |
+| `examples/harwood-block-diagnostic.rs`, `tests/harwood_block.rs` | Single-block CPU diagnostic and synthetic/opt-in real-data tests |
 | `tests/shader.rs` | Naga parsing and validation without optional shader capabilities |
 | `tests/core_math.rs` | Optional-dependency projection/orbit integration tests, enabled by `rerbr-3d` |
 | `tests/scene_geometry.rs` | Geometry, visibility, clockwise winding and depth-order checks |
@@ -45,9 +52,10 @@ The app's default feature set is empty. Its default workspace member is the app 
 so the existing build still selects the triangle. `rerbr-3d` enables the optional path
 dependencies `vendor/rerbr-render-core`, `vendor/rerbr-asset-formats`, and the app's
 separate floor/cube pass and background file audit. The original
-triangle shader, pipeline state and animation/draw calculations are retained behind
-`cfg(not(feature = "rerbr-3d"))`. The touch and lifecycle handlers and Xcode project
-are unchanged. The native entry now passes Foundation's Documents path before Rust
+triangle shader, pipeline state and animation/draw calculations are retained for
+the configuration that enables neither optional visual feature. Touch/lifecycle
+behavior in the two existing modes and the Xcode project are unchanged.
+The native entry passes Foundation's Documents path before Rust
 starts; triangle mode does not start the file audit. No 3D buffers or depth target
 are created in triangle mode.
 
@@ -88,19 +96,23 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
-The workflow now offers a manual `build_mode` choice. The build script reads the same
+The local workflow template offers a manual `build_mode` choice. The build script reads the same
 selection from `PROBE_MODE` (default `triangle`) and rejects any other value:
 
 | Selection | Cargo feature flags | macOS host tests | Image shown |
 | --- | --- | --- | --- |
 | `triangle` (default) | `--no-default-features` | Existing triangle shader test | Triangle |
 | `rerbr-3d` | `--no-default-features --features rerbr-3d` | Full workspace: readers, math, geometry and shaders | Fixed floor and cube; optional private-file audit in the log |
+| `harwood-block` | `--no-default-features --features harwood-block` | Full workspace: readers, math, block conversion, BC layout and shaders | One private Harwood block; touch cycles material/colour/UV views |
 
 The selected feature flags are passed to the host tests, iOS Clippy, the **release
 static-library build for `aarch64-apple-ios`**, and a dependency-tree diagnostic. The
 existing Xcode library search path, ARM64 checks, unsigned IPA packaging and signing
-restrictions are unchanged. The workflow's selector description is updated for the
-new scene; its commands and artifact paths are unchanged. The build script is unchanged.
+restrictions are unchanged. The local workflow template and script now accept the
+third selection. The active parent-workspace workflow and the GitHub Desktop
+repository have not been synchronized for this step. No Actions run was started.
+When both optional features are enabled, `harwood-block` takes priority; the
+separate `rerbr-3d` selection retains the cube and stage-1 audit.
 
 On a macOS host with Xcode and the iOS target, an explicit feature-only type check is:
 
@@ -108,7 +120,7 @@ On a macOS host with Xcode and the iOS target, an explicit feature-only type che
 cargo check --locked --lib --target aarch64-apple-ios --features rerbr-3d
 ```
 
-The new Apple-target feature build has not been performed here. Windows mathematics
+The new `harwood-block` Apple-target build has not been performed here. Windows mathematics
 and type checks do not establish iPadOS compatibility; run Actions with `rerbr-3d` to
 verify the selected configuration.
 

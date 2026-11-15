@@ -17,6 +17,8 @@ resolver = "2"
 default = []
 # Optional 3D scene and private-file diagnostic; default stays triangle.
 rerbr-3d = ["dep:rerbr-render-core", "dep:rerbr-asset-formats"]
+# Separate visual experiment. With both features enabled, this mode takes priority.
+harwood-block = ["dep:rerbr-render-core", "dep:rerbr-asset-formats"]
 
 [lib]
 name = "rerbr_probe"
@@ -35,6 +37,10 @@ naga = { version = "=30.0.1", features = ["wgsl-in"] }
 [[example]]
 name = "harwood-diagnostic"
 required-features = ["rerbr-3d"]
+
+[[example]]
+name = "harwood-block-diagnostic"
+required-features = ["harwood-block"]
 
 [profile.release]
 panic = "abort"

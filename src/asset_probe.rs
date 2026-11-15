@@ -16,6 +16,7 @@ const MIB: u64 = 1024 * 1024;
 
 /// Runs once on a background thread after GPU creation. Missing, partial or
 /// unreadable private data never changes the scene or prevents app startup.
+#[cfg(all(feature = "rerbr-3d", not(feature = "harwood-block")))]
 pub(crate) fn start_from_documents(bc_supported: bool, bc_enabled: bool, max_dimension: u32) {
     static START: std::sync::Once = std::sync::Once::new();
     START.call_once(|| {
@@ -332,6 +333,60 @@ fn texture(
     kind: TextureKind,
     index: u32,
 ) -> Result<TextureInfo, String> {
+    texture_data(archives, remap, sections, info, kind, index).map(|data| data.info)
+}
+
+pub(crate) struct TextureData {
+    pub info: TextureInfo,
+    #[cfg(feature = "harwood-block")]
+    pub bytes: Vec<u8>,
+}
+
+/// Stage 2 reads the same private files and rules as the existing audit.
+#[cfg(feature = "harwood-block")]
+pub(crate) fn read_stage(maps: &Path) -> Result<Vec<u8>, String> {
+    read_limited(Files::new(maps)?.find("track-20_O.lbs")?, 96 * MIB)
+}
+
+#[cfg(feature = "harwood-block")]
+pub(crate) fn load_diffuse(
+    maps: &Path,
+    indices: &BTreeSet<u32>,
+) -> Result<BTreeMap<u32, TextureData>, String> {
+    let files = Files::new(maps)?;
+    let ini_bytes = read_limited(files.find("track-20_O.ini")?, 2 * MIB)?;
+    let sections = ini::parse(&String::from_utf8_lossy(&ini_bytes)).map_err(|e| e.to_string())?;
+    let info = section(&sections, "TextureInfo").ok_or("missing [TextureInfo]")?;
+    let bytes = read_limited(files.find("TextureFilenameMap.dat")?, 8 * MIB)?;
+    let remap = stage_textures::FilenameMap::parse(&bytes).map_err(|e| e.to_string())?;
+    let mut archives = Archives {
+        files: &files,
+        open: BTreeMap::new(),
+    };
+    indices
+        .iter()
+        .map(|&index| {
+            let data = texture_data(
+                &mut archives,
+                &remap,
+                &sections,
+                info,
+                TextureKind::Diffuse,
+                index,
+            )?;
+            Ok((index, data))
+        })
+        .collect()
+}
+
+fn texture_data(
+    archives: &mut Archives<'_>,
+    remap: &stage_textures::FilenameMap,
+    sections: &[ini::Section],
+    info: &ini::Section,
+    kind: TextureKind,
+    index: u32,
+) -> Result<TextureData, String> {
     let key = format!("{}{index}", kind.prefix());
     let name = info.get(&key).ok_or_else(|| format!("missing {key}"))?;
     let ground = section(sections, name)
@@ -351,14 +406,19 @@ fn texture(
         match archives.image(&resolved) {
             Ok(bytes) => match dds::parse(&bytes) {
                 Ok(image) => {
-                    return Ok(TextureInfo {
+                    let info = TextureInfo {
                         request,
                         resolved: normalized(&resolved)?,
                         width: image.width,
                         height: image.height,
                         mip_count: image.mip_count,
                         format: image.format,
-                    })
+                    };
+                    return Ok(TextureData {
+                        info,
+                        #[cfg(feature = "harwood-block")]
+                        bytes,
+                    });
                 }
                 Err(error) => {
                     let _ = write!(errors, "{resolved}: {error}; ");

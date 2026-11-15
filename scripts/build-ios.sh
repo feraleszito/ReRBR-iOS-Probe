@@ -14,8 +14,12 @@ case "$PROBE_MODE" in
         CARGO_FEATURE_ARGS+=(--features rerbr-3d)
         HOST_TEST_ARGS=(--workspace)
         ;;
+    harwood-block)
+        CARGO_FEATURE_ARGS+=(--features harwood-block)
+        HOST_TEST_ARGS=(--workspace)
+        ;;
     *)
-        echo "Unknown PROBE_MODE: $PROBE_MODE (expected triangle or rerbr-3d)." >&2
+        echo "Unknown PROBE_MODE: $PROBE_MODE (expected triangle, rerbr-3d or harwood-block)." >&2
         exit 1
         ;;
 esac

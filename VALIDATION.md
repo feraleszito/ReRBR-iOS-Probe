@@ -363,3 +363,101 @@ Pending: Actions with `rerbr-3d`, normal signing/install, private-file transfer 
 Documents, relaunch, BC/log verification, and visual/touch/lifecycle comparison of
 both existing modes on the iPad. The app's actual BC flag, sandbox path, thread/log
 behavior and iOS compilation remain unverified on Apple hardware.
+
+## First real Harwood geometry block: stage 2
+
+Owner report, 2026-11-15: stage 1 passed on the physical iPad mini A17 Pro with
+282 blocks/cells, 442 objects, 38/38 required and 44/44 declared DDS references,
+adapter BC supported=true and device BC enabled=false. This is evidence for the
+previous diagnostic only. No stage-2 iOS run has been performed here.
+
+Added independent `harwood-block`, using the same optional libraries. Default
+triangle and the separate `rerbr-3d` cube/audit retain their existing rendering.
+If both optional features are enabled, Harwood takes priority. Only Harwood asks
+for advertised TEXTURE_COMPRESSION_BC when creating the device. No dependencies,
+lockfile, existing vendor sources or Xcode/native files were changed.
+
+The read-only CPU worker reads the LBS through the imported original parser,
+chooses a near/always block by distance from the start to its AABB, and converts
+it using adapted reRBR block_mesh/slot_layout/repack/index/UV logic. The adapter's
+GPL provenance, original source hashes and intentional reductions are recorded in
+`src/harwood/UPSTREAM.md`. Only selected diffuse references are read through the
+same INI/remap/archive/CRC/DDS code as stage 1. File reads remain bounded; LBS
+storage is dropped before texture reads. GPU work remains on the rendering thread.
+
+Measured on the owner's real Windows installation, without asset extraction/copy:
+
+```text
+READ: 28,014,518 bytes, 282 blocks, selected block 269 (zero-based)
+start: (-406.9473, 74.991806, 1447.8748)
+CONVERT: 2236 vertices, 1138 triangles, 9 draws
+bad triangles / unsupported draws: 0 / 0
+far LOD draws omitted: 5
+specular draw flags: 2 (diffuse-only rendering in stage 2)
+selected diffuse references: 0,1,2,3,4,6,7,8
+projected winding at aspect 1.55: CW=1138, CCW=0
+```
+
+Selected materials include BR_07_ROADER, BR_07_GROUND_B, BR_01_FELLING and the
+opaque track atlas. All eight references read and pass the CPU upload layout,
+including all 32 stored mip levels. They are BC1/BC2, four mips each, up to
+1024 x 2048. This is CPU evidence, not an executed GPU upload.
+
+The fixed camera fits the converted box corners in portrait/landscape with original
+FreeFly/coordinate maths. Matrix upload is column-major; positions and winding
+are not flipped. GPU state is clockwise/back cull and reverse depth
+Depth32Float/Greater/clear 0. The new shader uses baked colour, two UVs and the
+original two-diffuse blend, with sRGB-surface compensation. Touches in this mode
+cycle textures, vertex colours and UV checker while retaining the background
+toggle. Specular lighting, original negative mip bias, sky, scenery lanes,
+shadows, car, complete stage and automatic cameras are outside this batch.
+
+The GPU path creates BC1/BC2 unorm textures and writes every stored mip with
+block-correct row pitches and rounded copy extents. Error scopes separate
+pipeline creation, upload validation and the first encoded/submitted/presented
+frame. Log wording distinguishes accepted commands from GPU completion and
+visible correctness. Missing BC/data or validation failure leaves a red
+background and readable error instead of silently showing a different scene.
+
+Windows verification, pinned Rust 1.97.1, existing offline cache:
+
+| Check | Result |
+| --- | --- |
+| `cargo run --offline --locked --example harwood-block-diagnostic --no-default-features --features harwood-block -- <private Maps>` | PASS; real file selection/conversion/texture reads |
+| Explicit `real_start_block_and_materials` ignored test with HARWOOD_MAPS | PASS; real materials, indices, framing, CW visibility, both BC formats and real CPU mip plans |
+| Workspace tests with `--no-default-features --features harwood-block` | PASS: 83 tests; one private-data test ignored in ordinary runs |
+| Workspace tests with `--all-features` | PASS: 97 tests; two private-data tests ignored in ordinary runs |
+| Workspace tests with `--no-default-features --features rerbr-3d` | PASS: 91 tests; original mode remains independently compilable |
+| Explicit stage-1 `real_harwood_installation` test using rerbr-3d alone | PASS: 282/282/442, 38/38, 44/44 and 41 references redirected to N |
+| Default app tests with `--no-default-features` | PASS: unchanged triangle shader test; optional tests disabled |
+| Clippy `--workspace --all-targets -- -D warnings` for harwood-block, rerbr-3d and all-features | PASS |
+| Default app Clippy `--all-targets --no-default-features -- -D warnings` | PASS |
+| `cargo fmt --all -- --check` | PASS |
+
+Synthetic tests cover exact slot-5/6/7/8 offsets, unchanged positions, BGRA-to-RGBA,
+UVs, absolute indices despite a nonzero min_index, view bases, invalid indices,
+far-LOD exclusion, AABB selection, camera framing/reverse depth and complete BC1/BC2
+copy layouts down to 1x1. Naga parses/validates the new shader with no optional
+shader capabilities. The MSVC host compiles the new wgpu API path; no Windows GPU
+backend was added solely for testing. A test type-inference issue was corrected
+before the successful checks; no failing check remains in the completed Rust suite.
+
+Changed only local experiment files: Cargo.toml, src/lib.rs, src/asset_probe.rs,
+tests/shader.rs, scripts/build-ios.sh, scripts/verify.py,
+github-actions/ios-probe.yml, README.md, HARWOOD.md and this record. New files are
+HARWOOD-BLOCK.md, examples/harwood-block-diagnostic.rs, tests/harwood_block.rs and
+src/harwood/{mod.rs,mesh.rs,texture.rs,gpu.rs,shader.wgsl,UPSTREAM.md}.
+
+The local workflow template/script add harwood-block selection only; previous
+mode flags, Rust/Xcode library paths, lipo invocation, signing and packaging are
+retained. The active `.github/workflows/ios-probe.yml` outside the experiment and
+the GitHub Desktop repository were not modified or synchronized. No commit,
+push, Actions run or dependency installation/download was performed. No game
+resources were copied into the workspace or bundled. The original RSF install
+was read only, and the original engine was not changed.
+
+Pending: new aarch64-apple-ios compile/package verification, the Python/Bash
+preflight on macOS (no usable local Python/Bash), Metal pipeline creation,
+actual device BC feature enablement, all texture uploads, screenshots in each
+view/orientation, depth/material appearance, touch/lifecycle and fallback-mode
+checks. The stage-2 docs explicitly do not claim physical iPad success.
