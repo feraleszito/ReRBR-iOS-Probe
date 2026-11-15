@@ -6,13 +6,20 @@ use rerbr_render_core::coords;
 use std::{collections::BTreeMap, path::PathBuf, sync::mpsc};
 use wgpu::util::DeviceExt;
 
+#[cfg(not(feature = "harwood-benchmark"))]
+type Payload = LoadedBlock;
+#[cfg(feature = "harwood-benchmark")]
+type Payload = super::benchmark::Prepared;
+
 pub(crate) struct Scene {
-    pending: Option<mpsc::Receiver<Result<LoadedBlock, String>>>,
+    pending: Option<mpsc::Receiver<Result<Payload, String>>>,
     gpu: Option<Block>,
     failed: bool,
     mode: u32,
     render_scope: Option<wgpu::ErrorScopeGuard>,
     first_frame: bool,
+    #[cfg(feature = "harwood-benchmark")]
+    benchmark: super::benchmark::Runtime,
 }
 
 impl Scene {
@@ -24,6 +31,8 @@ impl Scene {
             mode: 0,
             render_scope: None,
             first_frame: true,
+            #[cfg(feature = "harwood-benchmark")]
+            benchmark: super::benchmark::Runtime::new(),
         };
         if !bc_enabled {
             scene.fail("DEVICE: BC is unavailable; texture upload not attempted".into());
@@ -40,8 +49,10 @@ impl Scene {
             .spawn(move || {
                 #[cfg(not(feature = "harwood-neighbors"))]
                 let result = super::load(&maps);
-                #[cfg(feature = "harwood-neighbors")]
+                #[cfg(all(feature = "harwood-neighbors", not(feature = "harwood-benchmark")))]
                 let result = super::neighbors::load(&maps).map(|set| set.render);
+                #[cfg(feature = "harwood-benchmark")]
+                let result = super::benchmark::load(&maps);
                 let _ = tx.send(result);
             }) {
             Ok(_) => scene.pending = Some(rx),
@@ -54,14 +65,45 @@ impl Scene {
         eprintln!("{MODE_NAME} FAIL: {error}; red background; see log; existing fallback modes remain separate");
         self.failed = true;
         self.gpu = None;
+        #[cfg(feature = "harwood-benchmark")]
+        self.benchmark.fail();
     }
 
+    #[cfg(not(feature = "harwood-benchmark"))]
     pub fn cycle_mode(&mut self) {
         self.mode = (self.mode + 1) % 3;
         eprintln!(
             "{MODE_NAME} VIEW: {} (0=textures, 1=vertex colours, 2=UV checker)",
             self.mode
         );
+    }
+
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        data: Payload,
+    ) -> Result<Block, String> {
+        #[cfg(feature = "harwood-benchmark")]
+        let data = {
+            self.benchmark.install(data.route);
+            data.render
+        };
+        Block::new(device, queue, format, data)
+    }
+
+    #[cfg(feature = "harwood-benchmark")]
+    pub fn restart_benchmark(&mut self) {
+        self.benchmark.restart();
+    }
+    #[cfg(feature = "harwood-benchmark")]
+    pub fn interrupt_benchmark(&mut self, reason: &'static str) {
+        self.benchmark.interrupt(reason);
+    }
+    #[cfg(feature = "harwood-benchmark")]
+    pub fn benchmark_submitted(&mut self, cpu: std::time::Duration) {
+        self.benchmark.submitted(cpu);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -79,7 +121,7 @@ impl Scene {
             match rx.try_recv() {
                 Ok(result) => {
                     self.pending = None;
-                    match result.and_then(|data| Block::new(device, queue, format, data)) {
+                    match result.and_then(|data| self.upload(device, queue, format, data)) {
                         Ok(block) => self.gpu = Some(block),
                         Err(e) => self.fail(e),
                     }
@@ -89,6 +131,12 @@ impl Scene {
                     self.fail("READ: worker disconnected".into());
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        #[cfg(feature = "harwood-benchmark")]
+        if let Some(block) = &mut self.gpu {
+            if let Err(error) = self.benchmark.before_frame(&mut block.camera) {
+                self.fail(error);
             }
         }
         if let Some(block) = &mut self.gpu {
@@ -131,6 +179,9 @@ impl Scene {
                 ..Default::default()
             });
         }
+        #[cfg(feature = "harwood-benchmark")]
+        self.benchmark
+            .overlay(device, queue, encoder, target, size, format);
     }
 
     /// Called after the host's encoder finish, submit and present request.

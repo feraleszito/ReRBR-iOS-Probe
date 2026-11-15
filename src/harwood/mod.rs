@@ -1,12 +1,16 @@
 //! Real terrain diagnostics: single block or optional connected neighbors.
 
+#[cfg(feature = "harwood-benchmark")]
+pub mod benchmark;
 mod gpu;
 pub mod mesh;
 #[cfg(feature = "harwood-neighbors")]
 pub mod neighbors;
 pub mod texture;
 
-#[cfg(feature = "harwood-neighbors")]
+#[cfg(feature = "harwood-benchmark")]
+pub const MODE_NAME: &str = "harwood-benchmark";
+#[cfg(all(feature = "harwood-neighbors", not(feature = "harwood-benchmark")))]
 pub const MODE_NAME: &str = "harwood-neighbors";
 #[cfg(not(feature = "harwood-neighbors"))]
 pub const MODE_NAME: &str = "harwood-block";

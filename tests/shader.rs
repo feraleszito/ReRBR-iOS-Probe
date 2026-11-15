@@ -35,3 +35,16 @@ fn harwood_shader_validates_without_optional_shader_capabilities() {
     .validate(&module)
     .expect("Harwood WGSL must validate");
 }
+
+#[cfg(feature = "harwood-benchmark")]
+#[test]
+fn benchmark_hud_shader_validates_without_optional_shader_capabilities() {
+    let module = naga::front::wgsl::parse_str(include_str!("../src/harwood/benchmark/hud.wgsl"))
+        .expect("HUD WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .expect("HUD WGSL validates");
+}

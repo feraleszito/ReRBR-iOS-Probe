@@ -541,3 +541,100 @@ Pending: first stage-3 aarch64-apple-ios build, Metal uploads and panoramic imag
 three-view/orientation/lifecycle regressions, seamless-looking road/terrain, frame
 time and real peak/resident memory on the iPad. No screenshot, Metal execution or
 physical success is claimed for stage 3.
+
+## Automatic Harwood graphics benchmark: stage 4
+
+Owner report, 2026-11-15: stage 3 has now compiled through Actions and rendered the
+20-block set on the physical iPad mini A17 Pro. This supersedes the pending
+stage-3 device status above. The new stage-4 benchmark has no Apple/device result.
+
+Added `harwood-benchmark = ["harwood-neighbors"]` as a separate app mode. It loads
+the unchanged 20-block workload and retains the actual selected LBS driveline and
+road triangles in memory for a new app-owned camera. No imported/vendor source,
+mesh converter, terrain shader, texture upload algorithm, Xcode/native file or
+lockfile was changed. The runtime reads only the existing private Documents path;
+the explicit command-line diagnostic reads the owner's Maps folder without writes.
+
+Real-file CPU result, without saving assets or raw route/mesh data:
+
+```text
+original route points=71; interpolated camera path=588.53m; speed=29.43m/s
+checked camera-ground clearance=1.400..1.432m
+blocks=20; vertices=18983; triangles=9539
+terrain draws/frame=124; additional HUD draws/frame=1; unique DDS=8
+```
+
+Catmull-Rom interpolation, an approximately 0.25m arc-length table and real elapsed
+time determine position. A distance-based look-ahead determines smooth heading.
+Ground comes from actual triangle-plane vertical intersections on the selected
+road/terrain, not bounding boxes or the stage-3 3m road-coverage tolerance. A short
+height smoother is clamped above the highest intersected terrain by 1.4m on every
+frame. Dense 0.1m distance checks and live support checks reject missing/ambiguous
+ground; unsupported road gaps never get an invented bridge. This validates the
+eye point, not a complete near-plane or vehicle collision volume.
+
+The app holds a two-second warmup before starting a monotonic-clock 20s run. It
+retains actual stop overshoot at the first completed frame after the deadline;
+there is no fixed-frame stopping rule. A touch resets warmup/metrics using cached
+resources. Suspension, occlusion, surface loss or resolution changes invalidate a
+warming/running measurement. The existing post-draw scheduling delay is removed
+only in benchmark mode, retaining FIFO/Metal pacing and the previous modes' behavior.
+
+An original generated ASCII HUD displays live FPS, time, distance, state, CPU
+preparation time and a final summary. It adds no dependency or extracted font.
+The summary reports host completion cadence mean FPS, min/max over twenty fixed
+one-second windows, mean/P95/P99 intervals, total frames, real duration and CPU
+preparation mean/P95. CPU preparation excludes drawable acquisition and submit/
+present waits. No GPU timestamp feature is requested: GPU time is explicitly
+unavailable, FPS is not utilization, and requests are not confirmed scanout. HUD
+and ground-query work are timed; loading/upload and final summary work are excluded.
+
+Windows checks used the pinned Rust 1.97.1 MSVC toolchain, existing cache,
+`--offline --locked`, CARGO_TARGET_DIR/TEMP inside ignored `.validation/`:
+
+| Check | Result |
+| --- | --- |
+| `cargo run --example harwood-benchmark-diagnostic --no-default-features --features harwood-benchmark -- <private Maps>` | PASS; actual supported route and workload, no GPU |
+| Workspace tests with `--no-default-features --features harwood-benchmark` | PASS: 95 tests; three private tests ignored in normal run |
+| Workspace tests with `--all-features` | PASS: 114 tests; five private tests ignored in normal run |
+| Explicit workspace `--all-features -- --ignored --nocapture`, HARWOOD_MAPS set | PASS: five real-data tests, including the new moving route/ground test |
+| Independent `harwood-neighbors` workspace tests | PASS: 84 tests; two private tests ignored |
+| Independent `harwood-block` workspace tests | PASS: 83 tests; one private test ignored |
+| Independent `rerbr-3d` workspace tests | PASS: 91 tests; one private test ignored |
+| Default triangle app tests | PASS: one shader test |
+| Workspace/all-targets Clippy for benchmark, all-features, neighbors, block, rerbr-3d; default app Clippy | PASS with `-D warnings` |
+| `cargo fmt --all -- --check` | PASS |
+
+Ten new synthetic unit tests exercise nonuniform route spacing, curved positions/
+heading, triangle heights/top surfaces, unsupported gaps, real-time progress at
+30/60 and 4/8 simulated FPS, fixed-window/percentile maths, stalls/stop overshoot,
+warmup/restart/invalid clocks, interrupted runtime and bounded original HUD data.
+Naga validates the added HUD WGSL with no optional shader capabilities. The new
+private test checks the unchanged real workload, all support checks and 2,000
+additional camera/heading samples. These are CPU/synthetic-clock tests; no Windows
+GPU backend or physical display result is implied. A format check caught spacing
+in two new assertions; formatting corrected it before the final passing checks.
+
+Modified only local experiment files: Cargo.toml, README.md, HARWOOD-NEIGHBORS.md,
+this record, github-actions/ios-probe.yml, scripts/{build-ios.sh,verify.py},
+src/lib.rs, src/harwood/{mod.rs,gpu.rs,neighbors.rs,UPSTREAM.md} and tests/shader.rs.
+Added HARWOOD-BENCHMARK.md, examples/harwood-benchmark-diagnostic.rs,
+tests/harwood_benchmark.rs and src/harwood/benchmark/{mod.rs,route.rs,metrics.rs,
+hud.rs,hud.wgsl,tests.rs}. Ignored `.validation/` holds baselines/check logs and
+build products, not source resources or files for synchronization.
+
+SHA-256 comparison confirms all 36 protected files unchanged: both vendors,
+native/Xcode, Cargo.lock, existing asset reader, procedural scene, triangle shader,
+terrain converter/texture layout/shader. Source inventory contains no private
+assets. Original engine/RSF installation, GitHub clone and active workflows were
+not modified. No commit, push, Actions run, download or dependency installation
+was performed. This source archive has no Git metadata; integrity uses the saved
+pre-stage-4 file hashes and explicit source inventory.
+
+Pending: Apple compile/package, Metal/HUD execution, physical route/elevation and
+near-plane inspection, live timing/summary/restart, lifecycle/rotation regression,
+all previous device modes, real memory and thermal/frame-pacing measurement.
+Python/Bash preflight could not be executed locally: available commands include
+only WindowsApps Python aliases, with no usable Python/Bash interpreter found.
+The updated preflight source was reviewed; macOS must execute it during the next
+authorized Actions build. No stage-4 iPad FPS, GPU timing or visual success is claimed.

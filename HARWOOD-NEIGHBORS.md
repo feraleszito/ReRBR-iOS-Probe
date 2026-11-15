@@ -2,9 +2,10 @@
 
 `harwood-neighbors` is an independent compile-time mode. The default is still
 triangle; `rerbr-3d` and `harwood-block` remain separate fallback builds. The owner
-validated stage 2 (block 269 and BC1/BC2) on the iPad mini A17 Pro. Stage 3 has
-only been compiled/tested on Windows; Metal, the Apple target and its image are
-pending. No game files are included in the source tree or IPA.
+validated stage 2 (block 269 and BC1/BC2) on the iPad mini A17 Pro. Subsequent owner
+report confirms stage 3 compiled through Actions and rendered this 20-block set
+on the device. Stage 4 is separate: [HARWOOD-BENCHMARK.md](HARWOOD-BENCHMARK.md).
+No game files are included in the source tree or IPA.
 
 ## Selection and rendering
 
@@ -143,5 +144,5 @@ connects all 282 blocks, but that is not a watertight-mesh proof. Road coverage 
 sampled with tolerances; it cannot prove every metre of road or every terrain seam
 is continuous. Outer boundaries deliberately remain open. There are no visibility
 cells, frustum/occlusion culling or draw batching yet: all 124 selected draws are
-submitted each frame. Visual continuity, panorama readability, performance and
-total memory remain unverified physically for stage 3.
+submitted each frame. The owner confirms physical rendering; detailed frame time,
+resident memory and the new moving benchmark still need their own measurements.

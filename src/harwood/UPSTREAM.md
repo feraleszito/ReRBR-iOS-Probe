@@ -63,3 +63,11 @@ inflating/retaining DDS data in neighbor mode. Logical texture IDs are mapped to
 canonical IDs in draw records, so the existing GPU texture map uploads each
 resolved DDS once. The previous single-block loader retains its non-aliasing
 return contract. Existing vendor files and original engine files remain unchanged.
+
+Stage 4 adds app-owned benchmark/route.rs, metrics.rs, hud.rs, hud.wgsl and tests.
+Only existing parsed LBS driveline points and selected original road/terrain
+triangles are used; the new Catmull-Rom interpolation, distance table, geometric
+ground queries, timers and ASCII HUD contain no extracted game data. The original
+FreeFly camera and coordinate functions still produce the view/projection matrix.
+The shared terrain pass, mesh converter, shader and BC upload are reused; the HUD
+is a separate alpha overlay without depth. Imported vendor files remain unchanged.

@@ -16,6 +16,7 @@ on:
           - rerbr-3d
           - harwood-block
           - harwood-neighbors
+          - harwood-benchmark
 
 permissions:
   contents: read

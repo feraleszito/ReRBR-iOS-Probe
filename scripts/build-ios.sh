@@ -22,8 +22,12 @@ case "$PROBE_MODE" in
         CARGO_FEATURE_ARGS+=(--features harwood-neighbors)
         HOST_TEST_ARGS=(--workspace)
         ;;
+    harwood-benchmark)
+        CARGO_FEATURE_ARGS+=(--features harwood-benchmark)
+        HOST_TEST_ARGS=(--workspace)
+        ;;
     *)
-        echo "Unknown PROBE_MODE: $PROBE_MODE (expected triangle, rerbr-3d, harwood-block or harwood-neighbors)." >&2
+        echo "Unknown PROBE_MODE: $PROBE_MODE (expected triangle, rerbr-3d, harwood-block, harwood-neighbors or harwood-benchmark)." >&2
         exit 1
         ;;
 esac

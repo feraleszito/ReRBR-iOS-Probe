@@ -87,6 +87,10 @@ impl ApplicationHandler for Probe {
 
     fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         eprintln!("lifecycle: suspended; GPU submissions paused");
+        #[cfg(feature = "harwood-benchmark")]
+        if let Some(renderer) = &mut self.renderer {
+            renderer.harwood.interrupt_benchmark("APP SUSPENDED");
+        }
         self.active = false;
         self.next_frame = None;
         event_loop.set_control_flow(ControlFlow::Wait);
@@ -103,13 +107,22 @@ impl ApplicationHandler for Probe {
             WindowEvent::Resized(size) => renderer.resize(size),
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
+                #[cfg(feature = "harwood-benchmark")]
+                if occluded {
+                    renderer.harwood.interrupt_benchmark("APP OCCLUDED");
+                }
                 self.next_frame = Some(Instant::now());
             }
             WindowEvent::Touch(touch) if touch.phase == TouchPhase::Started => {
-                renderer.alternate_background = !renderer.alternate_background;
-                #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
-                renderer.harwood.cycle_mode();
-                eprintln!("touch: background changed");
+                #[cfg(feature = "harwood-benchmark")]
+                renderer.harwood.restart_benchmark();
+                #[cfg(not(feature = "harwood-benchmark"))]
+                {
+                    renderer.alternate_background = !renderer.alternate_background;
+                    #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
+                    renderer.harwood.cycle_mode();
+                    eprintln!("touch: background changed");
+                }
             }
             WindowEvent::RedrawRequested if self.active && !self.occluded => {
                 renderer.draw();
@@ -125,15 +138,27 @@ impl ApplicationHandler for Probe {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
-        let next = self.next_frame.unwrap_or_else(Instant::now);
-        if Instant::now() >= next {
+        #[cfg(feature = "harwood-benchmark")]
+        {
+            // Let FIFO/Metal and UIKit pace rendering; do not add a 16.7ms sleep
+            // after CPU work, which would artificially cap the benchmark.
             if let Some(renderer) = &self.renderer {
                 renderer.window.request_redraw();
             }
-            // Avoid a busy loop if UIKit coalesces the redraw request.
-            self.next_frame = Some(Instant::now() + FRAME_PERIOD);
+            event_loop.set_control_flow(ControlFlow::Poll);
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame.unwrap_or(next)));
+        #[cfg(not(feature = "harwood-benchmark"))]
+        {
+            let next = self.next_frame.unwrap_or_else(Instant::now);
+            if Instant::now() >= next {
+                if let Some(renderer) = &self.renderer {
+                    renderer.window.request_redraw();
+                }
+                // Avoid a busy loop if UIKit coalesces the redraw request.
+                self.next_frame = Some(Instant::now() + FRAME_PERIOD);
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame.unwrap_or(next)));
+        }
     }
 }
 
@@ -352,6 +377,10 @@ impl Renderer {
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
+        #[cfg(feature = "harwood-benchmark")]
+        if size != self.size {
+            self.harwood.interrupt_benchmark("RESOLUTION CHANGED");
+        }
         self.size = size;
         self.config.width = size.width.max(1);
         self.config.height = size.height.max(1);
@@ -373,12 +402,19 @@ impl Renderer {
                 self.reconfigure = true;
                 frame
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Timeout => return,
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                #[cfg(feature = "harwood-benchmark")]
+                self.harwood.interrupt_benchmark("SURFACE OCCLUDED");
+                return;
+            }
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.resize(self.window.inner_size());
                 return;
             }
             wgpu::CurrentSurfaceTexture::Lost => {
+                #[cfg(feature = "harwood-benchmark")]
+                self.harwood.interrupt_benchmark("SURFACE LOST");
                 eprintln!("surface lost; recreating it");
                 self.surface = self
                     .instance
@@ -388,9 +424,18 @@ impl Renderer {
                 return;
             }
             wgpu::CurrentSurfaceTexture::Validation => {
+                #[cfg(feature = "harwood-benchmark")]
+                {
+                    self.harwood.interrupt_benchmark("SURFACE VALIDATION ERROR");
+                    eprintln!("harwood-benchmark: surface validation failed");
+                    return;
+                }
+                #[cfg(not(feature = "harwood-benchmark"))]
                 panic!("surface acquisition validation error")
             }
         };
+        #[cfg(feature = "harwood-benchmark")]
+        let cpu_started = Instant::now();
         #[cfg(not(any(
             feature = "rerbr-3d",
             feature = "harwood-block",
@@ -473,11 +518,16 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit([encoder.finish()]);
+        let commands = encoder.finish();
+        #[cfg(feature = "harwood-benchmark")]
+        let cpu_preparation = cpu_started.elapsed();
+        self.queue.submit([commands]);
         self.window.pre_present_notify();
         self.queue.present(frame);
         #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
         self.harwood.finish_frame();
+        #[cfg(feature = "harwood-benchmark")]
+        self.harwood.benchmark_submitted(cpu_preparation);
         self.frames += 1;
         if self.frames == 1 || self.frames.is_multiple_of(600) {
             eprintln!(

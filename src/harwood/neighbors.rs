@@ -92,6 +92,10 @@ impl fmt::Display for Report {
 pub struct LoadedSet {
     pub render: LoadedBlock,
     pub report: Report,
+    #[cfg(feature = "harwood-benchmark")]
+    pub route_points: Vec<Vec3>,
+    #[cfg(feature = "harwood-benchmark")]
+    pub road_triangles: Vec<[Vec3; 3]>,
 }
 
 struct Node {
@@ -572,6 +576,13 @@ pub fn load_with_budget(maps: &Path, budget: Budget) -> Result<LoadedSet, String
         warnings.push("some sampled route points have no matching road-material triangle; continuity there is unproven".into());
     }
     let mut merged = Mesh::default();
+    #[cfg(feature = "harwood-benchmark")]
+    let road_triangles = nodes
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| selected_set.contains(i))
+        .flat_map(|(_, node)| node.roads.iter().copied())
+        .collect();
     for (i, node) in nodes.iter_mut().enumerate() {
         if selected_set.contains(&i) {
             append_mesh(&mut merged, std::mem::take(&mut node.mesh));
@@ -629,6 +640,10 @@ pub fn load_with_budget(maps: &Path, budget: Budget) -> Result<LoadedSet, String
             textures: shared.textures,
         },
         report,
+        #[cfg(feature = "harwood-benchmark")]
+        route_points: route.iter().map(|s| s.point).collect(),
+        #[cfg(feature = "harwood-benchmark")]
+        road_triangles,
     })
 }
 
