@@ -21,7 +21,7 @@ live/start.rs::settle. It uses the original Stage transition rules, fixed NGP
 timestep and direct pure dispatcher. It deliberately omits Game/frame-finish/UI,
 and only benchmarks a stationary neutral/braked car, never a simplified vehicle.
 
-Exactly three imported files are adapted; PATCHES.json records their current hashes:
+Exactly four imported files are adapted; PATCHES.json records their current hashes:
 
 - upstream/rbr-physics/src/mem.rs: registers test-only original flat-host/reference
   and probe parity tests. The physics API remains the original one.
@@ -57,3 +57,10 @@ Native public Mach
 footprint reporting lives in the existing main.m; the app's previous entry/lifecycle
 is retained. Panic unwinding is enabled only for the physics device build so a pure
 host stop can be reported, without escaping the CPU worker or running original code.
+
+The fourth adaptation, upstream/rbr-hybrid/src/lib.rs, changes only two test
+inputs from 3.0 * 2f64.powi(-1060) to f64::from_bits(3u64 << 14). This
+constructs the same subnormal directly for ARM64 test portability. Runtime
+conversion code and physics equations are unchanged. PATCHES.json records its
+existing hash; verify.py explicitly permits all four adaptations and still
+checks every one of the 623 original/adapted entries.
