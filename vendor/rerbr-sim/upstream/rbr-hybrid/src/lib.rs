@@ -397,13 +397,13 @@ pub(crate) mod tests {
         // 2^-1074: integer bit only, exponent -1074 + 16383.
         assert_eq!(extended(f64::from_bits(1)), (1 << 63, 16383 - 1074));
         // 3 * 2^-1060.
-        let x = 3.0 * 2f64.powi(-1060);
+        let x = f64::from_bits(3u64 << 14);
         assert_eq!(extended(x), (0xc000_0000_0000_0000, 16383 - 1059));
     }
 
     #[test]
     fn from_extended_inverts_extended() {
-        for x in [1.0, -2.5, 0.0, 1e-300, 3.0 * 2f64.powi(-1060), 0.1f32 as f64, -1e30, f64::INFINITY] {
+        for x in [1.0, -2.5, 0.0, 1e-300, f64::from_bits(3u64 << 14), 0.1f32 as f64, -1e30, f64::INFINITY] {
             let (s, e) = extended(x);
             assert_eq!(from_extended(s, e).to_bits(), x.to_bits(), "{x}");
         }
