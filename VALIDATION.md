@@ -753,3 +753,118 @@ Python/Bash preflight could not run here because no usable local interpreter was
 found; reviewed source must run on macOS. No new iPad FPS or visual success is
 claimed. Original engine, RBR installation, GitHub clone and active workflow were
 not modified. No commit, push, synchronization or Actions run was performed.
+
+## Pure physics probe: Windows validation, 2026-11-15
+
+`physics-probe` is a separate optional CPU mode. It imports the authentic
+rbr-physics/rbr-hybrid dependency closure and the standalone boot; no physical
+equation, tyre algorithm or integration order was replaced. Eight local crates
+are necessary for the original boot/types. The source archive has no Git metadata,
+so vendor/rerbr-sim/UPSTREAM-HASHES.json identifies 623 original files by SHA-256.
+Of these, 620 are unchanged. PATCHES.json identifies the three host adaptations:
+page storage, its test registration, and explicit private NGP data roots. The
+original flat memory backend is retained byte-for-byte as a test-only reference.
+The hybrid manifest builds rlib rather than the desktop harness cdylib. Original
+equations and the standalone boot/handle sources remain byte-identical.
+
+The worker requests a 32MiB native stack and replaces the 4GiB+8MiB contiguous
+mapping with stable demand-allocated pages, preserving logical u32 addresses,
+registers, byte/word/copy/snapshot/epoch semantics. A parity test exercises 1,000
+deterministic writes, unaligned/page-boundary/wrapping addresses, unmapped reads,
+restore and retained page bytes against the original backend. Metadata uses
+16MiB on 64-bit hosts; allocated page payload has a caught 256MiB budget. This
+does not guarantee recovery from actual allocator OOM, stack overflow or OS kill.
+
+Real read-only private-data execution uses Corolla [Car06], Harwood's actual dry
+O season row (33 on these files), normal wear, original NGP boot and Stage
+transitions. Each independent pass runs 1,520 original loading/contact steps and
+720 measured steps, with timestep bits 0x3ab60b61 (approximately 1/720s). Neutral,
+brake/clutch and zero throttle deliberately test a stationary car. Two passes
+execute 4,480 physical substeps altogether. No original DLL instruction is executed;
+the pinned DLL supplies immutable constants/initializers to the authentic readers.
+
+An isolated Release integration test used only 16 SHA-256-verified private file
+copies (36,321,934 bytes), outside both repositories, in the exact Documents layout
+listed in PHYSICS-PROBE.md. No installation/overlay fallback was available. Both
+boots and all steps passed. Of the 16 files, Cars.ini, corolla.sgc and the O LBS
+were already needed by stage 5; 13 files are additional. The compatible package's
+physics.rbz is used along with its NGP.dll; RSF's installed 7.5 remains untouched.
+
+| Isolated Windows Release run | Pass 1 | Pass 2 |
+| --- | --- | --- |
+| Boot, seconds | 0.141 | 0.136 |
+| Measured steps | 720 | 720 |
+| Mean host wall duration per step, ms | 0.349 | 0.325 |
+| P95 / P99, ms | 0.703 / 0.900 | 0.646 / 0.952 |
+| Maximum step, ms | 1.649 | 1.712 |
+| Simulated / actual measured-loop duration | 3.98 | 4.27 |
+
+These PC results are not A17 predictions, CPU utilization or GPU timestamps. They
+exclude boot/settling; loop wall time includes progress/measurement overhead.
+Both endpoint FRM1 car/wheel hashes were
+`c7e1409b515dd69276132cde2c4992be166d35da262ababf49288ed5b73c454b`.
+The Debug run and separate full-install Release runs agreed with this hash.
+This tests endpoint repeatability, not every state word, an original recording
+oracle, a moving load or cross-architecture bit equivalence. The actual boot
+reported 50 registry entries, 7,625 placements, 604 interactive handles, 76 stage
+meshes, nine car collision meshes, 13 car placements and 375 fence posts.
+
+Allocated page payload was 38,313,984 bytes (36.54MiB), plus 16MiB metadata. This
+is not resident memory. The new native TASK_VM_INFO.phys_footprint query reports
+whole-process memory on iOS; Windows reports unavailable. The sampled maximum
+cannot capture every transient peak. Public Mach/native compilation is untested.
+
+Windows checks used Rust 1.97.1 MSVC and the existing offline cache, with build,
+temp and log products kept in ignored .validation/:
+
+| Check | Result |
+| --- | --- |
+| Workspace tests, physics-probe only | PASS: 996; one private test ignored |
+| Script's selected physics/host/app packages | PASS: 194; one private test ignored |
+| Independent physics app tests | PASS: five; one private test ignored |
+| Actual private Release integration | PASS: full-install and isolated 16-file Documents variants |
+| Default triangle app tests | PASS: one |
+| Independent car-chase app regression | PASS: 34; four private tests ignored |
+| All-features app tests | PASS: 56; seven private tests ignored |
+| Workspace/all-targets Clippy, physics-probe and all-features | PASS with -D warnings |
+| cargo fmt --all -- --check | PASS |
+| Original flat/sparse memory parity | PASS |
+| SHA-256 provenance | PASS: 623 imports, three explicit adaptations, original flat reference, 20 existing vendor entries and retained GPL licenses |
+
+Tests requiring absent retail corpora may return without exercising those files;
+the 996 count does not establish a full retail-file or recording-oracle sweep.
+The original repository-wide rust-check.sh/hybrid recording checks were not run
+against the untouched parent engine. No original recording set is present here.
+
+The animated triangle remains the liveness background. A GPU HUD shows worker
+phase, physical steps, allocated memory, timing/results or errors. Completion/error
+tap starts fresh state; background/occlusion requests cancellation. Boot cannot
+be interrupted mid-constructor. The physics device case alone enables Release
+panic=unwind so the original pure-host stop can be caught and reported. Visual
+build cases retain their prior panic policy and host-test scope.
+
+Modified existing files: .gitignore, Cargo.toml, Cargo.lock, README.md, this file,
+github-actions/ios-probe.yml (secondary template only), scripts/build-ios.sh,
+scripts/verify.py, src/lib.rs, tests/shader.rs and xcode/ReRBRProbe/main.m.
+New: PHYSICS-PROBE.md, examples/physics-diagnostic.rs, src/physics_probe.rs,
+tests/physics_probe.rs and the complete vendor/rerbr-sim/ source tree. Existing
+render/car/terrain conversions, shaders, camera, benchmark metrics, Xcode project
+and previously imported vendors are unchanged. The source verifier checks the
+new closure/licenses, disallows private files in source and IPA, and permits only
+two hash-verified upstream CPU approximation tables (8KiB each) as source BIN
+exceptions. These are not game assets or raw Xcode resources.
+
+The secondary workflow template adds only the physics mode and its description.
+The script retains Cargo/static-library/Xcode/lipo/signing/IPA paths and adds
+--no-default-features --features physics-probe with the unwind override. The
+active clone workflow and GitHub clone were not touched. No resources were added
+to the project or IPA. The installed NGP 7.5 DLL and supplied compatible 7.4 DLL
+retain their verified hashes. No commit, push, synchronization or Actions run.
+
+Pending: macOS/iOS compilation/linking/unwinding, native memory reporting, ARM64
+arithmetic and repeatability, stack/resident memory, boot/live HUD/cancellation/
+restart on the iPad and sustained moving-car performance. Python/Bash preflight
+could not run because no usable local interpreters were found; source/hash/license/
+resource checks were additionally executed in PowerShell. No Apple build or device
+success is claimed. Private files must be transferred after unsigned IPA signing
+and installation; they are never packaged or uploaded.

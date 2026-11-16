@@ -2,6 +2,17 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <mach/mach.h>
+
+// Public Mach accounting; zero means unavailable. No private API or entitlement.
+uint64_t rerbr_probe_physical_footprint(void) {
+    task_vm_info_data_t info = {0};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    kern_return_t result = task_info(mach_task_self(), TASK_VM_INFO,
+        (task_info_t)&info, &count);
+    return result == KERN_SUCCESS ? info.phys_footprint : 0;
+}
 
 extern int rerbr_probe_main(void);
 

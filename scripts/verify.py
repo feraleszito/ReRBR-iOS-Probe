@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import json
 import os
 import plistlib
 import re
@@ -12,7 +13,9 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PRIVATE_ASSET_SUFFIXES = {".lbs", ".dds", ".rbz", ".sgc", ".trk", ".dls", ".col", ".fnc", ".mat", ".zip", ".vso", ".pso"}
+PRIVATE_ASSET_SUFFIXES = {".lbs", ".dds", ".rbz", ".sgc", ".sgs", ".lsp", ".dll", ".exe", ".bin", ".trk", ".dls", ".col", ".fnc", ".mat", ".zip", ".vso", ".pso"}
+CPU_TABLES = {"vendor/rerbr-sim/upstream/rbr-physics/data/rsqrt.bin",
+              "vendor/rerbr-sim/upstream/rbr-physics/data/rcp.bin"}
 
 
 def is_private_asset(name):
@@ -33,12 +36,14 @@ def verify_sources():
     require("workspace" in manifest, "probe must have an independent workspace")
     require("staticlib" in manifest["lib"]["crate-type"], "Rust library must include staticlib")
     dependencies = manifest["dependencies"]
-    require(set(dependencies) == {"wgpu", "winit", "futures-executor", "rerbr-render-core", "rerbr-asset-formats"},
+    require(set(dependencies) == {"wgpu", "winit", "futures-executor", "rerbr-render-core", "rerbr-asset-formats", "rerbr-sim"},
             "unexpected runtime dependency")
     require(dependencies["rerbr-render-core"] == {"path": "vendor/rerbr-render-core", "optional": True},
             "render core must be a local optional dependency")
     require(dependencies["rerbr-asset-formats"] == {"path": "vendor/rerbr-asset-formats", "optional": True},
             "asset readers must be a local optional dependency")
+    require(dependencies["rerbr-sim"] == {"path": "vendor/rerbr-sim", "optional": True},
+            "physics must remain an optional local dependency")
     require(manifest["features"]["default"] == [], "triangle must remain the default")
     require(manifest["features"]["rerbr-3d"] == ["dep:rerbr-render-core", "dep:rerbr-asset-formats"],
             "unexpected 3D feature dependencies")
@@ -50,7 +55,9 @@ def verify_sources():
             "benchmark must reuse the same neighbor workload dependencies")
     require(manifest["features"]["car-chase-benchmark"] == ["harwood-benchmark"],
             "car benchmark must reuse the current terrain/clock dependencies")
-    require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats"],
+    require(manifest["features"]["physics-probe"] == ["dep:rerbr-sim"],
+            "CPU probe must not activate the terrain/car benchmark")
+    require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats", "vendor/rerbr-sim", "vendor/rerbr-sim/upstream/*"],
             "unexpected workspace member")
     require(manifest["workspace"]["default-members"] == ["."], "default build must select the triangle app")
     require(dependencies["wgpu"]["version"] == "=30.0.1", "wgpu version must match the probe")
@@ -63,7 +70,31 @@ def verify_sources():
                           ("rerbr-render-core", "0.1.0"), ("glam", "0.33.12"),
                           ("rerbr-asset-formats", "0.1.0"), ("zip", "9.0.3")):
         require(versions.get(name) == version, f"locked {name} version")
-    require(not any(name.startswith("rbr-") for name in versions), "probe must not depend on game crates")
+    expected_sim = {"rbr-physics", "rbr-hybrid", "rbr-formats", "rbr-gameplay", "rbr-recording", "rbr-engine", "rbr-tyre", "rbr-school"}
+    require({name for name in versions if name.startswith("rbr-")} == expected_sim,
+            "unexpected physics dependency closure")
+    require(versions.get("rerbr-sim") == "0.1.0", "locked local physics adapter")
+    sim = ROOT / "vendor/rerbr-sim"
+    upstream = json.loads((sim / "UPSTREAM-HASHES.json").read_text(encoding="utf-8-sig"))
+    patches = json.loads((sim / "PATCHES.json").read_text(encoding="utf-8-sig"))
+    require(len(upstream) == 623, "missing upstream physics sources or CPU reference tables")
+    require(set(patches) == {"upstream/rbr-physics/src/mem.rs", "upstream/rbr-physics/src/mem/pages.rs",
+                             "upstream/rbr-formats/src/ngp/mod.rs"}, "unexpected adapted upstream file")
+    for entry in upstream:
+        relative = entry["Path"]
+        expected = patches.get(relative, entry["SHA256"])
+        require(hashlib.sha256((sim / relative).read_bytes()).hexdigest() == expected,
+                f"physics source/provenance mismatch: {relative}")
+    original_pages = next(e["SHA256"] for e in upstream if e["Path"] == "upstream/rbr-physics/src/mem/pages.rs")
+    require(hashlib.sha256((sim / "upstream/rbr-physics/src/mem/pages_flat.rs").read_bytes()).hexdigest() == original_pages,
+            "original host-memory reference changed")
+    for name in expected_sim:
+        package = tomllib.loads((sim / "upstream" / name / "Cargo.toml").read_text())
+        require(package["package"]["license"] == "GPL-3.0-or-later", "physics license changed")
+        if name == "rbr-hybrid":
+            require(package["lib"]["crate-type"] == ["rlib"], "device dependency must not build the desktop harness cdylib")
+        require((sim / "upstream" / name / "LICENSE").read_bytes() == (sim / "LICENSE").read_bytes(),
+                "missing retained GPL license")
     core = ROOT / "vendor/rerbr-render-core"
     core_manifest = tomllib.loads((core / "Cargo.toml").read_text())
     require(core_manifest["package"]["license"] == "GPL-3.0-or-later", "retain the upstream license")
@@ -102,7 +133,9 @@ def verify_sources():
     for directory, children, files in os.walk(ROOT):
         children[:] = [name for name in children if name not in {".git", ".validation", "target", "build"}]
         for name in files:
-            require(not is_private_asset(name), f"private game resource in source tree: {Path(directory) / name}")
+            relative = (Path(directory) / name).relative_to(ROOT).as_posix()
+            require(not is_private_asset(name) or relative in CPU_TABLES,
+                    f"private game resource in source tree: {Path(directory) / name}")
     for relative in (
         "xcode/ReRBRProbe/LaunchScreen.storyboard",
         "xcode/ReRBRProbe.xcodeproj/xcshareddata/xcschemes/ReRBRProbe.xcscheme",

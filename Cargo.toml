@@ -9,7 +9,7 @@ license = "GPL-3.0-or-later"
 
 # A nested workspace keeps this experiment independent of ../Cargo.toml and ../Cargo.lock.
 [workspace]
-members = ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats"]
+members = ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats", "vendor/rerbr-sim", "vendor/rerbr-sim/upstream/*"]
 default-members = ["."]
 resolver = "2"
 
@@ -23,6 +23,7 @@ harwood-neighbors = ["dep:rerbr-render-core", "dep:rerbr-asset-formats"]
 # Separate app mode; shares the exact neighbor workload and its optional dependencies.
 harwood-benchmark = ["harwood-neighbors"]
 car-chase-benchmark = ["harwood-benchmark"]
+physics-probe = ["dep:rerbr-sim"]
 
 [lib]
 name = "rerbr_probe"
@@ -32,6 +33,7 @@ crate-type = ["staticlib", "rlib"]
 futures-executor = "=0.3.34"
 rerbr-render-core = { path = "vendor/rerbr-render-core", optional = true }
 rerbr-asset-formats = { path = "vendor/rerbr-asset-formats", optional = true }
+rerbr-sim = { path = "vendor/rerbr-sim", optional = true }
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "metal", "wgsl"] }
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
 
@@ -57,6 +59,10 @@ required-features = ["harwood-benchmark"]
 [[example]]
 name = "car-chase-diagnostic"
 required-features = ["car-chase-benchmark"]
+
+[[example]]
+name = "physics-diagnostic"
+required-features = ["physics-probe"]
 
 [profile.release]
 panic = "abort"

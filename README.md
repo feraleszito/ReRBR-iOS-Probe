@@ -6,8 +6,9 @@ triangle. With `rerbr-3d`, it draws a procedural floor and cube through a fixed 
 using the original reRBR coordinate/camera library. Touch the screen to switch the
 background in either configuration. The feature build also has a read-only Harwood
 file diagnostic using selected original reRBR readers. It does not display the stage.
-No physics, SDL, audio, Richard Burns Rally files, RallySimFans files, textures or
-downloads of game content are bundled. See [HARWOOD.md](HARWOOD.md) for private-file
+No SDL, audio, Richard Burns Rally files, RallySimFans files, textures or
+downloads of game content are bundled. Physics is an optional independent diagnostic.
+See [HARWOOD.md](HARWOOD.md) for private-file
 transfer and the actual Windows validation results.
 
 The independent `harwood-block` feature adds the first real road/terrain block,
@@ -29,8 +30,15 @@ ran at 60 FPS with V-sync on the iPad. See [HARWOOD-BENCHMARK.md](HARWOOD-BENCHM
 `car-chase-benchmark` adds the original Toyota Corolla [Car06], four gravel wheels,
 shared terrain depth, opaque/transparent materials and a 20-second chase run.
 Private car files stay under Documents/RBR; they are never bundled. A/B suppresses
-only the car draws with the same camera/resources. This new mode still needs its
-Apple build and physical test. See [CAR-CHASE-BENCHMARK.md](CAR-CHASE-BENCHMARK.md).
+only the car draws with the same camera/resources. The owner confirms this baseline
+on the iPad. See [CAR-CHASE-BENCHMARK.md](CAR-CHASE-BENCHMARK.md).
+
+The owner confirms the Corolla chase runs on the iPad at 60 FPS with V-sync.
+The independent `physics-probe` starts the authentic pure reRBR engine on a CPU
+worker and shows progress/timing over the liveness triangle. Its 16 private files,
+sparse-memory adaptation and Windows checks are documented in
+[PHYSICS-PROBE.md](PHYSICS-PROBE.md). Its Apple build and device execution remain
+unverified. It adds no driving controls and does not change the visual benchmarks.
 
 The Cargo manifest declares its own workspace, lockfile and toolchain (**Rust 1.97.1**).
 Building this directory does not build or alter the parent workspace. Runtime dependencies
@@ -49,6 +57,7 @@ development dependency for validating the embedded WGSL shader.
 | `src/asset_probe.rs` | Optional CPU-only Harwood audit from private Documents files |
 | `src/harwood/` | Shared real-terrain conversion/Metal pass, single-block loader, optional connected selection, BC upload and provenance |
 | `src/car/`, `examples/car-chase-diagnostic.rs`, `tests/car_chase.rs` | Original Corolla CPU conversion, geometric pose/chase, GPU pass, A/B HUD, provenance and tests |
+| `src/physics_probe.rs`, `vendor/rerbr-sim/`, `PHYSICS-PROBE.md` | Optional genuine physics boot/step worker, source provenance, memory adaptation, diagnostics and private transfer instructions |
 | `examples/harwood-diagnostic.rs` | Read-only Windows/macOS command-line entry for the same audit |
 | `examples/harwood-block-diagnostic.rs`, `tests/harwood_block.rs` | Single-block CPU diagnostic and synthetic/opt-in real-data tests |
 | `examples/harwood-neighbors-diagnostic.rs`, `tests/harwood_neighbors.rs`, `src/harwood/neighbors_tests.rs` | Connected-region CPU diagnostic, spatial/budget tests and opt-in real-data checks |
@@ -103,7 +112,9 @@ The procedural pass still uses no textures, lighting systems, physics, audio or 
 
 See `vendor/rerbr-render-core/UPSTREAM.md` for original paths and SHA-256 hashes, and
 `vendor/rerbr-render-core/LICENSE` for the retained license. The preflight verifier allows
-only the two selected local optional dependencies and checks their imported source hashes.
+the three selected local optional dependencies and checks their imported source hashes.
+Only physics-probe activates the local pure-simulation dependency closure; no SDL,
+launcher, audio or executable plugin is required.
 
 From the standalone repository root, run:
 
@@ -127,12 +138,15 @@ selection from `PROBE_MODE` (default `triangle`) and rejects any other value:
 | `harwood-neighbors` | `--no-default-features --features harwood-neighbors` | Full workspace: readers, math, connected selection/budgets, BC layout and shaders | Connected private terrain/road region; same three diagnostic views |
 | `harwood-benchmark` | `--no-default-features --features harwood-benchmark` | Full workspace plus camera/ground, timing, metrics, restart and HUD tests | Automatic 20-second textured run, live HUD and final summary; tap restarts |
 | `car-chase-benchmark` | `--no-default-features --features car-chase-benchmark` | Full workspace plus SGC/car, support/chase, materials, shader and A/B tests | Real Corolla on Harwood, chase HUD; tap restarts, completion/tap alternates A/B |
+| `physics-probe` | `--no-default-features --features physics-probe` | Physics/host and app tests; private execution tests remain opt-in | Genuine stationary CPU simulation, progress/HUD; completion/error tap restarts |
 
 The selected feature flags are passed to the host tests, iOS Clippy, the **release
 static-library build for `aarch64-apple-ios`**, and a dependency-tree diagnostic. The
 existing Xcode library search path, ARM64 checks, unsigned IPA packaging and signing
 restrictions are unchanged. The local workflow template and script now accept all
-six selections. The active parent-workspace workflow and the GitHub Desktop
+seven selections. Physics builds alone enable release panic unwinding to catch
+pure-host stops; old visual modes exclude the new upstream packages from their
+host-test scope. The active parent-workspace workflow and the GitHub Desktop
 repository have not been synchronized for this step. No Actions run was started.
 If multiple visual features are enabled, priority is `car-chase-benchmark`, then
 `harwood-benchmark`, then `harwood-neighbors`, then
@@ -145,7 +159,7 @@ On a macOS host with Xcode and the iOS target, an explicit feature-only type che
 cargo check --locked --lib --target aarch64-apple-ios --features rerbr-3d
 ```
 
-The new `car-chase-benchmark` Apple-target build has not been performed here.
+The new `physics-probe` Apple-target build has not been performed here.
 Windows mathematics and type checks do not establish iPadOS compatibility; a
 subsequent authorized sync and Actions run must verify that configuration.
 
@@ -163,9 +177,10 @@ GitHub signing secrets are used to build the unsigned IPA.
    `ReRBR-iOS-Probe` repository. `Cargo.toml`, `Cargo.lock`, `scripts/`, `src/`, `tests/`,
    `vendor/` and `xcode/` must be at the root. Do not create another `ios-probe/` directory there.
 2. GitHub discovers workflows **only** under the repository root's `.github/workflows/`.
-   The activated file must be `.github/workflows/ios-probe.yml`, copied from
-   `github-actions/ios-probe.yml`. The template alone is not discoverable.
-   Keep the two copies identical. This workflow targets the standalone repository;
+   The active file must be `.github/workflows/ios-probe.yml`. Review the local
+   `github-actions/ios-probe.yml` template and adapt the active workflow minimally;
+   the template alone is not discoverable and stays outside the public commit.
+   This workflow targets the standalone repository;
    its layout check deliberately fails at the root of the original reRBR repository.
 3. Commit the new files, including the root `Cargo.lock`, and push to your own repository.
    Ensure the workflow is present on the **default branch** so the manual Run workflow
@@ -174,7 +189,8 @@ GitHub signing secrets are used to build the unsigned IPA.
    **triangle** for the fallback, **rerbr-3d** for floor/cube, **harwood-block** for
    one real block, **harwood-neighbors** for the connected region, or
    **harwood-benchmark** for the timed camera run, or **car-chase-benchmark** for
-   the original Corolla chase/A-B experiment. Start a new run using the updated
+   the original Corolla chase/A-B experiment, or **physics-probe** for the independent
+   CPU boot/step diagnostic. Start a new run using the updated
    commit; re-running an old job uses its old workflow/script revision.
 5. Download `ReRBRProbe-unsigned-<build_mode>-<run number>`. Extract the artifact ZIP on Windows to obtain
    `ReRBRProbe-unsigned.ipa` and `SHA256SUMS`. The artifact ZIP itself is not the IPA.
@@ -185,7 +201,6 @@ The expected standalone layout is:
 ```text
 ReRBR-iOS-Probe/
   .github/workflows/ios-probe.yml
-  github-actions/ios-probe.yml
   Cargo.toml
   Cargo.lock
   rust-toolchain.toml
@@ -335,12 +350,11 @@ Harwood block, its connected neighbors and the stage-4 moving benchmark, includi
 60 FPS with V-sync on the iPad mini A17 Pro for stage 4. These are reported baseline
 results, not new hardware measurements from this editing environment.
 
-The new `car-chase-benchmark` has Windows CPU/compiler/shader checks only. It still
-requires an authorized Apple build, private-file import and physical inspection
-of the car, depth, transparency, support, chase camera, touch and lifecycle. Previous
-modes need a device regression comparison after this change. Local results are
-recorded in `VALIDATION.md`; they do not establish that the new car mode compiles
-or renders on iPadOS.
+The new `physics-probe` has Windows checks only and still requires an authorized
+Apple build, its private-file import and physical inspection of boot, memory,
+stack, timing, cancellation and restart. Previous modes need a device regression
+comparison after this change. Local results are recorded in `VALIDATION.md`; they
+do not establish that the physics probe compiles or runs on iPadOS.
 
 ## References
 

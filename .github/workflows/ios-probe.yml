@@ -18,6 +18,7 @@ on:
           - harwood-neighbors
           - harwood-benchmark
           - car-chase-benchmark
+          - physics-probe
 
 permissions:
   contents: read

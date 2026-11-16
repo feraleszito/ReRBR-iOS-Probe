@@ -1,6 +1,22 @@
-/target/
-/build/
-/.validation/
+# Build/cache folders, including accidental nested Cargo builds.
+target/
+build/
+.validation/
+# Local reference template; edit only the active .github/workflows copy in the clone.
+/github-actions/
+*.tmp
+*.temp
+*.log
+*.pdb
+*.obj
+*.lib
+*.a
+*.ipa
+*.dSYM/
+*.xcarchive/
+__pycache__/
+*.py[cod]
+.DS_Store
 *.xcuserstate
 xcuserdata/
 
@@ -9,13 +25,27 @@ xcuserdata/
 /Harwood/
 /Maps/
 /Cars/
-*.lbs
-*.dds
-*.rbz
-*.sgc
-*.trk
-*.dls
-*.col
-*.fnc
-*.mat
-*.zip
+/RBR/
+/Documents/
+# Character classes protect the same files with case-sensitive Git matching.
+*.[dD][lL][lL]
+*.[eE][xX][eE]
+*.[sS][gG][sS]
+*.[lL][sS][pP]
+*.[iI][nN][iI]
+*.[lL][bB][sS]
+*.[dD][dD][sS]
+*.[rR][bB][zZ]
+*.[sS][gG][cC]
+*.[tT][rR][kK]
+*.[dD][lL][sS]
+*.[cC][oO][lL]
+*.[fF][nN][cC]
+*.[mM][aA][tT]
+*.[zZ][iI][pP]
+*.[vV][sS][oO]
+*.[pP][sS][oO]
+*.[bB][iI][nN]
+# Redistributable upstream CPU-approximation tables, not proprietary game files.
+!/vendor/rerbr-sim/upstream/rbr-physics/data/rcp.bin
+!/vendor/rerbr-sim/upstream/rbr-physics/data/rsqrt.bin

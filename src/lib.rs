@@ -11,6 +11,9 @@ use winit::event::{TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+#[cfg(feature = "physics-probe")]
+mod physics_probe;
+
 #[cfg(feature = "car-chase-benchmark")]
 pub mod car;
 
@@ -90,6 +93,10 @@ impl ApplicationHandler for Probe {
 
     fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         eprintln!("lifecycle: suspended; GPU submissions paused");
+        #[cfg(feature = "physics-probe")]
+        if let Some(renderer) = &mut self.renderer {
+            renderer.physics.interrupt();
+        }
         #[cfg(feature = "harwood-benchmark")]
         if let Some(renderer) = &mut self.renderer {
             renderer.harwood.interrupt_benchmark("APP SUSPENDED");
@@ -110,6 +117,10 @@ impl ApplicationHandler for Probe {
             WindowEvent::Resized(size) => renderer.resize(size),
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
+                #[cfg(feature = "physics-probe")]
+                if occluded {
+                    renderer.physics.interrupt();
+                }
                 #[cfg(feature = "harwood-benchmark")]
                 if occluded {
                     renderer.harwood.interrupt_benchmark("APP OCCLUDED");
@@ -117,9 +128,13 @@ impl ApplicationHandler for Probe {
                 self.next_frame = Some(Instant::now());
             }
             WindowEvent::Touch(touch) if touch.phase == TouchPhase::Started => {
+                #[cfg(feature = "physics-probe")]
+                renderer.physics.restart();
                 #[cfg(feature = "harwood-benchmark")]
-                renderer.harwood.restart_benchmark();
-                #[cfg(not(feature = "harwood-benchmark"))]
+                if !cfg!(feature = "physics-probe") {
+                    renderer.harwood.restart_benchmark();
+                }
+                #[cfg(not(any(feature = "harwood-benchmark", feature = "physics-probe")))]
                 {
                     renderer.alternate_background = !renderer.alternate_background;
                     #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
@@ -166,6 +181,8 @@ impl ApplicationHandler for Probe {
 }
 
 struct Renderer {
+    #[cfg(feature = "physics-probe")]
+    physics: physics_probe::Scene,
     surface: wgpu::Surface<'static>,
     window: Arc<Window>,
     instance: wgpu::Instance,
@@ -335,6 +352,8 @@ impl Renderer {
                 .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
         );
         Ok(Self {
+            #[cfg(feature = "physics-probe")]
+            physics: physics_probe::Scene::new(),
             surface,
             window,
             instance,
@@ -521,6 +540,15 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
+        #[cfg(feature = "physics-probe")]
+        self.physics.draw(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &view,
+            (self.config.width, self.config.height),
+            self.config.format,
+        );
         let commands = encoder.finish();
         #[cfg(feature = "harwood-benchmark")]
         let cpu_preparation = cpu_started.elapsed();

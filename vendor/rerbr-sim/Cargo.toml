@@ -1,0 +1,16 @@
+[package]
+name = "rerbr-sim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later"
+description = "Private-data boot and stationary pure reRBR physics probe"
+
+[dependencies]
+rbr-physics = { path = "upstream/rbr-physics" }
+rbr-hybrid = { path = "upstream/rbr-hybrid" }
+rbr-formats = { path = "upstream/rbr-formats" }
+rbr-gameplay = { path = "upstream/rbr-gameplay" }
+rbr-school = { path = "upstream/rbr-school" }
+rbr-recording = { path = "upstream/rbr-recording" }
+sha2 = "=0.10.9"

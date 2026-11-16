@@ -36,7 +36,7 @@ fn harwood_shader_validates_without_optional_shader_capabilities() {
     .expect("Harwood WGSL must validate");
 }
 
-#[cfg(feature = "harwood-benchmark")]
+#[cfg(any(feature = "harwood-benchmark", feature = "physics-probe"))]
 #[test]
 fn benchmark_hud_shader_validates_without_optional_shader_capabilities() {
     let module = naga::front::wgsl::parse_str(include_str!("../src/harwood/benchmark/hud.wgsl"))
