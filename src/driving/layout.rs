@@ -75,7 +75,7 @@ impl Insets {
             }
             let mut values = [0.0; 4];
             unsafe { rerbr_drive_safe_area(values.as_mut_ptr()) };
-            return Self::sanitize(values);
+            Self::sanitize(values)
         }
         #[cfg(not(target_os = "ios"))]
         Self::ZERO
