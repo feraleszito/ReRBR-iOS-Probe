@@ -1,4 +1,7 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <CoreMotion/CoreMotion.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +18,44 @@ uint64_t rerbr_probe_physical_footprint(void) {
 }
 
 extern int rerbr_probe_main(void);
+
+// Polled only on the UIKit thread. No callbacks into Rust or physics writes.
+double rerbr_drive_tilt(int enabled) {
+    static CMMotionManager *motion;
+    if (!enabled) { [motion stopDeviceMotionUpdates]; return NAN; }
+    if (motion == nil) { motion = [[CMMotionManager alloc] init]; motion.deviceMotionUpdateInterval = 1.0/120.0; }
+    if (![motion isDeviceMotionAvailable]) return NAN;
+    if (![motion isDeviceMotionActive]) [motion startDeviceMotionUpdates];
+    UIWindow *keyWindow = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if ([scene isKindOfClass:UIWindowScene.class] && scene.activationState == UISceneActivationStateForegroundActive) {
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            for (UIWindow *window in windowScene.windows) {
+                if (window.isKeyWindow) keyWindow = window;
+            }
+        }
+    }
+    // winit 0.30 deliberately uses the legacy app lifecycle, without a scene manifest.
+    // A scene-only lookup can therefore be empty. Keep the public legacy fallback.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    if (keyWindow == nil) keyWindow = UIApplication.sharedApplication.keyWindow;
+#pragma clang diagnostic pop
+    UIView *view = keyWindow.rootViewController.view;
+    if (view == nil || view.bounds.size.width <= view.bounds.size.height) return NAN;
+    view.multipleTouchEnabled = YES;
+    CMDeviceMotion *sample = motion.deviceMotion;
+    if (sample == nil || fabs(sample.timestamp - NSProcessInfo.processInfo.systemUptime) > 0.25) return NAN;
+    CMAcceleration g = sample.gravity;
+    // Sensor axes are portrait-up. Let UIKit perform the actual window rotation,
+    // avoiding the inverse UIDeviceOrientation/UIInterfaceOrientation naming.
+    id<UICoordinateSpace> fixed = keyWindow.screen.fixedCoordinateSpace;
+    CGPoint zero = [view convertPoint:CGPointZero fromCoordinateSpace:fixed];
+    CGPoint gravity = [view convertPoint:CGPointMake(g.x, -g.y) fromCoordinateSpace:fixed];
+    double right = gravity.x-zero.x, up = zero.y-gravity.y;
+    if (hypot(right, up) < 0.2) return NAN; // Flat on a table has no reliable gravity roll.
+    return atan2(right, -up);
+}
 
 int main(int argc, char *argv[]) {
     (void)argc;

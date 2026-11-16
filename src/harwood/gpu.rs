@@ -29,6 +29,10 @@ pub(crate) struct Scene {
 }
 
 impl Scene {
+    #[cfg(feature = "physics-drive")]
+    pub fn driving_touch(&mut self, touch: winit::event::Touch, size: (u32, u32)) {
+        self.benchmark.driving.touch(touch, size);
+    }
     pub fn new(bc_enabled: bool) -> Self {
         let mut scene = Self {
             pending: None,
@@ -115,7 +119,7 @@ impl Scene {
         Block::new(device, queue, format, data)
     }
 
-    #[cfg(feature = "harwood-benchmark")]
+    #[cfg(all(feature = "harwood-benchmark", not(feature = "physics-drive")))]
     pub fn restart_benchmark(&mut self) {
         self.benchmark.restart();
     }

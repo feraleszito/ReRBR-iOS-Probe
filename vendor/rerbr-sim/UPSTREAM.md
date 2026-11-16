@@ -41,7 +41,19 @@ same table exception documented by the reference AGENTS.md. rcp.bin/rsqrt.bin ar
 CPU instruction-approximation reference tables, not game files; the fuzz text is
 synthetic numerical validation data. Their exact hashes are retained and checked.
 
-App-owned inputs/measurement/UI/worker code is GPL-3.0-or-later. Native public Mach
+App-owned inputs/measurement/UI/worker code is GPL-3.0-or-later.
+The app-owned adapter also exposes a separate acceleration diagnostic and records
+physical displacement; see PHYSICS-DRIVE-AUDIT.md at the app root. It does not alter
+the stationary probe controls or any imported equations. The movement test now
+passes with the original first-gear index 2 (1 was neutral), followed by braking.
+Read-only diagnostics use original typed layouts. This is not a playable app mode.
+drive.rs adds an app-owned reusable boot/step Session for the physics-drive app
+mode, using the same authentic calls. Its COL triangle reader is only an independent
+contact diagnostic; simulation collision stays the original dispatcher. Added wheel
+centre/strut/roll readings use original recording/layout definitions. No imported
+source hashes or equations changed. See PHYSICS-DRIVE.md for the partial-stage scope.
+
+Native public Mach
 footprint reporting lives in the existing main.m; the app's previous entry/lifecycle
 is retained. Panic unwinding is enabled only for the physics device build so a pure
 host stop can be reported, without escaping the CPU worker or running original code.

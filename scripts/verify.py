@@ -57,6 +57,8 @@ def verify_sources():
             "car benchmark must reuse the current terrain/clock dependencies")
     require(manifest["features"]["physics-probe"] == ["dep:rerbr-sim"],
             "CPU probe must not activate the terrain/car benchmark")
+    require(manifest["features"]["physics-drive"] == ["car-chase-benchmark", "dep:rerbr-sim"],
+            "driving must use existing car/terrain pipelines and authentic physics")
     require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats", "vendor/rerbr-sim", "vendor/rerbr-sim/upstream/*"],
             "unexpected workspace member")
     require(manifest["workspace"]["default-members"] == ["."], "default build must select the triangle app")
@@ -79,7 +81,7 @@ def verify_sources():
     patches = json.loads((sim / "PATCHES.json").read_text(encoding="utf-8-sig"))
     require(len(upstream) == 623, "missing upstream physics sources or CPU reference tables")
     require(set(patches) == {"upstream/rbr-physics/src/mem.rs", "upstream/rbr-physics/src/mem/pages.rs",
-                             "upstream/rbr-formats/src/ngp/mod.rs","upstream/rbr-hybrid/src/lib.rs",}, "unexpected adapted upstream file")
+                             "upstream/rbr-formats/src/ngp/mod.rs"}, "unexpected adapted upstream file")
     for entry in upstream:
         relative = entry["Path"]
         expected = patches.get(relative, entry["SHA256"])
@@ -164,6 +166,10 @@ def verify_sources():
     for relative in ("mod.rs", "selection.rs", "materials.rs", "mesh.rs", "placement.rs", "gpu.rs",
                      "runtime.rs", "shader.wgsl", "UPSTREAM.md", "tests.rs"):
         require((ROOT / "src/car" / relative).is_file(), f"missing Corolla source: {relative}")
+    for relative in ("mod.rs", "controls.rs", "worker.rs", "UPSTREAM.md"):
+        require((ROOT / "src/driving" / relative).is_file(), f"missing driving source: {relative}")
+    require(info.get("NSMotionUsageDescription"), "motion usage explanation missing")
+    require("CoreMotion" in project, "CoreMotion framework missing")
     print("PASS: independent manifest, optional libraries, upstream hashes, no game resources, locked versions, Xcode references, plist and XML")
 
 

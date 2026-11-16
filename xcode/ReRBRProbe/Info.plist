@@ -22,6 +22,7 @@
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
     <key>UIFileSharingEnabled</key><true/>
+    <key>NSMotionUsageDescription</key><string>Device motion controls rally steering on this iPad.</string>
     <key>LSSupportsOpeningDocumentsInPlace</key><true/>
 </dict>
 </plist>

@@ -41,6 +41,10 @@ pub struct Validation {
     pub min_boom: f32,
 }
 impl ChasePath {
+    #[cfg(feature = "physics-drive")]
+    pub(crate) fn supports_driving(&self, position: Vec3) -> bool {
+        self.ground.support_height(position).is_some()
+    }
     pub fn new(route: Route, terrain: &Mesh, car: &Geometry) -> Result<Self, String> {
         let triangles = terrain
             .indices
@@ -152,7 +156,11 @@ impl ChasePath {
             boom,
         })
     }
-    fn chase_camera(&self, target: Vec3, forward: Vec3) -> Result<(Camera, f32), String> {
+    pub(crate) fn chase_camera(
+        &self,
+        target: Vec3,
+        forward: Vec3,
+    ) -> Result<(Camera, f32), String> {
         for step in 0..=10 {
             let boom = 6.0 - step as f32 * 0.25;
             let mut eye = target - forward * boom + Vec3::Y * 2.0; // 2.5m above road; target is at 0.5m.

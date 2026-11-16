@@ -24,6 +24,7 @@ impl Default for Comparison {
     }
 }
 impl Comparison {
+    #[cfg(any(not(feature = "physics-drive"), test))]
     pub fn restart(&mut self, complete: bool) {
         if complete {
             self.car_visible = !self.car_visible;
@@ -38,6 +39,8 @@ impl Comparison {
     }
 }
 pub(crate) struct Runtime {
+    #[cfg(feature = "physics-drive")]
+    pub(crate) driving: crate::driving::Runtime,
     origin: Instant,
     path: Option<ChasePath>,
     session: Option<Session>,
@@ -54,6 +57,8 @@ pub(crate) struct Runtime {
 impl Runtime {
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "physics-drive")]
+            driving: crate::driving::Runtime::new(),
             origin: Instant::now(),
             path: None,
             session: None,
@@ -77,6 +82,8 @@ impl Runtime {
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
     ) -> Result<(), String> {
+        #[cfg(feature = "physics-drive")]
+        self.driving.install(&car.geometry);
         self.car = Some(Gpu::new(device, queue, format, car)?);
         self.path = Some(path);
         self.terrain = terrain;
@@ -84,11 +91,14 @@ impl Runtime {
         Ok(())
     }
     pub fn fail(&mut self) {
+        #[cfg(feature = "physics-drive")]
+        self.driving.pause();
         self.fatal = true;
         if let Some(s) = &mut self.session {
             s.abort();
         }
     }
+    #[cfg(any(not(feature = "physics-drive"), test))]
     pub fn restart(&mut self) {
         if self.fatal {
             return;
@@ -108,6 +118,8 @@ impl Runtime {
         }
     }
     pub fn interrupt(&mut self, reason: &'static str) {
+        #[cfg(feature = "physics-drive")]
+        self.driving.pause();
         if let Some(s) = &mut self.session {
             if matches!(s.state(), State::Warmup | State::Running) {
                 s.abort();
@@ -117,22 +129,35 @@ impl Runtime {
         }
     }
     pub fn before_frame(&mut self, camera: &mut Camera) -> Result<(), String> {
-        let Some(path) = &self.path else {
-            return Ok(());
-        };
-        let now = self.origin.elapsed().as_secs_f64();
-        let s = self.session.get_or_insert_with(|| Session::new(now));
-        let previous = s.state();
-        s.begin_frame(now);
-        if previous == State::Warmup && s.state() == State::Running {
-            eprintln!("car-chase START: {}; 20 real seconds, {:.3}m/s; CPU preparation separate; GPU timing unavailable; unchanged camera/ground work in A and B",self.comparison.label(),path.length()/20.0);
+        #[cfg(feature = "physics-drive")]
+        {
+            if let Some(path) = &self.path {
+                if let Some(frame) = self.driving.frame(path) {
+                    *camera = frame.camera;
+                    self.frame = Some(frame);
+                }
+            }
+            Ok(())
         }
-        if s.state() != State::Aborted {
-            let frame = path.frame(s.distance(path.length()))?;
-            *camera = frame.camera;
-            self.frame = Some(frame);
+        #[cfg(not(feature = "physics-drive"))]
+        {
+            let Some(path) = &self.path else {
+                return Ok(());
+            };
+            let now = self.origin.elapsed().as_secs_f64();
+            let s = self.session.get_or_insert_with(|| Session::new(now));
+            let previous = s.state();
+            s.begin_frame(now);
+            if previous == State::Warmup && s.state() == State::Running {
+                eprintln!("car-chase START: {}; 20 real seconds, {:.3}m/s; CPU preparation separate; GPU timing unavailable; unchanged camera/ground work in A and B",self.comparison.label(),path.length()/20.0);
+            }
+            if s.state() != State::Aborted {
+                let frame = path.frame(s.distance(path.length()))?;
+                *camera = frame.camera;
+                self.frame = Some(frame);
+            }
+            Ok(())
         }
-        Ok(())
     }
     #[allow(clippy::too_many_arguments)]
     pub fn draw_car(
@@ -151,6 +176,8 @@ impl Runtime {
         }
     }
     pub fn submitted(&mut self, cpu: Duration) {
+        #[cfg(feature = "physics-drive")]
+        self.driving.submitted(cpu);
         if let Some(s) = &mut self.session {
             if s.submitted(self.origin.elapsed().as_secs_f64(), cpu.as_secs_f64()) {
                 eprintln!(
@@ -195,9 +222,17 @@ impl Runtime {
             }
         }
         if let Some(hud) = &self.hud {
-            self.hud_vertices = hud.draw(queue, encoder, target, size, &self.lines());
+            #[cfg(feature = "physics-drive")]
+            {
+                self.driving.overlay(hud, queue, encoder, target, size);
+            }
+            #[cfg(not(feature = "physics-drive"))]
+            {
+                self.hud_vertices = hud.draw(queue, encoder, target, size, &self.lines());
+            }
         }
     }
+    #[cfg(not(feature = "physics-drive"))]
     fn lines(&self) -> Vec<String> {
         let mut l = vec![format!("CAR CHASE {}", self.comparison.label())];
         if self.fatal {
@@ -261,6 +296,7 @@ impl Runtime {
         l
     }
 }
+#[cfg(not(feature = "physics-drive"))]
 fn stat_line(name: &str, s: Stats) -> String {
     format!(
         "{name} V{} T{} D{} X{}",

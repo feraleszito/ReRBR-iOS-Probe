@@ -7,12 +7,17 @@ use std::time::{Duration, Instant};
 use futures_executor::block_on;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{TouchPhase, WindowEvent};
+#[cfg(not(feature = "physics-drive"))]
+use winit::event::TouchPhase;
+use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-#[cfg(feature = "physics-probe")]
+#[cfg(all(feature = "physics-probe", not(feature = "physics-drive")))]
 mod physics_probe;
+
+#[cfg(feature = "physics-drive")]
+pub mod driving;
 
 #[cfg(feature = "car-chase-benchmark")]
 pub mod car;
@@ -93,7 +98,7 @@ impl ApplicationHandler for Probe {
 
     fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         eprintln!("lifecycle: suspended; GPU submissions paused");
-        #[cfg(feature = "physics-probe")]
+        #[cfg(all(feature = "physics-probe", not(feature = "physics-drive")))]
         if let Some(renderer) = &mut self.renderer {
             renderer.physics.interrupt();
         }
@@ -114,10 +119,16 @@ impl ApplicationHandler for Probe {
             return;
         }
         match event {
-            WindowEvent::Resized(size) => renderer.resize(size),
+            WindowEvent::Resized(size) => {
+                renderer.resize(size);
+                #[cfg(feature = "physics-drive")]
+                renderer
+                    .harwood
+                    .interrupt_benchmark("SIZE / ORIENTATION CHANGE");
+            }
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
-                #[cfg(feature = "physics-probe")]
+                #[cfg(all(feature = "physics-probe", not(feature = "physics-drive")))]
                 if occluded {
                     renderer.physics.interrupt();
                 }
@@ -127,8 +138,16 @@ impl ApplicationHandler for Probe {
                 }
                 self.next_frame = Some(Instant::now());
             }
+            #[cfg(feature = "physics-drive")]
+            WindowEvent::Touch(touch) => {
+                let size = renderer.window.inner_size();
+                renderer
+                    .harwood
+                    .driving_touch(touch, (size.width, size.height));
+            }
+            #[cfg(not(feature = "physics-drive"))]
             WindowEvent::Touch(touch) if touch.phase == TouchPhase::Started => {
-                #[cfg(feature = "physics-probe")]
+                #[cfg(all(feature = "physics-probe", not(feature = "physics-drive")))]
                 renderer.physics.restart();
                 #[cfg(feature = "harwood-benchmark")]
                 if !cfg!(feature = "physics-probe") {
@@ -181,7 +200,7 @@ impl ApplicationHandler for Probe {
 }
 
 struct Renderer {
-    #[cfg(feature = "physics-probe")]
+    #[cfg(all(feature = "physics-probe", not(feature = "physics-drive")))]
     physics: physics_probe::Scene,
     surface: wgpu::Surface<'static>,
     window: Arc<Window>,
@@ -352,7 +371,7 @@ impl Renderer {
                 .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
         );
         Ok(Self {
-            #[cfg(feature = "physics-probe")]
+            #[cfg(all(feature = "physics-probe", not(feature = "physics-drive")))]
             physics: physics_probe::Scene::new(),
             surface,
             window,
@@ -540,7 +559,7 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
-        #[cfg(feature = "physics-probe")]
+        #[cfg(all(feature = "physics-probe", not(feature = "physics-drive")))]
         self.physics.draw(
             &self.device,
             &self.queue,

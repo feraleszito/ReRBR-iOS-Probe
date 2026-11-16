@@ -8,7 +8,9 @@ pub mod mesh;
 pub mod neighbors;
 pub mod texture;
 
-#[cfg(feature = "car-chase-benchmark")]
+#[cfg(feature = "physics-drive")]
+pub const MODE_NAME: &str = "physics-drive";
+#[cfg(all(feature = "car-chase-benchmark", not(feature = "physics-drive")))]
 pub const MODE_NAME: &str = "car-chase-benchmark";
 #[cfg(all(feature = "harwood-benchmark", not(feature = "car-chase-benchmark")))]
 pub const MODE_NAME: &str = "harwood-benchmark";

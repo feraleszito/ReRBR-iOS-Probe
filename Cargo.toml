@@ -24,6 +24,7 @@ harwood-neighbors = ["dep:rerbr-render-core", "dep:rerbr-asset-formats"]
 harwood-benchmark = ["harwood-neighbors"]
 car-chase-benchmark = ["harwood-benchmark"]
 physics-probe = ["dep:rerbr-sim"]
+physics-drive = ["car-chase-benchmark", "dep:rerbr-sim"]
 
 [lib]
 name = "rerbr_probe"

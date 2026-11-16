@@ -11,4 +11,4 @@ pub mod coords;
 // Camera::Lens exposes this pure-math type; keeping the original module avoids stubs.
 pub mod triple;
 
-pub use glam::{Mat4, Vec3};
+pub use glam::{Mat4, Quat, Vec3};

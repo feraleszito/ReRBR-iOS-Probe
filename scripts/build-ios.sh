@@ -30,6 +30,11 @@ case "$PROBE_MODE" in
         CARGO_FEATURE_ARGS+=(--features car-chase-benchmark)
         HOST_TEST_ARGS=(--workspace)
         ;;
+    physics-drive)
+        CARGO_FEATURE_ARGS+=(--features physics-drive)
+        HOST_TEST_ARGS=(-p rerbr-probe -p rerbr-sim -p rbr-physics -p rbr-hybrid -p rerbr-render-core -p rerbr-asset-formats)
+        export CARGO_PROFILE_RELEASE_PANIC=unwind
+        ;;
     physics-probe)
         CARGO_FEATURE_ARGS+=(--features physics-probe)
         HOST_TEST_ARGS=(-p rerbr-probe -p rerbr-sim -p rbr-physics -p rbr-hybrid)
@@ -38,11 +43,11 @@ case "$PROBE_MODE" in
         export CARGO_PROFILE_RELEASE_PANIC=unwind
         ;;
     *)
-        echo "Unknown PROBE_MODE: $PROBE_MODE (expected triangle, rerbr-3d, harwood-block, harwood-neighbors, harwood-benchmark, car-chase-benchmark or physics-probe)." >&2
+        echo "Unknown PROBE_MODE: $PROBE_MODE (expected triangle, rerbr-3d, harwood-block, harwood-neighbors, harwood-benchmark, car-chase-benchmark, physics-probe or physics-drive)." >&2
         exit 1
         ;;
 esac
-if [[ "$PROBE_MODE" != triangle && "$PROBE_MODE" != physics-probe ]]; then
+if [[ "$PROBE_MODE" != triangle && "$PROBE_MODE" != physics-probe && "$PROBE_MODE" != physics-drive ]]; then
     # Preserve the previous visual modes' host-test scope.
     for package in rerbr-sim rbr-physics rbr-hybrid rbr-formats rbr-gameplay rbr-recording rbr-engine rbr-tyre rbr-school; do
         HOST_TEST_ARGS+=(--exclude "$package")

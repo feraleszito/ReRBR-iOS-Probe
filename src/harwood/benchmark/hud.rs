@@ -128,7 +128,17 @@ impl Hud {
         lines: &[String],
     ) -> usize {
         let bytes = vertices(lines, size);
-        queue.write_buffer(&self.vertices, 0, &bytes);
+        self.draw_bytes(queue, encoder, target, &bytes)
+    }
+    pub fn draw_bytes(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        bytes: &[u8],
+    ) -> usize {
+        assert!(bytes.len() / 20 <= MAX_VERTICES);
+        queue.write_buffer(&self.vertices, 0, bytes);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("benchmark HUD (included in timing)"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

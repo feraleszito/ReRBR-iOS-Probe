@@ -1,5 +1,7 @@
 //! GPL-3.0-or-later. Pure reRBR boot/step probe; see UPSTREAM.md.
 pub mod boot;
+pub mod diagnostics;
+pub mod drive;
 mod handles;
 pub mod inputs;
 pub mod measure;
@@ -14,6 +16,19 @@ use std::time::Instant;
 
 pub const STACK_BYTES: usize = 32 * 1024 * 1024;
 pub const MEASURED_STEPS: u32 = 720;
+
+/// Preserve the pure host's actual stop reason across the app's worker boundary.
+pub fn describe_stop(error: &(dyn std::any::Any + Send)) -> String {
+    if let Some(stop) = error.downcast_ref::<pure::Stopped>() {
+        stop.0.to_string()
+    } else if let Some(s) = error.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = error.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        "unknown Rust panic".into()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Progress {
@@ -31,6 +46,9 @@ impl Progress {
 }
 #[derive(Debug, Clone)]
 pub struct Report {
+    pub driving_samples: Box<[Vec<diagnostics::Sample>; 2]>,
+    /// Physical world displacement during the measured interval, not a scripted pose.
+    pub displacement_metres: [f64; 2],
     pub boot_seconds: [f64; 2],
     pub measured: [measure::Summary; 2],
     pub fingerprints: [String; 2],
@@ -78,6 +96,25 @@ fn status(playback: &Playback, phase: &str, pass: u32, steps: u32) -> Progress {
 }
 /// Must run on the dedicated STACK_BYTES worker. Two independent boots; no global environment mutation.
 pub fn run(paths: &inputs::Paths, cancel: &AtomicBool, mut notify: impl FnMut(Progress)) -> Result<Report, String> {
+    run_selected(paths, cancel, &mut notify, false)
+}
+
+/// CPU-only check: five seconds in first gear at full throttle, then five braking.
+/// This is not the playable mode or proof of a complete driving loop.
+pub fn run_acceleration(
+    paths: &inputs::Paths,
+    cancel: &AtomicBool,
+    mut notify: impl FnMut(Progress),
+) -> Result<Report, String> {
+    run_selected(paths, cancel, &mut notify, true)
+}
+
+fn run_selected(
+    paths: &inputs::Paths,
+    cancel: &AtomicBool,
+    notify: &mut impl FnMut(Progress),
+    moving: bool,
+) -> Result<Report, String> {
     eprintln!(
         "physics-probe HOST: arch={} os={} debug_assertions={} panic_unwind={} stack_bytes={STACK_BYTES}",
         std::env::consts::ARCH,
@@ -91,7 +128,7 @@ pub fn run(paths: &inputs::Paths, cancel: &AtomicBool, mut notify: impl FnMut(Pr
                 .into(),
         );
     }
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_inner(paths, cancel, &mut notify))) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_inner(paths, cancel, notify, moving))) {
         Ok(result) => result,
         Err(error) => {
             let reason = if let Some(stop) = error.downcast_ref::<pure::Stopped>() {
@@ -107,7 +144,12 @@ pub fn run(paths: &inputs::Paths, cancel: &AtomicBool, mut notify: impl FnMut(Pr
         }
     }
 }
-fn run_inner(paths: &inputs::Paths, cancel: &AtomicBool, notify: &mut impl FnMut(Progress)) -> Result<Report, String> {
+fn run_inner(
+    paths: &inputs::Paths,
+    cancel: &AtomicBool,
+    notify: &mut impl FnMut(Progress),
+    moving: bool,
+) -> Result<Report, String> {
     cancelled(cancel)?;
     notify(Progress::new("CHECK PRIVATE FILES", 0));
     let checked = inputs::check(paths)?;
@@ -127,6 +169,8 @@ fn run_inner(paths: &inputs::Paths, cancel: &AtomicBool, notify: &mut impl FnMut
     let race = boot::Race::quick_race(20, 6, 4, weather, checked.physics);
     let stage_name = paths.maps.join("track-20_O").to_string_lossy().into_owned();
     let mut report = Report {
+        driving_samples: Default::default(),
+        displacement_metres: [0.0; 2],
         boot_seconds: [0.0; 2],
         measured: [measure::Summary::default(); 2],
         fingerprints: Default::default(),
@@ -178,20 +222,45 @@ fn run_inner(paths: &inputs::Paths, cancel: &AtomicBool, notify: &mut impl FnMut
             return Err("original stage transition did not enter driving".into());
         }
         pure::set_app_state(&mut playback.pure.mem.clone(), stage.state().value());
-        // Deliberately stationary: neutral, clutch and brake; no invented engine/vehicle model.
-        let control = CarControl { brake: 1.0, clutch: 1.0, flags: 0x04, gear: Some(0), ..Default::default() };
+        // Keep the existing stationary probe's braked/reverse payload unchanged.
+        // Original gear indices: 0 reverse, 1 neutral, 2 first (rbr_recording::hud).
+        let control = if moving {
+            CarControl { throttle: 1.0, flags: 0x04, gear: Some(2), ..Default::default() }
+        } else {
+            CarControl { brake: 1.0, clutch: 1.0, flags: 0x04, gear: Some(0), ..Default::default() }
+        };
+        let initial_position: [f32; 3] = playback.pure.mem.f32s(image.car + 0x140);
         let mut payload = [0; 32];
         for (k, w) in control.words().iter().enumerate() {
             payload[4 * k..4 * k + 4].copy_from_slice(&w.unwrap_or(0).to_le_bytes());
         }
         let initial_clock = pure::clock(&playback.pure.mem);
-        let mut times = Vec::with_capacity(MEASURED_STEPS as usize);
+        let measured_steps = if moving { 7200 } else { MEASURED_STEPS };
+        if moving {
+            report.driving_samples[(pass - 1) as usize].push(diagnostics::read(&playback, image.control_at, 0));
+        }
+        let mut times = Vec::with_capacity(measured_steps as usize);
         let timed = Instant::now();
-        for step in 0..MEASURED_STEPS {
+        for step in 0..measured_steps {
             cancelled(cancel)?;
+            // Five seconds accelerating in first gear, then five braking with clutch released from the drivetrain.
+            if moving && step == 3600 {
+                let brake = CarControl { brake: 1.0, clutch: 1.0, flags: 0x04, gear: Some(2), ..Default::default() };
+                for (k, w) in brake.words().iter().enumerate() {
+                    payload[4 * k..4 * k + 4].copy_from_slice(&w.unwrap_or(0).to_le_bytes());
+                }
+            }
             let before = Instant::now();
             playback.step(Some(&payload), 1);
             times.push(before.elapsed().as_secs_f64());
+            if moving && (step + 1) % 720 == 0 {
+                let sample = diagnostics::read(&playback, image.control_at, step + 1);
+                if !sample.finite() {
+                    return Err("nonfinite driving diagnostic state".into());
+                }
+                eprintln!("DRIVING pass={pass} {sample:?}");
+                report.driving_samples[(pass - 1) as usize].push(sample);
+            }
             if step % 72 == 71 {
                 let memory = status(&playback, "MEASURE REAL FIXED STEPS", pass, step + 1);
                 report.max_sampled_footprint_bytes = report.max_sampled_footprint_bytes.max(memory.footprint_bytes);
@@ -200,7 +269,7 @@ fn run_inner(paths: &inputs::Paths, cancel: &AtomicBool, notify: &mut impl FnMut
         }
         let elapsed = timed.elapsed().as_secs_f64();
         let advanced = pure::clock(&playback.pure.mem) - initial_clock;
-        if (advanced - f64::from(dt) * f64::from(MEASURED_STEPS)).abs() > 1e-6 {
+        if (advanced - f64::from(dt) * f64::from(measured_steps)).abs() > 1e-6 {
             return Err(format!("physics clock mismatch: {advanced}"));
         }
         let final_state = pure::frame_bytes(&playback.pure.mem);
@@ -210,9 +279,15 @@ fn run_inner(paths: &inputs::Paths, cancel: &AtomicBool, notify: &mut impl FnMut
             return Err("nonfinite physical car position".into());
         }
         let k = (pass - 1) as usize;
+        report.displacement_metres[k] = position
+            .iter()
+            .zip(initial_position)
+            .map(|(&a, b)| (f64::from(a) - f64::from(b)).powi(2))
+            .sum::<f64>()
+            .sqrt();
         report.measured[k] = measure::summarize(&times, dt, elapsed)?;
         report.fingerprints[k] = format!("{:x}", Sha256::digest(&final_state));
-        let memory = status(&playback, "PASS COMPLETE", pass, MEASURED_STEPS);
+        let memory = status(&playback, "PASS COMPLETE", pass, measured_steps);
         report.peak_payload_bytes = report.peak_payload_bytes.max(memory.payload_bytes);
         report.max_sampled_footprint_bytes = report.max_sampled_footprint_bytes.max(memory.footprint_bytes);
         eprintln!("physics-probe PASS {pass}: {:?}; sparse payload={} metadata={}; endpoint FRM1 SHA256={}; fingerprint covers car/wheels only", report.measured[k], memory.payload_bytes, memory.metadata_bytes, report.fingerprints[k]);

@@ -868,3 +868,112 @@ could not run because no usable local interpreters were found; source/hash/licen
 resource checks were additionally executed in PowerShell. No Apple build or device
 success is claimed. Private files must be transferred after unsigned IPA signing
 and installation; they are never packaged or uploaded.
+
+## physics-drive partial-stage candidate, 2026-11-16
+
+The owner has confirmed the previous stationary physics-probe on the actual iPad
+(0.107ms average per step, repeatable passes, approximately 189.7MiB process
+footprint). Those are owner-reported stationary results, not measurements of this
+new moving mode. The new Apple build and physical interaction remain unverified.
+
+physics-drive is an optional first-gear mode sharing the existing 20-block terrain,
+Corolla GPU pipeline and BC textures. A 32MiB worker owns the original physical
+boot/dispatcher at fixed 720Hz. Real position/quaternion/wheel centres/roll drive
+the renderer; the benchmark route does not position the car. Model/body/stage
+composition follows original playback/frames.rs; two mirrors preserve CW winding.
+Chase target/heading are filtered, with original geometric terrain/near-plane checks.
+No original equation, imported math source or original engine file was changed.
+
+CoreMotion device motion is polled on the UIKit thread. The bridge supports the
+legacy winit lifecycle (no scene manifest), converts portrait-fixed sensor axes to
+the actual view with UIKit coordinate-space APIs, and pauses if motion is stale,
+unavailable, flat, or portrait. Captured multitouch roles supply analog pedals and
+handbrake; top buttons calibrate, adjust sensitivity/dead zone, pause and reset.
+Reset creates a fresh original spawn. App interruption clears pedals and pauses.
+Physics debt above 150ms or loss of visible terrain/camera support pauses with an
+error instead of skipping steps or overwriting physical positions. See PHYSICS-DRIVE.md.
+
+Windows checks use Rust 1.97.1 MSVC and the existing offline cache:
+
+| Check | Actual result |
+| --- | --- |
+| Left/right/straight physics, 20 simulated seconds per trial | PASS: five trials, repeated left/right trajectories equal, opposite heading changes, changed positions, finite samples and braking |
+| Ground contact | PASS: each sampled grounded wheel has a vertical hit near its centre in independently parsed original COL triangles, gap 0..1m; strut travel responds |
+| Sustained 60-second physics | PASS: two identical sampled trajectories, 30s throttle/30s brake; finite samples, stopped at end, allocated page payload 38,313,984 bytes (<64MiB) |
+| Actual touchscreen Controls -> physical Session | PASS: accelerate, stop, accelerate again, stop, without a separate clutch pedal |
+| Actual SGC/terrain + physical spawn and poses, CPU-only | PASS: spawn and first five seconds supported in visible region, chase terrain checks pass and all drawn car vertices fit the landscape frustum |
+| App all-features tests | PASS: 60 tests; 12 private tests ignored |
+| Triangle / car-chase-benchmark / physics-probe app regressions | PASS: 1 / 34 / 5 tests; private tests ignored |
+| Explicit private stationary + acceleration/braking tests | PASS: two tests; stationary endpoint remains c7e1409b515dd69276132cde2c4992be166d35da262ababf49288ed5b73c454b |
+| Workspace/all-targets/all-features Clippy | PASS with -D warnings |
+| cargo fmt --all -- --check | PASS |
+| Source integrity | PASS: 623 physics provenance entries + 20 original renderer/parser entries |
+| Source resource scan | PASS: 764 files, no commercial assets/build products; two hash-verified upstream CPU approximation tables retained |
+| Native/plist review | XML parses, CoreMotion link/usage description present, org.rerbr.probe unchanged, no scene manifest |
+| Active workflow option patch | PASS: git apply --check only, one option; not applied |
+
+There was no GPU device/image test on Windows. New tests cover basis/winding,
+position/quaternion interpolation, wheel centres/roll wrap, calibration/dead zone,
+simultaneous pedals, captured roles, handbrake, release and UI isolation. The long
+tests are not continuous progress through the stage: an unsteered vehicle may slow
+against scenery/terrain. Contact evidence is sampled, not a comprehensive obstacle,
+penetration, full-stage or original-recording oracle. Resident iPad memory/performance
+must be measured; allocated page payload is not process footprint. GPU timing is N/A.
+
+Files added:
+
+```text
+PHYSICS-DRIVE.md
+src/driving/mod.rs
+src/driving/controls.rs
+src/driving/worker.rs
+src/driving/private_tests.rs
+src/driving/UPSTREAM.md
+tests/driving.rs
+tests/physics_render.rs
+vendor/rerbr-sim/src/drive.rs
+```
+
+Existing files changed in this phase:
+
+```text
+Cargo.toml
+README.md
+VALIDATION.md
+scripts/build-ios.sh
+scripts/verify.py
+github-actions/ios-probe.yml                 secondary template only; do not copy
+src/lib.rs
+src/car/runtime.rs
+src/car/placement.rs
+src/harwood/mod.rs
+src/harwood/gpu.rs
+src/harwood/benchmark/hud.rs
+vendor/rerbr-render-core/src/lib.rs          exports existing Quat type only
+vendor/rerbr-sim/src/lib.rs
+vendor/rerbr-sim/src/diagnostics.rs
+vendor/rerbr-sim/UPSTREAM.md
+xcode/ReRBRProbe/main.m
+xcode/ReRBRProbe/Info.plist
+xcode/ReRBRProbe.xcodeproj/project.pbxproj
+```
+
+Cargo.lock, original vendor source hashes, engine equations, old shaders, original
+RBR installation and GitHub clone remain unchanged. Earlier pending source changes
+(e.g. PHYSICS-DRIVE-AUDIT.md and the acceleration regression) should be included in
+any later reviewed synchronization if not already in the clone. No synchronization,
+commit, push or Actions invocation occurred. The secondary template stays untracked.
+
+The script adds --no-default-features --features physics-drive, with the same
+Release panic=unwind override as the probe; all existing modes and packaging remain.
+No private assets are needed on the runner: private tests are ignored. The active
+workflow needs only physics-drive after physics-probe in build_mode.options; its
+PROBE_MODE forwarding already works. .validation/physics-drive-workflow.patch is a
+locally prepared, check-only patch, not a file to publish or a replaced workflow.
+
+Pending: Apple/Objective-C compilation, link, Bash/Python source and IPA preflight,
+Actions success/artifact, signing/update with the same effective identity, physical
+motion/touch/image tests, moving FPS/memory/thermals, full stage rendering and actual
+finish/progress, higher gears/assists, full wheel steering orientation and original
+recovery. No Apple SDK, iOS Rust target or usable Python/Bash interpreter is installed
+locally, and no IPA/artifact was generated. Run and validate on macOS/Actions next.

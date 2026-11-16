@@ -3,6 +3,57 @@ use rerbr_sim::{inputs::Paths, run, STACK_BYTES};
 use std::{path::Path, sync::atomic::AtomicBool};
 
 #[test]
+#[ignore = "requires private PHYSICS_DOCUMENTS; CPU acceleration diagnostic only"]
+fn actual_acceleration_displaces_the_physical_car() {
+    let documents = std::env::var_os("PHYSICS_DOCUMENTS").expect("PHYSICS_DOCUMENTS");
+    let paths = Paths::documents(Path::new(&documents));
+    let report = std::thread::Builder::new()
+        .stack_size(STACK_BYTES)
+        .spawn(move || rerbr_sim::run_acceleration(&paths, &AtomicBool::new(false), |_| {}))
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap();
+    eprintln!("ACCELERATION CPU REPORT: {report:?}");
+    assert!(report.deterministic());
+    assert_eq!(
+        report.driving_samples[0], report.driving_samples[1],
+        "sampled trajectories differ"
+    );
+    for samples in report.driving_samples.iter() {
+        assert_eq!(samples.len(), 11);
+        assert!(samples.iter().all(|s| s.finite()));
+        assert!(
+            samples[5].speed() > 5.0,
+            "failed to accelerate: {:?}",
+            samples[5]
+        );
+        assert_eq!(
+            samples[5].gear, 2,
+            "first gear is index 2, not index 1 (neutral)"
+        );
+        assert!(samples[5].throttle_received > 0.5);
+        assert_eq!(samples[6].brake_received, 1.0);
+        assert_eq!(samples[6].payload_clutch, 1.0);
+        assert!(samples[6].brake_torque > 0.0);
+        assert!(
+            samples[10].speed() < 0.1,
+            "failed to brake: {:?}",
+            samples[10]
+        );
+        assert!(samples[5].wheel_spin.iter().any(|w| w.abs() > 1.0));
+    }
+    assert!(
+        report
+            .displacement_metres
+            .iter()
+            .all(|d| d.is_finite() && *d > 0.05),
+        "no verified physical displacement: {:?}",
+        report.displacement_metres
+    );
+}
+
+#[test]
 fn private_roots_are_explicit_and_separate_from_app_bundle() {
     let p = Paths::documents(Path::new("sandbox/Documents"));
     assert_eq!(p.install, Path::new("sandbox/Documents/RBR"));

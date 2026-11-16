@@ -19,6 +19,7 @@ on:
           - harwood-benchmark
           - car-chase-benchmark
           - physics-probe
+          - physics-drive
 
 permissions:
   contents: read
