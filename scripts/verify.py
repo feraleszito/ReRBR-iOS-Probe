@@ -79,7 +79,7 @@ def verify_sources():
     patches = json.loads((sim / "PATCHES.json").read_text(encoding="utf-8-sig"))
     require(len(upstream) == 623, "missing upstream physics sources or CPU reference tables")
     require(set(patches) == {"upstream/rbr-physics/src/mem.rs", "upstream/rbr-physics/src/mem/pages.rs",
-                             "upstream/rbr-formats/src/ngp/mod.rs"}, "unexpected adapted upstream file")
+                             "upstream/rbr-formats/src/ngp/mod.rs","upstream/rbr-hybrid/src/lib.rs",}, "unexpected adapted upstream file")
     for entry in upstream:
         relative = entry["Path"]
         expected = patches.get(relative, entry["SHA256"])
