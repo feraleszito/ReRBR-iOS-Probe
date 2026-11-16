@@ -15,6 +15,8 @@ use std::{
 };
 
 pub struct Car {
+    #[cfg(feature = "physics-stage")]
+    pub cameras: crate::driving::cameras::Mounts,
     pub geometry: mesh::Geometry,
     pub(crate) textures: BTreeMap<String, crate::asset_probe::TextureData>,
     pub files: Vec<String>,
@@ -35,12 +37,26 @@ pub struct Prepared {
     pub car: Car,
 }
 pub fn prepare(install: &Path, maps: &Path) -> Result<Prepared, String> {
+    #[cfg(feature = "physics-stage")]
+    match rerbr_sim::audio_audit::inspect(install) {
+        Ok(report) => eprintln!("physics-stage AUDIO BANK CPU PASS: {report:?}; output not implemented; silent milestone"),
+        Err(error) => eprintln!("physics-stage AUDIO DISABLED: {error}; silent milestone; geometry can still load"),
+    }
     let car = load(install)?;
     let terrain = crate::harwood::benchmark::load(maps)?;
+    #[cfg(not(feature = "physics-stage"))]
     let path = placement::ChasePath::new(terrain.route, &terrain.render.mesh, &car.geometry)?;
+    #[cfg(feature = "physics-stage")]
+    let (path, render) = {
+        let full = crate::harwood::stage::load(maps)?;
+        let path = placement::ChasePath::new(terrain.route, &full.ground, &car.geometry)?;
+        (path, full.render)
+    };
+    #[cfg(not(feature = "physics-stage"))]
+    let render = terrain.render;
     path.validate()?;
     Ok(Prepared {
-        terrain: terrain.render,
+        terrain: render,
         path,
         car,
     })
@@ -155,6 +171,8 @@ pub fn load(root: &Path) -> Result<Car, String> {
         );
     }
     Ok(Car {
+        #[cfg(feature = "physics-stage")]
+        cameras: crate::driving::cameras::Mounts::parse(&parts)?,
         geometry,
         textures,
         files,

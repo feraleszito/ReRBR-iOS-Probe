@@ -20,6 +20,7 @@ on:
           - car-chase-benchmark
           - physics-probe
           - physics-drive
+          - physics-stage
 
 permissions:
   contents: read

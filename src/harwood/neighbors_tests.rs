@@ -23,6 +23,8 @@ fn tile(id: usize, x: f32, z: f32, texture: u32) -> Node {
             indices: 0..6,
             textures: [Some(texture), None],
             list: 1,
+            cutout: false,
+            address: 1,
         }],
         ..Default::default()
     };

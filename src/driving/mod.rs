@@ -1,4 +1,6 @@
 //! Partial-stage driving presentation. Physics owns every vehicle pose.
+#[cfg(feature = "physics-stage")]
+pub mod cameras;
 pub mod controls;
 #[cfg(test)]
 mod private_tests;
@@ -20,6 +22,10 @@ use std::time::{Duration, Instant};
 use winit::event::{Touch, TouchPhase};
 
 pub struct Runtime {
+    #[cfg(feature = "physics-stage")]
+    pub view: cameras::View,
+    #[cfg(feature = "physics-stage")]
+    pub mounts: Option<cameras::Mounts>,
     worker: worker::Worker,
     pub controls: Controls,
     pivots: Option<[Vec3; 4]>,
@@ -40,6 +46,10 @@ impl Default for Runtime {
 impl Runtime {
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "physics-stage")]
+            view: cameras::View::Chase,
+            #[cfg(feature = "physics-stage")]
+            mounts: None,
             worker: worker::Worker::new(),
             controls: Controls::new(),
             pivots: None,
@@ -62,6 +72,22 @@ impl Runtime {
         motion(false);
     }
     pub fn touch(&mut self, t: Touch, size: (u32, u32)) {
+        #[cfg(feature = "physics-stage")]
+        if t.phase == TouchPhase::Started {
+            let (x, y) = (
+                t.location.x / f64::from(size.0.max(1)),
+                t.location.y / f64::from(size.1.max(1)),
+            );
+            if (0.15..0.28).contains(&y) && (0.01..0.60).contains(&x) {
+                self.view = self.view.next();
+                self.camera = None;
+                eprintln!(
+                    "physics-stage CAMERA: {} (presentation only)",
+                    self.view.label()
+                );
+                return;
+            }
+        }
         let action = self.controls.touch(
             t.id,
             t.location.x / f64::from(size.0.max(1)),
@@ -154,7 +180,11 @@ impl Runtime {
         if !path.supports_driving(position) {
             let mut s = self.worker.state.lock().unwrap();
             s.paused = true;
-            s.error = Some("VISIBLE TERRAIN LIMIT - RESET STAGE".into());
+            s.error = Some(if cfg!(feature = "physics-stage") {
+                "OUTSIDE VERIFIED TERRAIN - RESET STAGE".into()
+            } else {
+                "VISIBLE TERRAIN LIMIT - RESET STAGE".into()
+            });
             return None;
         }
         let target = position + Vec3::Y * 0.5;
@@ -162,6 +192,21 @@ impl Runtime {
             c.target
                 .lerp(target, (1.0 - (-seconds / 0.06).exp()) as f32)
         });
+        #[cfg(feature = "physics-stage")]
+        if let Some(camera) = self.mounts.and_then(|m| m.camera(self.view, models[0])) {
+            if path.camera_supported(camera.eye) {
+                return Some(Frame {
+                    models,
+                    camera,
+                    boom: 0.0,
+                    max_wheel_travel: b.wheel_travel.iter().map(|x| x.abs()).fold(0.0, f32::max),
+                    min_wheel_clearance: 0.0,
+                });
+            }
+            // Keep physics running and use the checked chase view if a mount is underground.
+            self.view = cameras::View::Chase;
+            eprintln!("physics-stage CAMERA: mount underground/unsupported; returning to chase");
+        }
         match path.chase_camera(target, forward) {
             Ok((camera, boom)) => {
                 self.camera = Some(camera);
@@ -176,7 +221,7 @@ impl Runtime {
             Err(e) => {
                 let mut s = self.worker.state.lock().unwrap();
                 s.paused = true;
-                s.error = Some(format!("PARTIAL STAGE CAMERA: {e}; RESET"));
+                s.error = Some(format!("TERRAIN CAMERA: {e}; RESET"));
                 None
             }
         }
@@ -194,7 +239,11 @@ impl Runtime {
     ) {
         let s = self.worker.state.lock().unwrap();
         let mut lines = vec![
-            "PHYSICS DRIVE - PARTIAL STAGE - FIRST GEAR".into(),
+            if cfg!(feature = "physics-stage") {
+                "PHYSICS STAGE - FIRST GEAR".into()
+            } else {
+                "PHYSICS DRIVE - PARTIAL STAGE - FIRST GEAR".into()
+            },
             format!(
                 "{} FPS {:.1} CPU {:.2} MS",
                 if s.paused { "PAUSED" } else { "RUNNING" },
@@ -225,6 +274,8 @@ impl Runtime {
             s.payload_bytes as f64 / 1048576.0
         ));
         lines.push(format!("PHYS STEP+READ {:.3} MS", s.last_step_ms));
+        #[cfg(feature = "physics-stage")]
+        lines.push("FULL TERRAIN / STATIC SCENERY - AUDIO OFF".into());
         if let Some(bytes) = self.footprint {
             lines.push(format!("APP FOOTPRINT {:.1} MIB", bytes as f64 / 1048576.0));
         }
@@ -234,6 +285,12 @@ impl Runtime {
             lines.push("LOADING PHYSICS - PLEASE WAIT".into());
         }
         let mut bytes = region(&lines, size, [0.02, 0.29, 0.96, 0.27]);
+        #[cfg(feature = "physics-stage")]
+        bytes.extend(region(
+            &[format!("CAM: {}", self.view.label())],
+            size,
+            [0.01, 0.17, 0.59, 0.09],
+        ));
         for (text, r) in [
             ("PAUSE / GO", [0.01, 0.02, 0.18, 0.11]),
             ("CALIBRATE", [0.21, 0.02, 0.18, 0.11]),

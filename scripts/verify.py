@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PRIVATE_ASSET_SUFFIXES = {".lbs", ".dds", ".rbz", ".sgc", ".sgs", ".lsp", ".dll", ".exe", ".bin", ".trk", ".dls", ".col", ".fnc", ".mat", ".zip", ".vso", ".pso"}
+PRIVATE_ASSET_SUFFIXES = {".lbs", ".dds", ".rbz", ".sgc", ".sgs", ".lsp", ".dll", ".exe", ".bin", ".trk", ".dls", ".col", ".fnc", ".mat", ".zip", ".vso", ".pso", ".eng", ".wav", ".ogg", ".flac", ".bank"}
 CPU_TABLES = {"vendor/rerbr-sim/upstream/rbr-physics/data/rsqrt.bin",
               "vendor/rerbr-sim/upstream/rbr-physics/data/rcp.bin"}
 
@@ -59,6 +59,10 @@ def verify_sources():
             "CPU probe must not activate the terrain/car benchmark")
     require(manifest["features"]["physics-drive"] == ["car-chase-benchmark", "dep:rerbr-sim"],
             "driving must use existing car/terrain pipelines and authentic physics")
+    require(manifest["features"]["physics-stage"] == ["physics-drive"],
+            "full stage must reuse the verified driving controls/physics")
+    for relative in ("src/harwood/stage.rs", "src/driving/cameras.rs", "STAGE.md"):
+        require((ROOT / relative).is_file(), f"missing stage source/documentation: {relative}")
     require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats", "vendor/rerbr-sim", "vendor/rerbr-sim/upstream/*"],
             "unexpected workspace member")
     require(manifest["workspace"]["default-members"] == ["."], "default build must select the triangle app")

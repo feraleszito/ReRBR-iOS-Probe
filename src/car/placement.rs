@@ -41,6 +41,12 @@ pub struct Validation {
     pub min_boom: f32,
 }
 impl ChasePath {
+    #[cfg(feature = "physics-stage")]
+    pub(crate) fn camera_supported(&self, position: Vec3) -> bool {
+        self.ground
+            .support_height(position)
+            .is_some_and(|y| position.y >= y + 0.05)
+    }
     #[cfg(feature = "physics-drive")]
     pub(crate) fn supports_driving(&self, position: Vec3) -> bool {
         self.ground.support_height(position).is_some()

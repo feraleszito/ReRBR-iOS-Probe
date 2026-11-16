@@ -64,3 +64,8 @@ constructs the same subnormal directly for ARM64 test portability. Runtime
 conversion code and physics equations are unchanged. PATCHES.json records its
 existing hash; verify.py explicitly permits all four adaptations and still
 checks every one of the 623 original/adapted entries.
+
+audio_audit.rs is an app-owned read-only inventory adapter around the existing
+original rbr-formats audio::CarSound and eng::parse modules already covered by the
+623-file manifest. It adds no original source changes, audio samples, DLL execution
+or playback backend. See STAGE.md at the probe root for measured bank inventory.

@@ -47,3 +47,21 @@ fn fs_main(v: Output) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(color, 1.0);
 }
+
+// Original reRBR stage object state: two-sided, alpha > 60/255, depth writes.
+// These vertices already contain their world placement and baked lighting.
+@fragment
+fn fs_object(v: Output) -> @location(0) vec4<f32> {
+    let texel = textureSample(first_texture, texture_sampler, v.uv0);
+    if texel.a <= 60.0 / 255.0 { discard; }
+    var color = texel.rgb * v.color.rgb;
+    if camera.options.x == 1u { color = v.color.rgb; }
+    if camera.options.x == 2u {
+        let checker = f32((u32(abs(floor(v.uv0.x * 8.0))) + u32(abs(floor(v.uv0.y * 8.0)))) % 2u);
+        color = mix(vec3<f32>(0.08, 0.14, 0.2), vec3<f32>(0.8), checker);
+    }
+    if camera.options.y != 0u {
+        color = select(pow((color + 0.055) / 1.055, vec3<f32>(2.4)), color / 12.92, color <= vec3<f32>(0.04045));
+    }
+    return vec4<f32>(color, 1.0);
+}

@@ -6,9 +6,13 @@ mod gpu;
 pub mod mesh;
 #[cfg(feature = "harwood-neighbors")]
 pub mod neighbors;
+#[cfg(feature = "physics-stage")]
+pub mod stage;
 pub mod texture;
 
-#[cfg(feature = "physics-drive")]
+#[cfg(feature = "physics-stage")]
+pub const MODE_NAME: &str = "physics-stage";
+#[cfg(all(feature = "physics-drive", not(feature = "physics-stage")))]
 pub const MODE_NAME: &str = "physics-drive";
 #[cfg(all(feature = "car-chase-benchmark", not(feature = "physics-drive")))]
 pub const MODE_NAME: &str = "car-chase-benchmark";

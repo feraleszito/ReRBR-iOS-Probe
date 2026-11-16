@@ -231,11 +231,23 @@ impl Scene {
     }
 }
 
+struct GpuDraw {
+    indices: std::ops::Range<u32>,
+    material: wgpu::BindGroup,
+    #[cfg(feature = "physics-stage")]
+    bounds: super::mesh::Bounds,
+    #[cfg(feature = "physics-stage")]
+    cutout: bool,
+}
 struct Block {
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
-    draws: Vec<(std::ops::Range<u32>, wgpu::BindGroup)>,
+    draws: Vec<GpuDraw>,
+    #[cfg(feature = "physics-stage")]
+    cutout_pipeline: wgpu::RenderPipeline,
+    #[cfg(feature = "physics-stage")]
+    last_stats: std::time::Instant,
     camera: Camera,
     uniform: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
@@ -279,7 +291,7 @@ impl Block {
         });
         const ATTRS: [wgpu::VertexAttribute; 4] =
             wgpu::vertex_attr_array![0=>Float32x3, 1=>Unorm8x4, 2=>Float32x2, 3=>Float32x2];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let mut descriptor = wgpu::RenderPipelineDescriptor {
             label: Some("harwood CW reverse-Z"),
             layout: None,
             vertex: wgpu::VertexState {
@@ -313,7 +325,64 @@ impl Block {
             multisample: Default::default(),
             multiview_mask: None,
             cache: None,
+        };
+        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("stage camera"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
         });
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("stage diffuse pair"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shared stage layouts"),
+            bind_group_layouts: &[Some(&camera_layout), Some(&material_layout)],
+            immediate_size: 0,
+        });
+        descriptor.layout = Some(&layout);
+        let pipeline = device.create_render_pipeline(&descriptor);
+        #[cfg(feature = "physics-stage")]
+        let cutout_pipeline = {
+            descriptor.primitive.cull_mode = None;
+            descriptor.fragment.as_mut().unwrap().entry_point = Some("fs_object");
+            device.create_render_pipeline(&descriptor)
+        };
         if let Some(error) = futures_executor::block_on(pipeline_scope.pop()) {
             return Err(format!("PIPELINE/shader validation: {error}"));
         }
@@ -326,7 +395,7 @@ impl Block {
         });
         let camera_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("harwood camera"),
-            layout: &pipeline.get_bind_group_layout(0),
+            layout: &camera_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: uniform.as_entire_binding(),
@@ -349,6 +418,25 @@ impl Block {
         });
         let mut draws = Vec::new();
         for draw in &data.mesh.draws {
+            let object_sampler;
+            let sampler = if draw.cutout {
+                let address = match draw.address {
+                    2 => wgpu::AddressMode::MirrorRepeat,
+                    3 => wgpu::AddressMode::ClampToEdge,
+                    _ => wgpu::AddressMode::Repeat,
+                };
+                object_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                    address_mode_u: address,
+                    address_mode_v: address,
+                    mag_filter: wgpu::FilterMode::Linear,
+                    min_filter: wgpu::FilterMode::Linear,
+                    mipmap_filter: wgpu::MipmapFilterMode::Linear,
+                    ..Default::default()
+                });
+                &object_sampler
+            } else {
+                &sampler
+            };
             let get = |id: Option<u32>,
                        fallback: &wgpu::TextureView|
              -> Result<wgpu::TextureView, String> {
@@ -364,7 +452,7 @@ impl Block {
             let t1 = get(draw.textures[1], &transparent)?;
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("harwood two diffuse textures"),
-                layout: &pipeline.get_bind_group_layout(1),
+                layout: &material_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -376,11 +464,18 @@ impl Block {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
+                        resource: wgpu::BindingResource::Sampler(sampler),
                     },
                 ],
             });
-            draws.push((draw.indices.start as u32..draw.indices.end as u32, group));
+            draws.push(GpuDraw {
+                indices: draw.indices.start as u32..draw.indices.end as u32,
+                material: group,
+                #[cfg(feature = "physics-stage")]
+                bounds: super::stage::draw_bounds(&data.mesh, draw),
+                #[cfg(feature = "physics-stage")]
+                cutout: draw.cutout,
+            });
         }
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("harwood authentic vertices"),
@@ -400,6 +495,10 @@ impl Block {
         });
         Ok(Self {
             pipeline,
+            #[cfg(feature = "physics-stage")]
+            cutout_pipeline,
+            #[cfg(feature = "physics-stage")]
+            last_stats: std::time::Instant::now(),
             vertices,
             indices,
             draws,
@@ -495,9 +594,29 @@ impl Block {
         pass.set_bind_group(0, &self.camera_group, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-        for (indices, material) in &self.draws {
-            pass.set_bind_group(1, material, &[]);
-            pass.draw_indexed(indices.clone(), 0, 0..1);
+        #[cfg(feature = "physics-stage")]
+        let mut submitted = (0usize, 0usize);
+        for draw in &self.draws {
+            #[cfg(feature = "physics-stage")]
+            {
+                if !super::stage::visible(draw.bounds, vp, self.camera.eye) {
+                    continue;
+                }
+                pass.set_pipeline(if draw.cutout {
+                    &self.cutout_pipeline
+                } else {
+                    &self.pipeline
+                });
+                submitted.0 += 1;
+                submitted.1 += draw.indices.len() / 3;
+            }
+            pass.set_bind_group(1, &draw.material, &[]);
+            pass.draw_indexed(draw.indices.clone(), 0, 0..1);
+        }
+        #[cfg(feature = "physics-stage")]
+        if self.last_stats.elapsed().as_secs() >= 5 {
+            eprintln!("physics-stage VISIBLE: draws={}/{} triangles={} distance=450m, conservative per-draw frustum; GPU time N/A",submitted.0,self.draws.len(),submitted.1);
+            self.last_stats = std::time::Instant::now();
         }
     }
 }

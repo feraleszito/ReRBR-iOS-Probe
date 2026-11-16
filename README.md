@@ -1,5 +1,11 @@
 # ReRBRProbe
 
+The owner confirms `physics-drive` driving/tilt/touch on iPad mini A17 Pro at
+60 FPS in their partial-stage tests. New experimental `physics-stage` expands to
+all 282 Harwood terrain blocks plus static vegetation/scenery, adds original
+camera mounts and a private audio-bank audit. It is silent, has no cockpit mesh,
+and is not yet tested on iPad. See [STAGE.md](STAGE.md) for scope/assets/build steps.
+
 An independent iPadOS graphics experiment: Rust, winit **0.30.13**, wgpu **30.0.1**,
 and the **Metal** backend. By default it draws a dark background and a rotating, coloured
 triangle. With `rerbr-3d`, it draws a procedural floor and cube through a fixed camera
@@ -42,10 +48,10 @@ repeatable stationary passes on the actual A17 Pro iPad. It adds no driving
 controls and does not establish moving-device validation.
 
 The Cargo manifest declares its own workspace, lockfile and toolchain (**Rust 1.97.1**).
-`physics-drive` is a new partial-stage/first-gear playable candidate: authentic
+`physics-drive` is the partial-stage/first-gear mode: authentic
 720Hz physics, interpolated original Corolla poses, chase camera, CoreMotion tilt
-and multitouch pedals. Windows CPU checks pass; the new Apple build and physical
-interaction remain unverified. See [PHYSICS-DRIVE.md](PHYSICS-DRIVE.md).
+and multitouch pedals. The owner confirms its Apple build and physical controls;
+expanded `physics-stage` remains unverified on iPad. See [PHYSICS-DRIVE.md](PHYSICS-DRIVE.md).
 Building this directory does not build or alter the parent workspace. Runtime dependencies
 are pinned exactly; `Cargo.lock` also fixes transitive dependencies. Naga 30.0.1 is a
 development dependency for validating the embedded WGSL shader.
@@ -144,7 +150,8 @@ selection from `PROBE_MODE` (default `triangle`) and rejects any other value:
 | `harwood-benchmark` | `--no-default-features --features harwood-benchmark` | Full workspace plus camera/ground, timing, metrics, restart and HUD tests | Automatic 20-second textured run, live HUD and final summary; tap restarts |
 | `car-chase-benchmark` | `--no-default-features --features car-chase-benchmark` | Full workspace plus SGC/car, support/chase, materials, shader and A/B tests | Real Corolla on Harwood, chase HUD; tap restarts, completion/tap alternates A/B |
 | `physics-probe` | `--no-default-features --features physics-probe` | Physics/host and app tests; private execution tests remain opt-in | Genuine stationary CPU simulation, progress/HUD; completion/error tap restarts |
-| `physics-drive` | `--no-default-features --features physics-drive` | Physics, car/terrain, controls and pose tests; private execution opt-in | Real physics-controlled Corolla on the existing visible region; paused start, tilt and pedals; Apple validation pending |
+| `physics-drive` | `--no-default-features --features physics-drive` | Physics, car/terrain, controls and pose tests; private execution opt-in | Owner confirms physical iPad driving/tilt/touch on the 20-block scene |
+| `physics-stage` | `--no-default-features --features physics-stage` | Full terrain/scenery, cameras, private bank audit and all driving checks | Full-stage static-visual candidate; cockpit view-only fallback, silent; Apple validation pending |
 
 The selected feature flags are passed to the host tests, iOS Clippy, the **release
 static-library build for `aarch64-apple-ios`**, and a dependency-tree diagnostic. The

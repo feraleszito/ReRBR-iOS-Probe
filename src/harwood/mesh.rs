@@ -19,6 +19,10 @@ pub struct Draw {
     pub indices: Range<usize>,
     pub textures: [Option<u32>; 2],
     pub list: u8,
+    /// Original object alpha-test/two-sided state (terrain remains false).
+    pub cutout: bool,
+    /// Original object texture addressing: 1 wrap, 2 mirror, 3 clamp.
+    pub address: u8,
 }
 
 #[derive(Debug, Default)]
@@ -145,6 +149,8 @@ pub fn block_mesh(block: &lbs::GeometryBlock<'_>) -> Mesh {
                 indices: first..mesh.indices.len(),
                 textures: [0, 1].map(|i| chunk.textures.get(i).copied()),
                 list: chunk.list,
+                cutout: false,
+                address: 1,
             });
         }
     }

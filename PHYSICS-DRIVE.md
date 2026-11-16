@@ -1,8 +1,10 @@
 # physics-drive: partial-stage playable candidate
 
 This mode connects the original Corolla physics to the existing Metal car/terrain
-pass. Windows CPU tests pass; the new native motion bridge, Apple build, image,
-controls and performance have NOT been tested on iPad. No new IPA was generated.
+pass. The owner now confirms a successful Actions build, installation, actual
+physics driving, CoreMotion steering/calibration and touch controls on iPad mini
+A17 Pro, with 60 FPS in their current tests. This batch generates no IPA. The
+separate expanded physics-stage workload has not been tested on the iPad.
 
 ## Scope and controls
 

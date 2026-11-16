@@ -46,6 +46,11 @@ xcuserdata/
 *.[vV][sS][oO]
 *.[pP][sS][oO]
 *.[bB][iI][nN]
+*.[eE][nN][gG]
+*.[wW][aA][vV]
+*.[oO][gG][gG]
+*.[fF][lL][aA][cC]
+*.[bB][aA][nN][kK]
 # Redistributable upstream CPU-approximation tables, not proprietary game files.
 !/vendor/rerbr-sim/upstream/rbr-physics/data/rcp.bin
 !/vendor/rerbr-sim/upstream/rbr-physics/data/rsqrt.bin

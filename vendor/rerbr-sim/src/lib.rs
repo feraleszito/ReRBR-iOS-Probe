@@ -1,4 +1,5 @@
 //! GPL-3.0-or-later. Pure reRBR boot/step probe; see UPSTREAM.md.
+pub mod audio_audit;
 pub mod boot;
 pub mod diagnostics;
 pub mod drive;

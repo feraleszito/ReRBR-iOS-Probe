@@ -84,6 +84,10 @@ impl Runtime {
     ) -> Result<(), String> {
         #[cfg(feature = "physics-drive")]
         self.driving.install(&car.geometry);
+        #[cfg(feature = "physics-stage")]
+        {
+            self.driving.mounts = Some(car.cameras);
+        }
         self.car = Some(Gpu::new(device, queue, format, car)?);
         self.path = Some(path);
         self.terrain = terrain;
@@ -169,7 +173,11 @@ impl Runtime {
         size: (u32, u32),
         format: wgpu::TextureFormat,
     ) {
-        if self.comparison.car_visible && !self.fatal {
+        #[cfg(feature = "physics-stage")]
+        let hide_car = self.driving.view == crate::driving::cameras::View::CockpitFallback;
+        #[cfg(not(feature = "physics-stage"))]
+        let hide_car = false;
+        if self.comparison.car_visible && !self.fatal && !hide_car {
             if let (Some(gpu), Some(frame)) = (&self.car, &self.frame) {
                 gpu.draw(queue, encoder, target, depth, size, format, frame);
             }

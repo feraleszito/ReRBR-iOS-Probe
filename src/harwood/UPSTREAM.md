@@ -71,3 +71,11 @@ ground queries, timers and ASCII HUD contain no extracted game data. The origina
 FreeFly camera and coordinate functions still produce the view/projection matrix.
 The shared terrain pass, mesh converter, shader and BC upload are reused; the HUD
 is a separate alpha overlay without depth. Imported vendor files remain unchanged.
+
+physics-stage: stage.rs adapts the original stage/mesh.rs object_mesh,
+interactive_mesh and buffer_mesh plus stage/mod.rs's interactive support gate.
+Static world positions, original placement matrices, layouts, indices, color and
+UVs are retained. Original two-sided alpha >60/255/depth/address states are used
+for vegetation/scenery. New per-draw frustum/distance culling is app-owned. See
+STAGE.md for provenance, coverage, omissions and real-data CPU evidence. Existing
+imported readers, their licenses and original hash entries remain unchanged.

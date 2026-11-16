@@ -977,3 +977,97 @@ motion/touch/image tests, moving FPS/memory/thermals, full stage rendering and a
 finish/progress, higher gears/assists, full wheel steering orientation and original
 recovery. No Apple SDK, iOS Rust target or usable Python/Bash interpreter is installed
 locally, and no IPA/artifact was generated. Run and validate on macOS/Actions next.
+
+## physics-stage intermediate milestone, 2026-11-16
+
+The owner now confirms the previous physics-drive build/installation, actual
+driving, motion/touch controls and 60 FPS on iPad mini A17 Pro. Those measurements
+apply to the old partial-stage workload. This new full-terrain/static-scenery
+feature remains Windows CPU-tested only. See STAGE.md for scope and omissions.
+
+Actual private-installation CPU results: 282/282 terrain blocks; 442 static items;
+604 supported interactive placements, none withheld; 710,699 vertices, 427,976
+triangles, 2,386 potential draws, 28 unique resolved DDS allocations. Estimated
+VB/IB/DDS data 36,470,024 bytes excludes other CPU/GPU allocations and physics.
+All 568 LBS driveline samples have terrain and original COL support; maximum
+sampled height difference 0.000053406m. Initial diagnostic camera culls to 24 draws.
+This is sampled visual/COL evidence, not a whole-stage driving/contact oracle.
+Original coordinate conventions/reverse-Z and the simulation equations remain.
+
+Missing presentation: 7 sky/backdrop items, 1 water item and 71 animation-object
+records. Supported interactive placements are frozen originals, not dynamic visual
+damage state. Cockpit is an explicitly labeled original viewpoint without interior
+meshes; bonnet reads Cam_bonnet2. Audio output is not implemented. Original Car6
+audio mapping/read succeeds: subaru.eng, 6 banks/12 parts, 388,138 PCM samples,
+1,141 cycle markers, 44100/48000Hz; no audio bytes copied/exported/logged.
+
+Commands/checks completed using existing offline Rust 1.97.1 MSVC cache:
+
+- cargo fmt --all --check: PASS.
+- cargo test --offline --locked --all-features: 63 passed, 13 private tests ignored.
+- cargo test --offline --locked --no-default-features --features physics-drive:
+  38 passed, 8 private tests ignored. Default triangle: 1 passed.
+- App/sim/hybrid tests with physics-stage: 80 passed, 8 ignored, including all
+  33 original hybrid unit tests. Shader tests validate the object fragment entry.
+- cargo clippy --offline --locked --workspace --all-targets --all-features --
+  -D warnings: PASS.
+- Release physics-stage private stage/audio regression: 1 PASS.
+- Release physics-stage original_spawn_fits_the_visible_scene_and_camera: 1 PASS;
+  actual SGC geometry and physical poses 0..5s, full-terrain supported chase and
+  landscape frustum checks. No GPU involved.
+- Release original stationary plus acceleration/braking probes: 2 PASS;
+  stationary c7e1409b515dd69276132cde2c4992be166d35da262ababf49288ed5b73c454b
+  and movement 2bcdc516d6e6d55c02393b8d1801dde151e82cb47c123e55d4bc6ad9ed9d1cba
+  fingerprints unchanged.
+- All 623 physics original/adapted hashes and 20 reader/core provenance hashes
+  verified with PowerShell; original imported sources/manifests/licenses unchanged.
+  No proprietary asset extensions in the publishable source tree; two legitimate
+  CPU BIN reference tables retained. No new dependencies or Cargo.lock changes.
+
+Python/Bash preflight, original parent rust-check/recording harness, Apple Rust
+target/SDK/link/IPA validation, GPU pipeline execution and before/after images,
+audible output and physical new-workload FPS/memory/thermals remain unavailable
+or pending. No new native bridge or Xcode changes are made by this milestone.
+The original RBR installation and GitHub clone are untouched; no commit, push,
+Actions dispatch or new IPA. Local secondary template change is not for copying.
+
+New files:
+
+```text
+STAGE.md
+examples/stage-diagnostic.rs
+src/harwood/stage.rs
+src/driving/cameras.rs
+tests/stage.rs
+vendor/rerbr-sim/src/audio_audit.rs
+```
+
+Modified files:
+
+```text
+.gitignore
+Cargo.toml
+README.md
+PHYSICS-DRIVE.md
+VALIDATION.md
+scripts/build-ios.sh
+scripts/verify.py
+src/car/mod.rs
+src/car/placement.rs
+src/car/runtime.rs
+src/driving/mod.rs
+src/harwood/mod.rs
+src/harwood/mesh.rs
+src/harwood/gpu.rs
+src/harwood/shader.wgsl
+src/harwood/neighbors_tests.rs
+src/harwood/UPSTREAM.md
+vendor/rerbr-sim/src/lib.rs
+vendor/rerbr-sim/UPSTREAM.md
+github-actions/ios-probe.yml   secondary template only; do not sync/publish
+```
+
+After an authorized synchronization, the active workflow needs only physics-stage
+after physics-drive in its build_mode options. Preserve the active workflow's
+existing environment, feature forwarding, signing/archive/IPA checks and bundle
+identity org.rerbr.probe. Do not copy the secondary template or .validation outputs.
