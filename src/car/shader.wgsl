@@ -1,11 +1,11 @@
-struct Camera { vp: mat4x4<f32>, models: array<mat4x4<f32>,5>, options: vec4<u32> }
+struct Camera { vp: mat4x4<f32>, models: array<mat4x4<f32>,6>, options: vec4<u32> }
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var diffuse: texture_2d<f32>;
 @group(1) @binding(1) var filtering: sampler;
 struct Out { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32> }
 @vertex fn vs_main(@location(0) p:vec3<f32>,@location(1) normal:vec3<f32>,@location(2) uv:vec2<f32>,@builtin(instance_index) slot:u32)->Out {
     var out:Out;
-    out.position=camera.vp*camera.models[min(slot,4u)]*vec4<f32>(p,1.0);
+    out.position=camera.vp*camera.models[min(slot,5u)]*vec4<f32>(p,1.0);
     out.uv=uv;
     return out;
 }

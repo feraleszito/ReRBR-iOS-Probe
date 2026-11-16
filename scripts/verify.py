@@ -36,8 +36,12 @@ def verify_sources():
     require("workspace" in manifest, "probe must have an independent workspace")
     require("staticlib" in manifest["lib"]["crate-type"], "Rust library must include staticlib")
     dependencies = manifest["dependencies"]
-    require(set(dependencies) == {"wgpu", "winit", "futures-executor", "rerbr-render-core", "rerbr-asset-formats", "rerbr-sim"},
+    require(set(dependencies) == {"wgpu", "winit", "futures-executor", "rerbr-render-core", "rerbr-asset-formats", "rerbr-content", "rerbr-sim"},
             "unexpected runtime dependency")
+    require(dependencies["rerbr-content"] == {"path": "vendor/rerbr-content"}, "content descriptors must remain a local asset-free dependency")
+    content_manifest = tomllib.loads((ROOT / "vendor/rerbr-content/Cargo.toml").read_text())
+    require(content_manifest.get("dependencies", {}) == {}, "content descriptors must not pull in physics, graphics or archive libraries")
+    require(content_manifest["package"]["license"] == "GPL-3.0-or-later", "content descriptor license changed")
     require(dependencies["rerbr-render-core"] == {"path": "vendor/rerbr-render-core", "optional": True},
             "render core must be a local optional dependency")
     require(dependencies["rerbr-asset-formats"] == {"path": "vendor/rerbr-asset-formats", "optional": True},
@@ -63,7 +67,7 @@ def verify_sources():
             "full stage must reuse the verified driving controls/physics")
     for relative in ("src/harwood/stage.rs", "src/driving/cameras.rs", "STAGE.md"):
         require((ROOT / relative).is_file(), f"missing stage source/documentation: {relative}")
-    require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats", "vendor/rerbr-sim", "vendor/rerbr-sim/upstream/*"],
+    require(manifest["workspace"]["members"] == ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats", "vendor/rerbr-content", "vendor/rerbr-sim", "vendor/rerbr-sim/upstream/*"],
             "unexpected workspace member")
     require(manifest["workspace"]["default-members"] == ["."], "default build must select the triangle app")
     require(dependencies["wgpu"]["version"] == "=30.0.1", "wgpu version must match the probe")
@@ -74,7 +78,7 @@ def verify_sources():
     versions = {p["name"]: p["version"] for p in lock["package"]}
     for name, version in (("wgpu", "30.0.1"), ("winit", "0.30.13"), ("futures-executor", "0.3.34"),
                           ("rerbr-render-core", "0.1.0"), ("glam", "0.33.12"),
-                          ("rerbr-asset-formats", "0.1.0"), ("zip", "9.0.3")):
+                          ("rerbr-asset-formats", "0.1.0"), ("rerbr-content", "0.1.0"), ("zip", "9.0.3")):
         require(versions.get(name) == version, f"locked {name} version")
     expected_sim = {"rbr-physics", "rbr-hybrid", "rbr-formats", "rbr-gameplay", "rbr-recording", "rbr-engine", "rbr-tyre", "rbr-school"}
     require({name for name in versions if name.startswith("rbr-")} == expected_sim,
@@ -155,6 +159,9 @@ def verify_sources():
     require(info.get("UIFileSharingEnabled") is True and info.get("LSSupportsOpeningDocumentsInPlace") is True,
             "private Documents transfer must remain enabled")
     project = (ROOT / "xcode/ReRBRProbe.xcodeproj/project.pbxproj").read_text()
+    require(re.findall(r"PRODUCT_BUNDLE_IDENTIFIER\s*=\s*([^;]+);", project) == ["org.rerbr.probe"],
+            "preserve installed app bundle identity")
+    require("AudioToolbox" in project and "AVFoundation" in project, "native audio frameworks missing")
     definitions = re.findall(r"^\s*([A-F0-9]{24})(?: /\*.*?\*/)? = \{", project, re.MULTILINE)
     require(len(definitions) == len(set(definitions)), "duplicate Xcode object IDs")
     references = set(re.findall(r"\b[A-F0-9]{24}\b", project))

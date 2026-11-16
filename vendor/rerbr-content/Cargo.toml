@@ -1,0 +1,9 @@
+[package]
+name = "rerbr-content"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later"
+description = "Asset-free runtime descriptors for private ReRBR iOS content"
+
+[dependencies]

@@ -7,6 +7,7 @@ license = "GPL-3.0-or-later"
 description = "Private-data boot and stationary pure reRBR physics probe"
 
 [dependencies]
+rerbr-content = { path = "../rerbr-content" }
 rbr-physics = { path = "upstream/rbr-physics" }
 rbr-hybrid = { path = "upstream/rbr-hybrid" }
 rbr-formats = { path = "upstream/rbr-formats" }

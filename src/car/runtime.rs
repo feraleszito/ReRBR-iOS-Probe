@@ -3,7 +3,6 @@ use super::{
     gpu::Gpu,
     mesh::Stats,
     placement::{ChasePath, Frame},
-    Car,
 };
 use crate::harwood::{
     benchmark::{
@@ -75,24 +74,43 @@ impl Runtime {
     }
     pub fn install(
         &mut self,
-        path: ChasePath,
-        car: Car,
-        terrain: Stats,
+        prepared: super::Prepared,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
-    ) -> Result<(), String> {
+    ) -> Result<crate::harwood::LoadedBlock, String> {
+        let super::Prepared {
+            path,
+            car,
+            selection,
+            terrain,
+        } = prepared;
+        let stats = Stats {
+            vertices: terrain.mesh.vertices.len(),
+            triangles: terrain.mesh.indices.len() / 3,
+            draws: terrain.mesh.draws.len(),
+            textures: terrain.textures.len(),
+        };
+        selection.validate_current_backend()?;
+        if car.vehicle != selection.vehicle {
+            return Err("selected vehicle does not match prepared car geometry".into());
+        }
+        #[cfg(feature = "physics-drive")]
+        self.driving.configure_selection(selection)?;
         #[cfg(feature = "physics-drive")]
         self.driving.install(&car.geometry);
         #[cfg(feature = "physics-stage")]
         {
             self.driving.mounts = Some(car.cameras);
+            self.driving.cockpit_ready = car.cockpit.is_some();
+            self.driving.cockpit_error = car.cockpit_error.clone();
         }
         self.car = Some(Gpu::new(device, queue, format, car)?);
         self.path = Some(path);
-        self.terrain = terrain;
+        self.terrain = stats;
         self.session = None;
-        Ok(())
+        self.frame = None;
+        Ok(terrain)
     }
     pub fn fail(&mut self) {
         #[cfg(feature = "physics-drive")]
@@ -101,6 +119,10 @@ impl Runtime {
         if let Some(s) = &mut self.session {
             s.abort();
         }
+    }
+    #[cfg(feature = "physics-drive")]
+    pub fn asset_error(&mut self, error: String) {
+        self.driving.asset_error(error);
     }
     #[cfg(any(not(feature = "physics-drive"), test))]
     pub fn restart(&mut self) {
@@ -174,12 +196,18 @@ impl Runtime {
         format: wgpu::TextureFormat,
     ) {
         #[cfg(feature = "physics-stage")]
-        let hide_car = self.driving.view == crate::driving::cameras::View::CockpitFallback;
+        let interior = self.driving.view == crate::driving::cameras::View::CockpitFallback;
         #[cfg(not(feature = "physics-stage"))]
-        let hide_car = false;
-        if self.comparison.car_visible && !self.fatal && !hide_car {
+        let interior = false;
+        #[cfg(feature = "physics-drive")]
+        let steering = self.driving.steering_angle;
+        #[cfg(not(feature = "physics-drive"))]
+        let steering = 0.0;
+        if self.comparison.car_visible && !self.fatal {
             if let (Some(gpu), Some(frame)) = (&self.car, &self.frame) {
-                gpu.draw(queue, encoder, target, depth, size, format, frame);
+                gpu.draw(
+                    queue, encoder, target, depth, size, format, frame, interior, steering,
+                );
             }
         }
     }

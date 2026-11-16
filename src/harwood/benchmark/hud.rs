@@ -1,7 +1,108 @@
 //! Small original 5x7 ASCII overlay. No font files or UI dependencies.
 const WIDTH: u32 = 96;
 const HEIGHT: u32 = 32;
-const MAX_VERTICES: usize = 8192;
+const MAX_VERTICES: usize = 16384;
+
+/// Virtual-pixel overlay builder on top of the existing 5x7 atlas.
+/// Coordinates are 640 units wide, origin top-left, like `vertices`.
+#[cfg(feature = "physics-drive")]
+pub struct Canvas {
+    size: (u32, u32),
+    height: f32,
+    out: Vec<u8>,
+}
+#[cfg(feature = "physics-drive")]
+impl Canvas {
+    pub fn new(size: (u32, u32)) -> Self {
+        Self {
+            size,
+            height: 640.0 * size.1.max(1) as f32 / size.0.max(1) as f32,
+            out: Vec::with_capacity(32768),
+        }
+    }
+    pub fn height(&self) -> f32 {
+        self.height
+    }
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+    fn quad(&mut self, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], color: [u8; 4]) {
+        for (dx, dy) in [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, 1.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+        ] {
+            for value in [
+                (x + dx * w) / 320.0 - 1.0,
+                1.0 - (y + dy * h) * 2.0 / self.height,
+                uv[0] + dx * (uv[2] - uv[0]),
+                uv[1] + dy * (uv[3] - uv[1]),
+            ] {
+                self.out.extend(value.to_ne_bytes());
+            }
+            self.out.extend(color);
+        }
+    }
+    /// Solid rectangle; samples the atlas's reserved white texel.
+    pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        self.quad(
+            x,
+            y,
+            w,
+            h,
+            [
+                0.5 / WIDTH as f32,
+                0.5 / HEIGHT as f32,
+                0.5 / WIDTH as f32,
+                0.5 / HEIGHT as f32,
+            ],
+            color,
+        );
+    }
+    /// Draws uppercase text (unsupported bytes become `?`) and returns the advance.
+    pub fn text(&mut self, x: f32, y: f32, text: &str, scale: f32, color: [u8; 4]) -> f32 {
+        let scale = scale.max(0.1);
+        let advance = 14.0 * scale;
+        let mut cursor = x;
+        for c in text.to_ascii_uppercase().bytes() {
+            if c == b' ' {
+                cursor += advance;
+                continue;
+            }
+            let c = if (32..96).contains(&c) { c } else { b'?' };
+            let i = u32::from(c - 32);
+            let sx = (i % 16) * 6;
+            let sy = (i / 16) * 8;
+            self.quad(
+                cursor,
+                y,
+                12.0 * scale,
+                16.0 * scale,
+                [
+                    sx as f32 / WIDTH as f32,
+                    sy as f32 / HEIGHT as f32,
+                    (sx + 5) as f32 / WIDTH as f32,
+                    (sy + 7) as f32 / HEIGHT as f32,
+                ],
+                color,
+            );
+            cursor += advance;
+        }
+        cursor - x
+    }
+    pub fn finish(self) -> Vec<u8> {
+        debug_assert!(self.out.len() / 20 <= MAX_VERTICES);
+        self.out
+    }
+}
+#[cfg(all(test, feature = "physics-drive"))]
+pub const MAX_CANVAS_VERTICES: usize = MAX_VERTICES;
 
 pub struct Hud {
     pipeline: wgpu::RenderPipeline,

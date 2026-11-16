@@ -1,4 +1,5 @@
-#![cfg(feature = "car-chase-benchmark")]
+// This benchmark asserts the original 20-block workload. Full-stage has its own private test.
+#![cfg(all(feature = "car-chase-benchmark", not(feature = "physics-stage")))]
 use rerbr_probe::car;
 
 #[test]

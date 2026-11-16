@@ -18,6 +18,27 @@ impl View {
             Self::CockpitFallback => Self::Chase,
         }
     }
+    pub fn index(self) -> u8 {
+        match self {
+            Self::Chase => 0,
+            Self::Bonnet => 1,
+            Self::CockpitFallback => 2,
+        }
+    }
+    pub fn from_index(index: u8) -> Self {
+        match index {
+            1 => Self::Bonnet,
+            2 => Self::CockpitFallback,
+            _ => Self::Chase,
+        }
+    }
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Chase => "CHASE",
+            Self::Bonnet => "BONNET",
+            Self::CockpitFallback => "COCKPIT",
+        }
+    }
     pub fn label(self) -> &'static str {
         match self {
             Self::Chase => "CHASE",
@@ -95,6 +116,9 @@ mod tests {
         assert_eq!(c.eye, body.transform_point3(m.bonnet.eye));
         assert_eq!(body, saved);
         assert_eq!(View::Chase.next().next().next(), View::Chase);
+        assert_eq!(View::from_index(2), View::CockpitFallback);
+        assert_eq!(View::Bonnet.index(), 1);
+        assert_eq!(View::from_index(9), View::Chase);
         assert!(m.camera(View::Chase, body).is_none());
         assert!(Mounts::parse(&[]).is_err());
     }

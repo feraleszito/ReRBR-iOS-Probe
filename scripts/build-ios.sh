@@ -32,7 +32,7 @@ case "$PROBE_MODE" in
         ;;
     physics-drive|physics-stage)
         CARGO_FEATURE_ARGS+=(--features "$PROBE_MODE")
-        HOST_TEST_ARGS=(-p rerbr-probe -p rerbr-sim -p rbr-physics -p rbr-hybrid -p rerbr-render-core -p rerbr-asset-formats)
+        HOST_TEST_ARGS=(-p rerbr-probe -p rerbr-sim -p rbr-physics -p rbr-hybrid -p rerbr-render-core -p rerbr-asset-formats -p rerbr-content)
         export CARGO_PROFILE_RELEASE_PANIC=unwind
         ;;
     physics-probe)

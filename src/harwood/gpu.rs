@@ -79,6 +79,8 @@ impl Scene {
         eprintln!("{MODE_NAME} FAIL: {error}; red background; see log; existing fallback modes remain separate");
         self.failed = true;
         self.gpu = None;
+        #[cfg(feature = "physics-drive")]
+        self.benchmark.asset_error(error);
         #[cfg(feature = "harwood-benchmark")]
         self.benchmark.fail();
     }
@@ -105,17 +107,7 @@ impl Scene {
             data.render
         };
         #[cfg(feature = "car-chase-benchmark")]
-        let data = {
-            let stats = crate::car::mesh::Stats {
-                vertices: data.terrain.mesh.vertices.len(),
-                triangles: data.terrain.mesh.indices.len() / 3,
-                draws: data.terrain.mesh.draws.len(),
-                textures: data.terrain.textures.len(),
-            };
-            self.benchmark
-                .install(data.path, data.car, stats, device, queue, format)?;
-            data.terrain
-        };
+        let data = self.benchmark.install(data, device, queue, format)?;
         Block::new(device, queue, format, data)
     }
 

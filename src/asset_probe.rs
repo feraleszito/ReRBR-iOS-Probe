@@ -10,8 +10,8 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
-pub const STAGE: &str = "track-20_O";
-pub const EXPECTED_BLOCKS: usize = 282;
+pub const STAGE: &str = rerbr_content::DEFAULT_STAGE_STEM;
+pub const EXPECTED_BLOCKS: usize = rerbr_content::DEFAULT_TERRAIN_BLOCKS;
 const MIB: u64 = 1024 * 1024;
 
 /// Runs once on a background thread after GPU creation. Missing, partial or
@@ -198,11 +198,11 @@ pub fn inspect(maps: &Path) -> Result<Report, String> {
     let files = Files::new(maps)?;
     // Drop the LBS buffer and borrowed parse tree before reading texture images.
     let (blocks, visibility_cells, object_items, used) = {
-        let bytes = read_limited(files.find("track-20_O.lbs")?, 96 * MIB)?;
+        let bytes = read_limited(files.find(&format!("{STAGE}.lbs"))?, 96 * MIB)?;
         let stage = lbs::parse(&bytes).map_err(|e| format!("{STAGE}.lbs: {e}"))?;
         references(&stage)?
     };
-    let ini_bytes = read_limited(files.find("track-20_O.ini")?, 2 * MIB)?;
+    let ini_bytes = read_limited(files.find(&format!("{STAGE}.ini"))?, 2 * MIB)?;
     let sections = ini::parse(&String::from_utf8_lossy(&ini_bytes)).map_err(|e| e.to_string())?;
     let info = section(&sections, "TextureInfo").ok_or("missing [TextureInfo]")?;
     let declared_diffuse = count(info, "NumTextures")?;
@@ -348,7 +348,7 @@ pub(crate) struct TextureData {
 /// Stage 2 reads the same private files and rules as the existing audit.
 #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
 pub(crate) fn read_stage(maps: &Path) -> Result<Vec<u8>, String> {
-    read_limited(Files::new(maps)?.find("track-20_O.lbs")?, 96 * MIB)
+    read_limited(Files::new(maps)?.find(&format!("{STAGE}.lbs"))?, 96 * MIB)
 }
 
 #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
@@ -381,7 +381,7 @@ fn load_diffuse_impl(
     deduplicate: bool,
 ) -> Result<SharedTextures, String> {
     let files = Files::new(maps)?;
-    let ini_bytes = read_limited(files.find("track-20_O.ini")?, 2 * MIB)?;
+    let ini_bytes = read_limited(files.find(&format!("{STAGE}.ini"))?, 2 * MIB)?;
     let sections = ini::parse(&String::from_utf8_lossy(&ini_bytes)).map_err(|e| e.to_string())?;
     let info = section(&sections, "TextureInfo").ok_or("missing [TextureInfo]")?;
     let bytes = read_limited(files.find("TextureFilenameMap.dat")?, 8 * MIB)?;
@@ -482,7 +482,7 @@ fn texture_requests(
 #[cfg(feature = "harwood-neighbors")]
 pub(crate) fn diffuse_names(maps: &Path) -> Result<BTreeMap<u32, String>, String> {
     let files = Files::new(maps)?;
-    let bytes = read_limited(files.find("track-20_O.ini")?, 2 * MIB)?;
+    let bytes = read_limited(files.find(&format!("{STAGE}.ini"))?, 2 * MIB)?;
     let sections = ini::parse(&String::from_utf8_lossy(&bytes)).map_err(|e| e.to_string())?;
     let info = section(&sections, "TextureInfo").ok_or("missing TextureInfo")?;
     (0..count(info, "NumTextures")?)

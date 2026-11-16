@@ -3,9 +3,14 @@ pub mod audio_audit;
 pub mod boot;
 pub mod diagnostics;
 pub mod drive;
+pub mod engine_audio;
+pub use rbr_formats;
 mod handles;
 pub mod inputs;
 pub mod measure;
+pub mod ngp_candidate;
+pub mod ngp_crc;
+pub mod physics_audit;
 
 use rbr_gameplay::control::CarControl;
 use rbr_gameplay::stage::{Stage, State, NGP_LOAD_SUBSTEPS};

@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Clone)]
 pub struct Shared {
     pub input: Control,
     pub paused: bool,
@@ -20,13 +21,15 @@ pub struct Shared {
     pub rest: Option<Sample>,
     pub payload_bytes: usize,
     pub last_step_ms: f64,
+    pub physics_status: Option<String>,
 }
 pub struct Worker {
     pub state: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Worker {
-    pub fn new() -> Self {
+    pub fn new_selected(selection: rerbr_content::Selection, automatic: bool) -> Self {
         let state = Arc::new(Mutex::new(Shared {
             input: Control::default(),
             paused: true,
@@ -35,6 +38,7 @@ impl Worker {
             rest: None,
             payload_bytes: 0,
             last_step_ms: 0.0,
+            physics_status: None,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let s = state.clone();
@@ -44,7 +48,7 @@ impl Worker {
             .stack_size(STACK_BYTES)
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(&s, &stop_thread)
+                    run(&s, &stop_thread, automatic, &selection)
                 }));
                 let error = match result {
                     Ok(Ok(())) => None,
@@ -52,27 +56,49 @@ impl Worker {
                     Err(e) => Some(rerbr_sim::describe_stop(e.as_ref())),
                 };
                 if let Some(e) = error {
+                    super::audio::set_paused(true);
                     eprintln!("physics-drive STOP: {e}");
                     let mut s = s.lock().unwrap();
                     s.error = Some(e);
                     s.paused = true;
                 }
             });
-        if let Err(e) = spawn {
-            state.lock().unwrap().error = Some(format!("physics worker: {e}"));
+        let thread = match spawn {
+            Ok(thread) => Some(thread),
+            Err(e) => {
+                state.lock().unwrap().error = Some(format!("physics worker: {e}"));
+                None
+            }
+        };
+        Self {
+            state,
+            stop,
+            thread,
         }
-        Self { state, stop }
+    }
+    pub fn shutdown(&mut self) {
+        super::audio::set_paused(true);
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.shutdown();
     }
 }
-fn run(shared: &Mutex<Shared>, stop: &AtomicBool) -> Result<(), String> {
+fn run(
+    shared: &Mutex<Shared>,
+    stop: &AtomicBool,
+    automatic: bool,
+    selection: &rerbr_content::Selection,
+) -> Result<(), String> {
     let documents = std::env::var_os("RERBR_PROBE_DOCUMENTS").ok_or("Documents unavailable")?;
-    let paths = Paths::documents(std::path::Path::new(&documents));
-    let mut session = Session::boot(&paths)?;
+    let paths = Paths::for_selection(std::path::Path::new(&documents), selection)?;
+    let mut session = Session::boot_selected(&paths, selection, automatic)?;
+    super::audio::init(std::path::Path::new(&documents), &selection.vehicle, 44100);
     let mut previous = session.sample();
     if !valid(&previous) {
         return Err("invalid settled physics pose".into());
@@ -80,57 +106,120 @@ fn run(shared: &Mutex<Shared>, stop: &AtomicBool) -> Result<(), String> {
     {
         let mut s = shared.lock().unwrap();
         s.rest = Some(previous.clone());
+        s.physics_status = Some(session.physics_audit().summary());
         s.payload_bytes = session.payload_bytes();
         s.pair = Some((previous.clone(), previous.clone(), Instant::now()));
     }
     let dt = f64::from(session.dt());
     let mut last = Instant::now();
-    let mut debt = 0.0;
+    let mut clock = SimulationClock::default();
     while !stop.load(Ordering::Relaxed) {
-        let (input, paused) = {
+        let paused = {
             let s = shared.lock().unwrap();
-            (s.input, s.paused)
+            s.paused
         };
         let now = Instant::now();
         let elapsed = now.duration_since(last).as_secs_f64();
         last = now;
+        clock.advance(elapsed, paused);
         if paused {
-            debt = 0.0;
             std::thread::sleep(Duration::from_millis(2));
             continue;
         }
-        debt += elapsed;
-        if debt > 0.15 {
-            let mut s = shared.lock().unwrap();
-            s.paused = true;
-            s.error = Some("CPU fell behind >150ms; paused without skipping physics".into());
-            debt = 0.0;
-            continue;
-        }
-        while debt >= dt {
+        while clock.debt >= dt {
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
+            // Read controls at every simulation boundary, including during catch-up.
+            let input = {
+                let s = shared.lock().unwrap();
+                if s.paused {
+                    clock.advance(0.0, true);
+                    break;
+                }
+                s.input
+            };
             let began = Instant::now();
-            session.step(input)?;
+            let command = super::controls::pending_selection(input, previous.commanded_gear);
+            session.step(command)?;
             let sample = session.sample();
             if !valid(&sample) {
                 return Err("nonfinite physical pose".into());
             }
-            if sample.step % 720 == 0 {
+            let noise = session.engine_noise(500.0);
+            super::audio::update_engine_state(&noise, sample.gear);
+            if cfg!(debug_assertions) && sample.step % 720 == 0 {
                 eprintln!("physics-drive STEP {}: pos={:?} velocity={:?} rpm={:.0} gear={} input=({:.2},{:.2},{:.2}) ground={:?} strut={:?}",sample.step,sample.position,sample.velocity,sample.rpm,sample.gear,input.throttle,input.brake,input.steering,sample.wheel_ground,sample.wheel_travel);
             }
             let mut s = shared.lock().unwrap();
             s.last_step_ms = began.elapsed().as_secs_f64() * 1000.0;
             s.payload_bytes = session.payload_bytes();
-            s.pair = Some((previous, sample.clone(), Instant::now()));
+            // Publish the simulated boundary, retaining fractional fixed-step debt.
+            let boundary = now
+                .checked_sub(Duration::from_secs_f64((clock.debt - dt).max(0.0)))
+                .unwrap_or(now);
+            s.pair = Some((previous, sample.clone(), boundary));
             previous = sample;
-            debt -= dt;
+            clock.debt -= dt;
         }
         std::thread::sleep(Duration::from_micros(500));
     }
     Ok(())
 }
+
+/// Wall time schedules original fixed steps; it never changes their duration or drops them.
+#[derive(Default)]
+struct SimulationClock {
+    debt: f64,
+    running: bool,
+}
+impl SimulationClock {
+    fn advance(&mut self, elapsed: f64, paused: bool) {
+        if paused || !self.running {
+            // The interval crossing resume includes paused time and is not simulated.
+            self.debt = 0.0;
+        } else {
+            self.debt += elapsed;
+        }
+        self.running = !paused;
+    }
+}
+
 fn valid(sample: &Sample) -> bool {
     sample.finite() && (0.5..1.5).contains(&sample.orientation.iter().map(|q| q * q).sum::<f32>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SimulationClock;
+
+    #[test]
+    fn pause_and_resume_exclude_paused_wall_time_and_old_debt() {
+        let mut clock = SimulationClock::default();
+        clock.advance(12.0, true);
+        clock.advance(0.002, false);
+        assert_eq!(clock.debt, 0.0);
+        clock.advance(0.001, false);
+        assert_eq!(clock.debt, 0.001);
+        clock.advance(0.0, true);
+        clock.advance(100.0, false);
+        assert_eq!(clock.debt, 0.0);
+    }
+
+    #[test]
+    fn slow_rendering_preserves_every_fixed_step_and_fraction() {
+        let dt = f64::from(f32::from_bits(0x3ab6_0b61));
+        let mut clock = SimulationClock::default();
+        clock.advance(0.0, false);
+        clock.advance(dt * 360.5, false);
+        let mut steps = 0;
+        while clock.debt >= dt {
+            clock.debt -= dt;
+            steps += 1;
+        }
+        assert_eq!(steps, 360);
+        assert!((clock.debt - dt * 0.5).abs() < 1e-12);
+        clock.advance(dt * 0.5, false);
+        assert!((clock.debt - dt).abs() < 1e-12);
+    }
 }

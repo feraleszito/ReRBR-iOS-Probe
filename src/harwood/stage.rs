@@ -98,6 +98,10 @@ fn object_mesh(
 }
 
 pub fn load(maps: &Path) -> Result<Stage, String> {
+    load_selected(maps, &rerbr_content::StageDescriptor::default())
+}
+pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Result<Stage, String> {
+    stage.validate_current_backend()?;
     let bytes = asset_probe::read_stage(maps)?;
     let lbs = lbs::parse(&bytes).map_err(|e| e.to_string())?;
     let mut terrain = Mesh::default();
@@ -203,10 +207,10 @@ pub fn load(maps: &Path) -> Result<Stage, String> {
             _ => (),
         }
     }
-    if report.blocks != 282 {
+    if report.blocks != stage.terrain_blocks {
         return Err(format!(
-            "STAGE: expected Harwood's 282 blocks, got {}",
-            report.blocks
+            "STAGE: expected {} blocks for {}, got {}",
+            stage.terrain_blocks, stage.id, report.blocks
         ));
     }
     // Ensure every real route sample has visible terrain underneath before removing
@@ -217,11 +221,14 @@ pub fn load(maps: &Path) -> Result<Stage, String> {
         .map(|t| [t[0], t[1], t[2]].map(|i| Vec3::from(terrain.vertices[i as usize].position)))
         .collect();
     let ground = super::benchmark::route::Ground::new(triangles)?;
-    let collision = rerbr_sim::drive::collision_triangles(&rerbr_sim::inputs::Paths {
-        maps: maps.to_owned(),
-        install: std::path::PathBuf::new(),
-        overlay: None,
-    })?;
+    let collision = rerbr_sim::drive::collision_triangles_for(
+        &rerbr_sim::inputs::Paths {
+            maps: maps.to_owned(),
+            install: std::path::PathBuf::new(),
+            overlay: None,
+        },
+        stage,
+    )?;
     let collision = super::benchmark::route::Ground::new(
         collision
             .into_iter()

@@ -33,6 +33,16 @@ pub fn shown_at_start(part: &Section) -> bool {
     }
 }
 pub fn exterior<'a>(name: &str, parts: &'a [Section]) -> Result<&'a Section, &'static str> {
+    part_set(name, parts, false)
+}
+pub fn interior<'a>(name: &str, parts: &'a [Section]) -> Result<&'a Section, &'static str> {
+    part_set(name, parts, true)
+}
+fn part_set<'a>(
+    name: &str,
+    parts: &'a [Section],
+    inside: bool,
+) -> Result<&'a Section, &'static str> {
     if name.starts_with("ghost_") {
         return Err("ghost");
     }
@@ -42,8 +52,16 @@ pub fn exterior<'a>(name: &str, parts: &'a [Section]) -> Result<&'a Section, &'s
     if name.starts_with("Plane_") {
         return Err("shadow plane");
     }
-    if name.starts_with("i_") {
-        return Err("interior");
+    if name.starts_with("i_") != inside {
+        return Err(if inside { "exterior" } else { "interior" });
+    }
+    if inside
+        && (["i_wing", "i_bumper", "i_window_lf", "i_window_rf"]
+            .iter()
+            .any(|p| name.contains(p))
+            || name == "i_drivers")
+    {
+        return Err("not built by original interior loader");
     }
     if name == "pc_e_premove" || name.starts_with("k_") || name.starts_with("d_") {
         return Err("not built by original loader");

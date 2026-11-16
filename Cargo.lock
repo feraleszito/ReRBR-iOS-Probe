@@ -1336,12 +1336,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rerbr-content"
+version = "0.1.0"
+
+[[package]]
 name = "rerbr-probe"
 version = "0.1.0"
 dependencies = [
  "futures-executor",
  "naga",
  "rerbr-asset-formats",
+ "rerbr-content",
  "rerbr-render-core",
  "rerbr-sim",
  "wgpu",
@@ -1366,6 +1371,7 @@ dependencies = [
  "rbr-physics",
  "rbr-recording",
  "rbr-school",
+ "rerbr-content",
  "sha2",
 ]
 

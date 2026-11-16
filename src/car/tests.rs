@@ -248,7 +248,13 @@ fn invalid_ranges_missing_uv_and_materials_fail_without_substitutes() {
     };
     m.uvs.clear();
     assert!(mesh::convert(&e, &p, &s, &c).is_err());
-    assert!(read(std::path::Path::new("."), "../private.dds", 10).is_err());
+    assert!(read(
+        std::path::Path::new("."),
+        &rerbr_content::VehicleDescriptor::default(),
+        "../private.dds",
+        10
+    )
+    .is_err());
 }
 
 #[test]

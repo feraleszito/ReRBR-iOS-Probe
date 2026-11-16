@@ -22,6 +22,7 @@ pub struct Draw {
     pub material: usize,
     pub slot: u32,
     pub order: (u8, usize),
+    pub interior: bool,
 }
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Stats {
@@ -76,6 +77,23 @@ pub fn convert(
     shaders: &[Section],
     settings: &[Section],
 ) -> Result<Geometry, String> {
+    convert_set(elements, parts, shaders, settings, false)
+}
+pub fn convert_interior(
+    elements: &[sgc::Element],
+    parts: &[Section],
+    shaders: &[Section],
+    settings: &[Section],
+) -> Result<Geometry, String> {
+    convert_set(elements, parts, shaders, settings, true)
+}
+fn convert_set(
+    elements: &[sgc::Element],
+    parts: &[Section],
+    shaders: &[Section],
+    settings: &[Section],
+    interior: bool,
+) -> Result<Geometry, String> {
     let worlds = checked_worlds(elements)?;
     let mut result = Geometry {
         vertices: Vec::new(),
@@ -116,7 +134,12 @@ pub fn convert(
         let sgc::Element::Mesh(mesh) = element else {
             continue;
         };
-        let part = match selection::exterior(&mesh.node.name, parts) {
+        let selected = if interior {
+            selection::interior(&mesh.node.name, parts)
+        } else {
+            selection::exterior(&mesh.node.name, parts)
+        };
+        let part = match selected {
             Ok(part) => part,
             Err(why) => {
                 result.skipped.push((mesh.node.name.clone(), why.into()));
@@ -138,7 +161,15 @@ pub fn convert(
             ));
         }
         let mut remap = HashMap::new();
-        let slot = selection::slot(&mesh.node.name);
+        let slot = if interior {
+            if mesh.node.name == "i_steeringwheel" {
+                5
+            } else {
+                0
+            }
+        } else {
+            selection::slot(&mesh.node.name)
+        };
         for (face, block) in mesh.faces.iter().zip(&blocks) {
             if face.name != block.material {
                 return Err(format!(
@@ -216,6 +247,7 @@ pub fn convert(
                     material,
                     slot,
                     order: (result.materials[material].list, material),
+                    interior,
                 });
             }
         }
@@ -224,8 +256,12 @@ pub fn convert(
         }
     }
     result.draws.sort_by_key(|d| d.order); // Original wheel/list/shader rank; retain later opaque draws.
-    if !result.drawn.iter().any(|n| n == "e_body") {
-        return Err("CAR: exterior body missing".into());
+    let body = if interior { "i_body" } else { "e_body" };
+    if !result.drawn.iter().any(|n| n == body) {
+        return Err(format!("CAR: {body} missing"));
+    }
+    if interior {
+        return Ok(result);
     }
     let mut referenced: [BTreeSet<u32>; 5] = std::array::from_fn(|_| BTreeSet::new());
     for d in &result.draws {
@@ -255,8 +291,8 @@ fn part_transform(
 ) -> Mat4 {
     let name = mesh.node.name.as_str();
     let side = match name {
-        "e_door_l" => Some(("l", 1.0)),
-        "e_door_r" => Some(("r", -1.0)),
+        "e_door_l" | "i_door_l" => Some(("l", 1.0)),
+        "e_door_r" | "i_door_r" => Some(("r", -1.0)),
         _ => None,
     };
     if let Some((side, sign)) = side {
@@ -277,6 +313,24 @@ fn part_transform(
     coords::part_to_car(worlds[&mesh.node.id], mesh.node.transform.words())
 }
 impl Geometry {
+    /// Append another mesh set without changing the exterior's wheel/body fit data.
+    pub fn append(&mut self, mut other: Self) {
+        let vertex = self.vertices.len() as u32;
+        let index = self.indices.len();
+        let material = self.materials.len();
+        self.vertices.append(&mut other.vertices);
+        self.indices
+            .extend(other.indices.into_iter().map(|i| i + vertex));
+        self.materials.append(&mut other.materials);
+        self.draws.extend(other.draws.into_iter().map(|mut d| {
+            d.indices = d.indices.start + index..d.indices.end + index;
+            d.material += material;
+            d.order.1 += material;
+            d
+        }));
+        self.draws.sort_by_key(|d| d.order);
+        self.drawn.append(&mut other.drawn);
+    }
     pub fn stats(&self, blended: Option<bool>) -> Stats {
         let mut vertices = BTreeSet::new();
         let mut textures = BTreeSet::new();

@@ -29,9 +29,14 @@ fn read(root: &Path, path: &str, limit: u64) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 pub fn inspect(root: &Path) -> Result<Report, String> {
-    let bytes = read(root, "Audio/Cars/Cars.ini", 1024 * 1024)?;
+    inspect_vehicle(root, &rerbr_content::VehicleDescriptor::default())
+}
+pub fn inspect_vehicle(root: &Path, vehicle: &rerbr_content::VehicleDescriptor) -> Result<Report, String> {
+    vehicle.validate_current_backend()?;
+    let bytes = read(root, &vehicle.audio_index, 1024 * 1024)?;
     let sections = audio::parse_ini(&bytes).map_err(|e| e.to_string())?;
-    let car = audio::CarSound::read(&sections, 6).ok_or("AUDIO: missing Car6 sound mapping")?;
+    let car = audio::CarSound::read(&sections, vehicle.original_slot)
+        .ok_or_else(|| format!("AUDIO: missing Car{} sound mapping", vehicle.original_slot))?;
     if car.engine.is_empty() || !car.engine.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
         return Err("AUDIO: unsafe engine bank name".into());
     }

@@ -20,6 +20,7 @@ pub(crate) struct Gpu {
     draws: Vec<(Draw, Pass)>,
     pub opaque: Stats,
     pub transparent: Stats,
+    cockpit: Option<rerbr_render_core::Mat4>,
 }
 impl Gpu {
     pub fn new(
@@ -91,7 +92,7 @@ impl Gpu {
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("car VP and five rigid models"),
-            size: 400,
+            size: 464,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -227,6 +228,7 @@ impl Gpu {
             draws,
             opaque,
             transparent,
+            cockpit: car.cockpit,
         })
     }
     #[allow(clippy::too_many_arguments)]
@@ -239,6 +241,8 @@ impl Gpu {
         size: (u32, u32),
         format: wgpu::TextureFormat,
         frame: &Frame,
+        interior: bool,
+        steering_angle: f32,
     ) {
         let mut bytes: Vec<_> =
             super::placement::view_projection(frame.camera, size.0 as f32 / size.1 as f32)
@@ -249,6 +253,17 @@ impl Gpu {
         for model in frame.models {
             bytes.extend(model.to_cols_array().into_iter().flat_map(f32::to_ne_bytes));
         }
+        let wheel = self
+            .cockpit
+            .map_or(rerbr_render_core::Mat4::IDENTITY, |node| {
+                super::cockpit::steering_transform(node, steering_angle)
+            });
+        bytes.extend(
+            (frame.models[0] * wheel)
+                .to_cols_array()
+                .into_iter()
+                .flat_map(f32::to_ne_bytes),
+        );
         bytes.extend(
             [u32::from(format.is_srgb()), 0, 0, 0]
                 .into_iter()
@@ -283,6 +298,9 @@ impl Gpu {
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
         for (draw, state) in &self.draws {
+            if draw.interior != interior {
+                continue;
+            }
             pass.set_pipeline(&self.pipelines[state]);
             pass.set_bind_group(1, &self.groups[draw.material], &[]);
             pass.draw_indexed(

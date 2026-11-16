@@ -4,7 +4,14 @@ pub use rbr_gameplay::control::CarControl as Control;
 
 /// Independent read-only COL geometry for contact diagnostics, not a replacement collision solver.
 pub fn collision_triangles(paths: &inputs::Paths) -> Result<Vec<[[f32; 3]; 3]>, String> {
-    let bytes = std::fs::read(paths.maps.join("track-20_O.col")).map_err(|e| e.to_string())?;
+    collision_triangles_for(paths, &rerbr_content::StageDescriptor::default())
+}
+pub fn collision_triangles_for(
+    paths: &inputs::Paths,
+    stage: &rerbr_content::StageDescriptor,
+) -> Result<Vec<[[f32; 3]; 3]>, String> {
+    stage.validate_current_backend()?;
+    let bytes = std::fs::read(paths.maps.join(stage.file("col")?)).map_err(|e| e.to_string())?;
     let col = rbr_formats::col::parse(&bytes).map_err(|e| e.to_string())?;
     Ok(col
         .cells
@@ -19,6 +26,7 @@ use rbr_gameplay::{
 use rbr_hybrid::pure::{self, Playback};
 
 pub struct Session {
+    physics_audit: crate::physics_audit::PhysicsAudit,
     playback: Playback,
     control_at: u32,
     dt: f32,
@@ -27,21 +35,58 @@ pub struct Session {
 impl Session {
     /// Call on the dedicated STACK_BYTES worker; callers must catch pure-host panics there.
     pub fn boot(paths: &inputs::Paths) -> Result<Self, String> {
+        Self::boot_with_transmission(paths, false)
+    }
+    /// Original driver aid applied through the race setup before loading.
+    pub fn boot_with_transmission(paths: &inputs::Paths, automatic: bool) -> Result<Self, String> {
+        Self::boot_selected(paths, &rerbr_content::Selection::default(), automatic)
+    }
+    pub fn boot_selected(
+        paths: &inputs::Paths,
+        selection: &rerbr_content::Selection,
+        automatic: bool,
+    ) -> Result<Self, String> {
+        selection.validate_current_backend()?;
         if cfg!(panic = "abort") {
             return Err("physics-drive requires panic=unwind".into());
         }
-        let checked = inputs::check(paths)?;
+        let checked = inputs::check_selection(paths, selection)?;
         let data = paths.data();
         let season = Season::load(&data)?;
         let row = season
             .rows
             .iter()
-            .position(|r| r.map == 20 && r.letter == 3 && r.wetness == 0)
-            .ok_or("missing dry O weather row")?;
-        let weather = weather::quick_race(&season, 20, Preset::Random, Draws { row: Some(row), wear: 1 })?;
-        let race = boot::Race::quick_race(20, 6, 4, weather, checked.physics);
-        let name = paths.maps.join("track-20_O").to_string_lossy().into_owned();
+            .position(|r| {
+                r.map == selection.stage.original_map
+                    && r.letter == selection.stage.weather_letter
+                    && r.wetness == selection.stage.wetness
+            })
+            .ok_or_else(|| {
+                format!(
+                    "missing weather row for stage {} (letter {}, wetness {})",
+                    selection.stage.id, selection.stage.weather_letter, selection.stage.wetness
+                )
+            })?;
+        let weather = weather::quick_race(
+            &season,
+            selection.stage.original_map,
+            Preset::Random,
+            Draws { row: Some(row), wear: selection.stage.wear },
+        )?;
+        let audit_archive = checked.physics.clone();
+        let mut race = boot::Race::quick_race(
+            selection.stage.original_map,
+            selection.vehicle.original_slot,
+            selection.vehicle.tyre_type,
+            weather,
+            checked.physics,
+        );
+        race.options.aids.auto_gears = automatic;
+        let name = paths.maps.join(&selection.stage.stem).to_string_lossy().into_owned();
         let image = boot::build(&data, &name, State::Load.value(), &race)?;
+        let folder = diagnostics::physics_folder(&image.mem, selection.vehicle.original_slot)?;
+        let physics_audit = crate::physics_audit::inspect(&audit_archive, &folder, race.surface)?;
+        eprintln!("physics-drive AUDIT: {}", physics_audit.summary());
         let mut playback = Playback::from_image(image.mem.clone(), image.regs, image.slot, image.control_at, false);
         playback.pure.ngp_base = image.ngp.base;
         playback.pure.direct = true;
@@ -52,7 +97,8 @@ impl Session {
         if dt.to_bits() != 0x3ab6_0b61 {
             return Err("unexpected physics timestep".into());
         }
-        let mut stage = Stage::quick_race(20, 6).load_ready_with(NGP_LOAD_SUBSTEPS);
+        let mut stage = Stage::quick_race(selection.stage.original_map, selection.vehicle.original_slot)
+            .load_ready_with(NGP_LOAD_SUBSTEPS);
         while stage.state() == State::Load {
             pure::set_app_state(&mut playback.pure.mem.clone(), stage.state().value());
             playback.step(None, 40);
@@ -63,17 +109,35 @@ impl Session {
             return Err("stage did not reach Driving".into());
         }
         pure::set_app_state(&mut playback.pure.mem.clone(), stage.state().value());
+        let ratios = diagnostics::gear_ratios(&playback)?;
+        if ratios.len() != selection.vehicle.forward_gears as usize + 2 {
+            return Err("selected vehicle descriptor disagrees with original gearbox gear count".into());
+        }
+        if automatic {
+            let audit = diagnostics::gearbox_audit(&playback);
+            if audit.0[2..ratios.len()].iter().all(|rpm| *rpm == 0.0) {
+                return Err("automatic transmission unavailable: original VCU upshift thresholds are empty; manual transmission remains supported".into());
+            }
+        }
         eprintln!(
-            "physics-drive BOOT READY: original stage 20 / car 6; dt={dt:.10}; built={:?}; panic_unwind={}; host={}/{}",
+            "physics-drive BOOT READY: selected {} / {}; dt={dt:.10}; built={:?}; panic_unwind={}; host={}/{}",
+            selection.stage.id,
+            selection.vehicle.id,
             image.built,
             cfg!(panic = "unwind"),
             std::env::consts::ARCH,
             std::env::consts::OS
         );
-        Ok(Self { playback, control_at: image.control_at, dt, steps: 0 })
+        Ok(Self { physics_audit, playback, control_at: image.control_at, dt, steps: 0 })
+    }
+    pub fn physics_audit(&self) -> &crate::physics_audit::PhysicsAudit {
+        &self.physics_audit
     }
     pub fn dt(&self) -> f32 {
         self.dt
+    }
+    pub fn gear_ratios(&self) -> Result<Vec<f32>, String> {
+        diagnostics::gear_ratios(&self.playback)
     }
     pub fn step(&mut self, input: Control) -> Result<(), String> {
         if [input.throttle, input.brake, input.clutch, input.handbrake, input.steering].iter().any(|x| !x.is_finite()) {
@@ -89,6 +153,15 @@ impl Session {
     }
     pub fn sample(&self) -> diagnostics::Sample {
         diagnostics::read(&self.playback, self.control_at, self.steps)
+    }
+    pub fn sound(&self) -> rbr_recording::sound::Sound {
+        let mem = &self.playback.pure.mem;
+        let car = mem.u32(rbr_hybrid::pure::CAR_PTR);
+        rbr_recording::sound::Sound::read_from(car, |at| mem.u32(at))
+    }
+    pub fn engine_noise(&self, min_rpm: f32) -> crate::engine_audio::EngineNoise {
+        let sound = self.sound();
+        crate::engine_audio::EngineNoise::from_payload(&sound.engine, min_rpm)
     }
     pub fn payload_bytes(&self) -> usize {
         self.playback.pure.mem.pages().expect("paged boot").allocated_bytes()

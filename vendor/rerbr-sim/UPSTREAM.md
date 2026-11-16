@@ -69,3 +69,12 @@ audio_audit.rs is an app-owned read-only inventory adapter around the existing
 original rbr-formats audio::CarSound and eng::parse modules already covered by the
 623-file manifest. It adds no original source changes, audio samples, DLL execution
 or playback backend. See STAGE.md at the probe root for measured bank inventory.
+
+The app-owned `engine_audio.rs` subsequently adds an engine voice derived from
+the parent GPL `crates/rbr-sound/src/engine.rs` (SHA-256
+`2f2dfa277348eb743457accf5a19dbd401e5202b56101f1bb0a51b21a89e4b4f`),
+with local cabin filtering and callback buffer preparation. `drive.rs` exposes
+read-only original sound telemetry; no physics memory writes or equations were
+added. `ngp_crc.rs` and the expanded `ngp_candidate.rs` are research adapters,
+not runtime version enablement. The 623 upstream entries and four recorded
+adaptations are unchanged. See `INTEGRATION-REVIEW.md` for limits and validation.

@@ -1,6 +1,7 @@
 //! The native executable calls this library on the main thread, before UIApplicationMain.
 //! Winit owns UIKit's application loop. There is no second app delegate or SwiftUI loop.
 
+pub use rerbr_content as content;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,9 @@ mod physics_probe;
 
 #[cfg(feature = "physics-drive")]
 pub mod driving;
+
+#[cfg(not(feature = "physics-drive"))]
+mod silent_audio;
 
 #[cfg(feature = "car-chase-benchmark")]
 pub mod car;
@@ -106,6 +110,8 @@ impl ApplicationHandler for Probe {
         if let Some(renderer) = &mut self.renderer {
             renderer.harwood.interrupt_benchmark("APP SUSPENDED");
         }
+        #[cfg(feature = "physics-drive")]
+        driving::audio::set_paused(true);
         self.active = false;
         self.next_frame = None;
         event_loop.set_control_flow(ControlFlow::Wait);
@@ -135,6 +141,10 @@ impl ApplicationHandler for Probe {
                 #[cfg(feature = "harwood-benchmark")]
                 if occluded {
                     renderer.harwood.interrupt_benchmark("APP OCCLUDED");
+                }
+                #[cfg(feature = "physics-drive")]
+                if occluded {
+                    driving::audio::set_paused(true);
                 }
                 self.next_frame = Some(Instant::now());
             }

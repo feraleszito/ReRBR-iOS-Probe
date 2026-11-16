@@ -94,7 +94,8 @@
                     "-framework", UIKit, "-framework", Foundation,
                     "-framework", CoreFoundation, "-framework", CoreGraphics,
                     "-framework", CoreText, "-framework", QuartzCore,
-                    "-framework", Metal, "-framework", Security, "-framework", CoreMotion
+                    "-framework", Metal, "-framework", Security, "-framework", CoreMotion,
+                    "-framework", AudioToolbox, "-framework", AVFoundation
                 );
                 PRODUCT_BUNDLE_IDENTIFIER = org.rerbr.probe;
                 PRODUCT_NAME = ReRBRProbe;

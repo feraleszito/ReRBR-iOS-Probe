@@ -9,7 +9,7 @@ license = "GPL-3.0-or-later"
 
 # A nested workspace keeps this experiment independent of ../Cargo.toml and ../Cargo.lock.
 [workspace]
-members = ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats", "vendor/rerbr-sim", "vendor/rerbr-sim/upstream/*"]
+members = ["vendor/rerbr-render-core", "vendor/rerbr-asset-formats", "vendor/rerbr-content", "vendor/rerbr-sim", "vendor/rerbr-sim/upstream/*"]
 default-members = ["."]
 resolver = "2"
 
@@ -33,6 +33,7 @@ name = "rerbr_probe"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+rerbr-content = { path = "vendor/rerbr-content" }
 futures-executor = "=0.3.34"
 rerbr-render-core = { path = "vendor/rerbr-render-core", optional = true }
 rerbr-asset-formats = { path = "vendor/rerbr-asset-formats", optional = true }
@@ -65,6 +66,14 @@ required-features = ["car-chase-benchmark"]
 
 [[example]]
 name = "physics-diagnostic"
+required-features = ["physics-probe"]
+
+[[example]]
+name = "ngp-candidate-audit"
+required-features = ["physics-probe"]
+
+[[example]]
+name = "ngp-pack-audit"
 required-features = ["physics-probe"]
 
 [[example]]
