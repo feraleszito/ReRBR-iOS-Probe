@@ -1,5 +1,6 @@
 ﻿{
     "upstream/rbr-formats/src/ngp/mod.rs":  "d02b74e62379bd11309435bb4bf5214c9ecefe4996032b370b45dbc42fdf054a",
     "upstream/rbr-physics/src/mem/pages.rs":  "464c7eeefebb4cee381ef02e35127230805e75239153a278287273a79664ff6d",
-    "upstream/rbr-physics/src/mem.rs":  "69a94b8426abd1fc6c9fedb5ae8bfbe0fcd873dd13fafe6f7479f85023421409"
+    "upstream/rbr-physics/src/mem.rs":  "69a94b8426abd1fc6c9fedb5ae8bfbe0fcd873dd13fafe6f7479f85023421409",
+    "upstream/rbr-hybrid/src/lib.rs": "52cf04ed7b7ef6bfe55b5dff90298ccce6bcdda3397d6b2f0e261cf9a27926eb"
 }
