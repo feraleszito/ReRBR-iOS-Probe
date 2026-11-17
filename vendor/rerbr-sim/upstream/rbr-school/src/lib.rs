@@ -4,6 +4,8 @@
 //! where the C++ reconstruction disagrees with the exe, the exe wins, and each function names its deviation.
 //!
 //! Nothing here writes car or physics state: the bank observes the drive, emits events and ends it.
+#![allow(unknown_lints)]
+#![allow(clippy::all)]
 
 pub mod bank;
 pub mod explain;

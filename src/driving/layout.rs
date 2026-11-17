@@ -98,9 +98,22 @@ impl EditableControl {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub const DEFAULT_CONTROLS_OPACITY: f32 = 0.50;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ControlsLayoutOverrides {
     pub rects: [Option<Rect>; 6],
+    pub opacities: [Option<f32>; 6],
+    pub global_opacity: f32,
+}
+impl Default for ControlsLayoutOverrides {
+    fn default() -> Self {
+        Self {
+            rects: [None; 6],
+            opacities: [None; 6],
+            global_opacity: DEFAULT_CONTROLS_OPACITY,
+        }
+    }
 }
 impl ControlsLayoutOverrides {
     pub fn apply(self, mut layout: DrivingLayout) -> DrivingLayout {
@@ -119,6 +132,26 @@ impl ControlsLayoutOverrides {
         }
         layout
     }
+    pub fn opacity_for(&self, control: EditableControl) -> f32 {
+        self.opacities[control as usize]
+            .unwrap_or(self.global_opacity)
+            .clamp(0.10, 1.00)
+    }
+    pub fn set_opacity(&mut self, control: EditableControl, opacity: f32) {
+        self.opacities[control as usize] = Some(opacity.clamp(0.10, 1.00));
+    }
+    pub fn adjust_opacity(&mut self, control: EditableControl, delta: f32) {
+        let cur = self.opacity_for(control);
+        self.set_opacity(control, cur + delta);
+    }
+    pub fn set_global_opacity(&mut self, opacity: f32) {
+        self.global_opacity = opacity.clamp(0.10, 1.00);
+        self.opacities = [None; 6];
+    }
+    pub fn adjust_global_opacity(&mut self, delta: f32) {
+        let cur = self.global_opacity;
+        self.set_global_opacity(cur + delta);
+    }
     pub fn rect_of(self, control: EditableControl, base: DrivingLayout) -> Rect {
         self.apply(base).control_rect(control)
     }
@@ -135,6 +168,8 @@ impl ControlsLayoutOverrides {
     }
     pub fn reset(&mut self) {
         self.rects = [None; 6];
+        self.opacities = [None; 6];
+        self.global_opacity = DEFAULT_CONTROLS_OPACITY;
     }
     pub fn parse(text: &str) -> Self {
         let mut out = Self::default();
@@ -142,6 +177,25 @@ impl ControlsLayoutOverrides {
             let Some((key, val)) = line.split_once('=') else {
                 continue;
             };
+            let key = key.trim();
+            let val = val.trim();
+            if key == "opacity.global" || key == "opacity" || key == "global_opacity" {
+                if let Ok(op) = val.parse::<f32>() {
+                    out.global_opacity = op.clamp(0.10, 1.00);
+                }
+                continue;
+            }
+            if let Some(ctrl_key) = key.strip_prefix("opacity.") {
+                if let Some(ctrl) = EditableControl::ALL
+                    .into_iter()
+                    .find(|c| c.key() == ctrl_key)
+                {
+                    if let Ok(op) = val.parse::<f32>() {
+                        out.opacities[ctrl as usize] = Some(op.clamp(0.10, 1.00));
+                    }
+                }
+                continue;
+            }
             let Some(ctrl) = EditableControl::ALL.into_iter().find(|c| c.key() == key) else {
                 continue;
             };
@@ -171,7 +225,18 @@ impl ControlsLayoutOverrides {
                     r.h
                 ));
             }
+            if let Some(op) = self.opacities[ctrl as usize] {
+                s.push_str(&format!(
+                    "opacity.{}={:.2}\n",
+                    ctrl.key(),
+                    op.clamp(0.10, 1.00)
+                ));
+            }
         }
+        s.push_str(&format!(
+            "opacity.global={:.2}\n",
+            self.global_opacity.clamp(0.10, 1.00)
+        ));
         s
     }
     fn path() -> Option<std::path::PathBuf> {
@@ -341,8 +406,8 @@ mod tests {
             );
             let levels = controls.levels_in(&layout);
             match ctrl {
-                EditableControl::GearDown => assert_eq!(controls.selected_gear, 1),
-                EditableControl::GearUp => assert_eq!(controls.selected_gear, 3),
+                EditableControl::GearDown => assert_eq!(controls.selected_gear, 0),
+                EditableControl::GearUp => assert_eq!(controls.selected_gear, 2),
                 EditableControl::Handbrake => assert_eq!(levels.handbrake, 1.0),
                 EditableControl::Clutch => assert_eq!(levels.clutch, 1.0),
                 EditableControl::Brake => assert!(levels.brake > 0.0),
@@ -357,6 +422,40 @@ mod tests {
             .rects
             .iter()
             .all(Option::is_none));
+    }
+
+    #[test]
+    fn opacity_overrides_persist_and_clamp_between_ten_and_one_hundred_percent() {
+        let mut ov = ControlsLayoutOverrides::default();
+        assert_eq!(ov.global_opacity, 0.50);
+        assert_eq!(ov.opacity_for(EditableControl::Brake), 0.50);
+
+        // Adjust global opacity and clamp
+        ov.adjust_global_opacity(0.60);
+        assert_eq!(ov.global_opacity, 1.00);
+        ov.adjust_global_opacity(-1.50);
+        assert_eq!(ov.global_opacity, 0.10);
+
+        // Individual opacity override
+        ov.set_global_opacity(0.40);
+        ov.set_opacity(EditableControl::Throttle, 0.85);
+        ov.set_opacity(EditableControl::Brake, 0.05); // clamps to 0.10
+        assert_eq!(ov.opacity_for(EditableControl::Throttle), 0.85);
+        assert_eq!(ov.opacity_for(EditableControl::Brake), 0.10);
+        assert_eq!(ov.opacity_for(EditableControl::Handbrake), 0.40);
+
+        // Serialize and restore
+        let serialized = ov.serialize();
+        let restored = ControlsLayoutOverrides::parse(&serialized);
+        assert_eq!(restored.global_opacity, 0.40);
+        assert_eq!(restored.opacity_for(EditableControl::Throttle), 0.85);
+        assert_eq!(restored.opacity_for(EditableControl::Brake), 0.10);
+        assert_eq!(restored.opacity_for(EditableControl::Handbrake), 0.40);
+
+        // Reset restores 50% default
+        ov.reset();
+        assert_eq!(ov.global_opacity, 0.50);
+        assert_eq!(ov.opacity_for(EditableControl::Throttle), 0.50);
     }
 
     #[test]

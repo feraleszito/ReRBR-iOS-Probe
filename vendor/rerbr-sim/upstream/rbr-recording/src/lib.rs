@@ -20,6 +20,8 @@
 //! or a frame that runs past the end is reported with its byte offset, and the
 //! iterator stops after that error. Use [`std::fs::read`] to load a file first.
 //! The reader never panics on malformed input.
+#![allow(unknown_lints)]
+#![allow(clippy::all)]
 
 use std::fmt::{self, Display, Formatter};
 

@@ -170,7 +170,7 @@ impl Runtime {
         self.cockpit_error = None;
         self.steering_angle = 0.0;
         self.controls.clear();
-        self.controls.selected_gear = 2;
+        self.controls.selected_gear = 1;
         self.dragging_control = None;
         #[cfg(feature = "physics-stage")]
         {
@@ -314,7 +314,7 @@ impl Runtime {
                 self.camera = None;
                 self.scene_error = None;
                 self.controls.clear();
-                self.controls.selected_gear = 2;
+                self.controls.selected_gear = 1;
                 self.loading_started = Instant::now();
                 self.race.prepare();
                 self.menu.show(menu::Page::Loading);
@@ -508,6 +508,20 @@ impl Runtime {
                 self.controls_layout
                     .resize(self.selected_control, base, 0.02, 0.02);
             }
+            CtrlOpacityDown => {
+                self.controls_layout
+                    .adjust_opacity(self.selected_control, -0.05);
+            }
+            CtrlOpacityUp => {
+                self.controls_layout
+                    .adjust_opacity(self.selected_control, 0.05);
+            }
+            GlobalOpacityDown => {
+                self.controls_layout.adjust_global_opacity(-0.05);
+            }
+            GlobalOpacityUp => {
+                self.controls_layout.adjust_global_opacity(0.05);
+            }
             CtrlSave => {
                 self.controls_layout.save();
                 self.message = Some("DISTRIBUCIÓN DE CONTROLES GUARDADA".into());
@@ -615,14 +629,16 @@ impl Runtime {
             && self.scene_error.is_none()
             && state.error.is_none();
         if self.menu.page == menu::Page::Loading && healthy {
-            self.race.ready(now);
+            self.race.start_presentation(now);
             self.menu.resume();
             self.message = None;
         }
         let active = self.menu.page == menu::Page::Driving && steering_ready && healthy;
         self.race.tick(now, active);
-        // No physical substep is scheduled during countdown, even on slopes.
-        state.paused = !active || self.race.phase != race::Phase::Driving;
+        // Physics and engine revving are active during countdown and driving; paused during presentation and menus.
+        state.paused = !active
+            || (self.race.phase != race::Phase::Driving
+                && self.race.phase != race::Phase::Countdown);
         if state.paused {
             self.controls.clear();
         }
@@ -662,13 +678,18 @@ impl Runtime {
         self.steering_angle = a.steering_angle + (b.steering_angle - a.steering_angle) * alpha;
         let position =
             swap.transform_point3(Vec3::from(a.position).lerp(Vec3::from(b.position), alpha));
-        let forward =
+        let car_forward =
             Vec3::new(-models[0].z_axis.x, 0.0, -models[0].z_axis.z).normalize_or(Vec3::NEG_Z);
-        let forward = self.camera.map_or(forward, |c| {
+        if self.race.phase == race::Phase::Countdown {
+            self.race
+                .record_start_origin(position.to_array(), car_forward.to_array());
+            self.race.check_jump_start(now, position.to_array());
+        }
+        let forward = self.camera.map_or(car_forward, |c| {
             Vec3::new(c.target.x - c.eye.x, 0.0, c.target.z - c.eye.z)
-                .normalize_or(forward)
-                .lerp(forward, (1.0 - (-seconds / 0.1).exp()) as f32)
-                .normalize_or(forward)
+                .normalize_or(car_forward)
+                .lerp(car_forward, (1.0 - (-seconds / 0.1).exp()) as f32)
+                .normalize_or(car_forward)
         });
         if !path.supports_driving(position) {
             audio::set_paused(true);
@@ -691,33 +712,41 @@ impl Runtime {
             self.view == cameras::View::CockpitFallback && self.cockpit_ready,
         );
         #[cfg(feature = "physics-stage")]
-        if let Some(base) = self
-            .mounts
-            .and_then(|m| m.camera_with_cockpit(self.view, models[0], self.cockpit_node))
-        {
-            let ov = self.camera_overrides.for_view(self.view);
-            let edited = ov.apply(base, models[0]);
-            let selected = if path.camera_clear(edited, ov.fov_degrees, self.drawable_size) {
-                Some((edited, ov.fov_degrees))
-            } else if path.camera_clear(base, 65.0, self.drawable_size) {
-                Some((base, 65.0))
-            } else {
-                None
-            };
-            if let Some((camera, fov)) = selected {
-                self.effective_fov = fov;
-                return Some(Frame {
-                    models,
-                    camera,
-                    boom: 0.0,
-                    max_wheel_travel: b.wheel_travel.iter().map(|x| x.abs()).fold(0.0, f32::max),
-                    min_wheel_clearance: 0.0,
-                });
+        if self.race.phase != race::Phase::Presentation {
+            if let Some(base) = self
+                .mounts
+                .and_then(|m| m.camera_with_cockpit(self.view, models[0], self.cockpit_node))
+            {
+                let ov = self.camera_overrides.for_view(self.view);
+                let edited = ov.apply(base, models[0]);
+                let selected = if path.camera_clear(edited, ov.fov_degrees, self.drawable_size) {
+                    Some((edited, ov.fov_degrees))
+                } else if path.camera_clear(base, 65.0, self.drawable_size) {
+                    Some((base, 65.0))
+                } else {
+                    None
+                };
+                if let Some((camera, fov)) = selected {
+                    self.effective_fov = fov;
+                    return Some(Frame {
+                        models,
+                        camera,
+                        boom: 0.0,
+                        max_wheel_travel: b
+                            .wheel_travel
+                            .iter()
+                            .map(|x| x.abs())
+                            .fold(0.0, f32::max),
+                        min_wheel_clearance: 0.0,
+                    });
+                }
+                // Keep physics running and use the checked chase view if a mount is underground.
+                self.view = cameras::View::Chase;
+                self.camera = None;
+                eprintln!(
+                    "physics-stage CAMERA: mount underground/unsupported; returning to chase"
+                );
             }
-            // Keep physics running and use the checked chase view if a mount is underground.
-            self.view = cameras::View::Chase;
-            self.camera = None;
-            eprintln!("physics-stage CAMERA: mount underground/unsupported; returning to chase");
         }
         match path.chase_camera(target, forward) {
             Ok((mut camera, boom)) => {
@@ -732,6 +761,21 @@ impl Runtime {
                         camera = edited;
                         self.effective_fov = ov.fov_degrees;
                     }
+                }
+                if let Some(progress) = self.race.presentation_progress() {
+                    let cinematic =
+                        cameras::presentation_camera(target, car_forward, progress, camera);
+                    return Some(Frame {
+                        models,
+                        camera: cinematic,
+                        boom,
+                        max_wheel_travel: b
+                            .wheel_travel
+                            .iter()
+                            .map(|x| x.abs())
+                            .fold(0.0, f32::max),
+                        min_wheel_clearance: 0.0,
+                    });
                 }
                 Some(Frame {
                     models,
@@ -776,6 +820,8 @@ impl Runtime {
             diagnostics: self.diagnostics,
             minimal_hud: self.minimal_hud,
             invert_pedals: self.controls.invert_pedals,
+            ctrl_opacity: self.controls_layout.opacity_for(self.selected_control),
+            global_opacity: self.controls_layout.global_opacity,
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
@@ -842,13 +888,14 @@ impl Runtime {
         for ctrl in layout::EditableControl::ALL {
             let rect = layout.control_rect(ctrl);
             let selected = ctrl == self.selected_control;
+            let op = self.controls_layout.opacity_for(ctrl);
             ui::panel(
                 canvas,
                 rect,
-                if selected { PANEL_ACTIVE } else { PANEL_DEEP },
-                if selected { ACCENT } else { INFO },
+                ui::with_alpha(if selected { PANEL_ACTIVE } else { PANEL_DEEP }, op),
+                ui::with_alpha(if selected { ACCENT } else { INFO }, op),
             );
-            ui::text_center(canvas, rect, ctrl.label(), 0.8, TEXT);
+            ui::text_center(canvas, rect, ctrl.label(), 0.8, ui::with_alpha(TEXT, op));
         }
     }
     fn draw_countdown_and_timer(&self, canvas: &mut Canvas) {
@@ -893,12 +940,37 @@ impl Runtime {
     }
     fn draw_side_controls(&self, canvas: &mut Canvas, layout: &DrivingLayout) {
         let levels = self.controls.levels_in(layout);
-        draw_control(canvas, layout.handbrake, "HB", levels.handbrake);
-        draw_control(canvas, layout.clutch, "CLUTCH", levels.clutch);
-        draw_control(canvas, layout.gear_down, "GEAR -", 0.0);
-        draw_control(canvas, layout.gear_up, "GEAR +", 0.0);
-        draw_control(canvas, layout.brake, "BRAKE", levels.brake);
-        draw_control(canvas, layout.throttle, "THROTTLE", levels.throttle);
+        let hb_op = self
+            .controls_layout
+            .opacity_for(layout::EditableControl::Handbrake);
+        let clutch_op = self
+            .controls_layout
+            .opacity_for(layout::EditableControl::Clutch);
+        let gdown_op = self
+            .controls_layout
+            .opacity_for(layout::EditableControl::GearDown);
+        let gup_op = self
+            .controls_layout
+            .opacity_for(layout::EditableControl::GearUp);
+        let brake_op = self
+            .controls_layout
+            .opacity_for(layout::EditableControl::Brake);
+        let throttle_op = self
+            .controls_layout
+            .opacity_for(layout::EditableControl::Throttle);
+
+        draw_control(canvas, layout.handbrake, "HB", levels.handbrake, hb_op);
+        draw_control(canvas, layout.clutch, "CLUTCH", levels.clutch, clutch_op);
+        draw_control(canvas, layout.gear_down, "GEAR -", 0.0, gdown_op);
+        draw_control(canvas, layout.gear_up, "GEAR +", 0.0, gup_op);
+        draw_control(canvas, layout.brake, "BRAKE", levels.brake, brake_op);
+        draw_control(
+            canvas,
+            layout.throttle,
+            "THROTTLE",
+            levels.throttle,
+            throttle_op,
+        );
     }
     fn draw_telemetry(&self, canvas: &mut Canvas, layout: &DrivingLayout, state: &worker::Shared) {
         let rect = layout.telemetry;
@@ -911,6 +983,12 @@ impl Runtime {
             self.cpu_ms,
             self.footprint.unwrap_or(0) as f64 / 1048576.0
         )];
+        if self.selection.vehicle.is_experimental() {
+            lines.insert(
+                0,
+                format!("VEHICLE: {} (EXPERIMENTAL)", self.selection.vehicle.name),
+            );
+        }
         if let Some(status) = &state.physics_status {
             lines.extend(ui::wrap(status, 34));
         }
@@ -948,6 +1026,15 @@ impl Runtime {
     }
     fn draw_banners(&self, canvas: &mut Canvas, layout: &DrivingLayout, state: &worker::Shared) {
         let mut banners: Vec<(String, [u8; 4])> = Vec::new();
+        if self.race.false_start_visible(Instant::now()) {
+            banners.push(("FALSE START +10s".into(), BAD));
+        }
+        if self.selection.vehicle.is_experimental() {
+            banners.push((
+                format!("EXPERIMENTAL: {}", self.selection.vehicle.name),
+                WARN,
+            ));
+        }
         if let Some(error) = state.error.as_ref().or(self.scene_error.as_ref()) {
             banners.push((format!("ERROR: {error}"), BAD));
         } else if state.rest.is_none() {
@@ -958,7 +1045,7 @@ impl Runtime {
         if !self.cockpit_ready && self.camera_label() == "COCKPIT" {
             banners.push(("COCKPIT ASSETS MISSING - EXTERIOR VIEW".into(), WARN));
         }
-        for (index, (text, color)) in banners.iter().take(2).enumerate() {
+        for (index, (text, color)) in banners.iter().take(3).enumerate() {
             let rect = Rect::new(
                 0.18,
                 layout.pause.bottom() + 0.018 + index as f32 * 0.040,
@@ -1034,26 +1121,38 @@ fn draw_cluster(canvas: &mut Canvas, layout: &DrivingLayout, sample: &Sample) {
         );
     }
 }
-fn draw_control(canvas: &mut Canvas, rect: Rect, label: &str, level: f32) {
+fn draw_control(canvas: &mut Canvas, rect: Rect, label: &str, level: f32, opacity: f32) {
     let active = level > 0.0;
-    ui::fill(canvas, rect, PANEL_DEEP);
+    ui::fill(canvas, rect, ui::with_alpha(PANEL_DEEP, opacity));
     let (x, y, w, h) = ui::px(rect, canvas);
     if active {
         let fill_height = (h - 4.0) * level.clamp(0.0, 1.0);
+        let fill_alpha = (90.0 * opacity.clamp(0.0, 1.0)).round() as u8;
         canvas.rect(
             x + 2.0,
             y + h - 2.0 - fill_height,
             w - 4.0,
             fill_height,
-            [240, 184, 80, 90],
+            [240, 184, 80, fill_alpha],
         );
     }
-    ui::frame(canvas, rect, if active { ACCENT } else { LINE }, 1.5);
-    ui::text_center(canvas, rect, label, 0.85, TEXT);
+    ui::frame(
+        canvas,
+        rect,
+        ui::with_alpha(if active { ACCENT } else { LINE }, opacity),
+        1.5,
+    );
+    ui::text_center(canvas, rect, label, 0.85, ui::with_alpha(TEXT, opacity));
     if active && (label == "BRAKE" || label == "THROTTLE") {
         let value = format!("{:.0}%", level * 100.0);
         let (cx, cy, _w, _h) = ui::px(rect, canvas);
-        canvas.text(cx + 10.0, cy + h - 17.0, &value, 0.6, ACCENT);
+        canvas.text(
+            cx + 10.0,
+            cy + h - 17.0,
+            &value,
+            0.6,
+            ui::with_alpha(ACCENT, opacity),
+        );
     }
 }
 /// Same mirror/pose/model composition as reRBR playback/frames.rs and playback::model_to_stage.
@@ -1239,39 +1338,49 @@ mod reload_tests {
         let t0 = Instant::now();
         let (_, _, paused) = app.sync_race_state(t0, 1.0 / 60.0, &layout, true);
         assert_eq!(app.menu.page, menu::Page::Driving);
+        assert_eq!(app.race.phase, race::Phase::Presentation);
+        assert!(paused, "physics must remain paused during presentation");
+        assert_eq!(app.stage_elapsed_secs(), None);
+
+        // Advancing past 3.5s presentation starts countdown with active physics
+        let t1 = t0 + Duration::from_millis(3500);
+        let (_, _, paused) = app.sync_race_state(t1, 1.0 / 60.0, &layout, true);
         assert_eq!(app.race.phase, race::Phase::Countdown);
-        assert!(paused, "physics must remain paused while countdown starts");
+        assert!(
+            !paused,
+            "physics is active during countdown so engine can rev"
+        );
         assert_eq!(app.race.countdown(), Some(5));
         assert_eq!(app.stage_elapsed_secs(), None);
 
-        // Mid-countdown pause and resume preserves exact countdown progress and paused physics.
-        let (_, _, paused) =
-            app.sync_race_state(t0 + Duration::from_secs(2), 1.0 / 60.0, &layout, true);
-        assert!(paused);
+        // Mid-countdown pause and resume preserves exact countdown progress
+        let t2 = t1 + Duration::from_secs(2);
+        let (_, _, paused) = app.sync_race_state(t2, 1.0 / 60.0, &layout, true);
+        assert!(!paused);
         assert_eq!(app.race.countdown(), Some(3));
         app.pause();
         assert_eq!(app.menu.page, menu::Page::Paused);
         let (_, _, paused) =
-            app.sync_race_state(t0 + Duration::from_secs(50), 1.0 / 60.0, &layout, true);
+            app.sync_race_state(t2 + Duration::from_secs(50), 1.0 / 60.0, &layout, true);
         assert!(paused);
         assert_eq!(app.race.countdown(), Some(3));
 
         app.apply_command(menu::Command::Start);
         assert_eq!(app.menu.page, menu::Page::Driving);
-        let (_, _, paused) =
-            app.sync_race_state(t0 + Duration::from_secs(51), 1.0 / 60.0, &layout, true);
-        assert!(paused);
+        let t3 = t2 + Duration::from_secs(51);
+        let (_, _, paused) = app.sync_race_state(t3, 1.0 / 60.0, &layout, true);
+        assert!(!paused);
         assert_eq!(app.race.countdown(), Some(3));
 
-        // Advancing 3 more active seconds hits GO! and unpauses physics.
-        let (_, _, paused) =
-            app.sync_race_state(t0 + Duration::from_secs(54), 1.0 / 60.0, &layout, true);
-        assert!(!paused, "physics must unpause once countdown hits GO");
+        // Advancing 3 more active seconds hits GO!
+        let t4 = t3 + Duration::from_secs(3);
+        let (_, _, paused) = app.sync_race_state(t4, 1.0 / 60.0, &layout, true);
+        assert!(!paused, "physics continues running once countdown hits GO");
         assert_eq!(app.race.phase, race::Phase::Driving);
         assert_eq!(app.stage_elapsed_secs(), Some(0.0));
 
         let (_, _, paused) =
-            app.sync_race_state(t0 + Duration::from_secs(56), 1.0 / 60.0, &layout, true);
+            app.sync_race_state(t4 + Duration::from_secs(2), 1.0 / 60.0, &layout, true);
         assert!(!paused);
         assert_eq!(app.stage_elapsed_secs(), Some(2.0));
     }
@@ -1329,7 +1438,7 @@ mod reload_tests {
         let moved = app.controls_layout.apply(base).throttle;
         assert!((moved.center_x() - 0.5).abs() < 0.02);
         assert_eq!(app.controls.levels().throttle, 0.0);
-        assert_eq!(app.controls.selected_gear, 2);
+        assert_eq!(app.controls.selected_gear, 1);
 
         // Even if a control overlaps the top editor panel, tapping the panel button wins by draw order.
         app.controls_layout.set_center(

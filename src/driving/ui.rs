@@ -16,6 +16,11 @@ pub const INFO: [u8; 4] = [130, 180, 235, 255];
 
 pub const BACKDROP: [u8; 4] = [8, 10, 14, 255];
 
+pub fn with_alpha(color: [u8; 4], opacity: f32) -> [u8; 4] {
+    let a = ((color[3] as f32) * opacity.clamp(0.0, 1.0)).round() as u8;
+    [color[0], color[1], color[2], a]
+}
+
 pub fn px(r: Rect, canvas: &Canvas) -> (f32, f32, f32, f32) {
     (
         r.x * 640.0,

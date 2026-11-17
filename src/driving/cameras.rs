@@ -301,9 +301,69 @@ impl CameraOverrides {
         }
     }
 }
+/// Smooth cinematic presentation camera sweeping around the rally car at stage start.
+/// At progress = 1.0, cleanly eases into the target chase camera.
+pub fn presentation_camera(
+    target: Vec3,
+    car_forward: Vec3,
+    progress: f32,
+    chase_camera: Camera,
+) -> Camera {
+    let t = progress.clamp(0.0, 1.0);
+    // Smoothstep: s = 3*t^2 - 2*t^3
+    let s = t * t * (3.0 - 2.0 * t);
+    let car_fwd = Vec3::new(car_forward.x, 0.0, car_forward.z).normalize_or(Vec3::NEG_Z);
+    let car_right = Vec3::new(car_fwd.z, 0.0, -car_fwd.x).normalize_or(Vec3::X);
+
+    // Initial low-slung front-three-quarter presentation view (RBR rally presentation feel)
+    let start_offset = car_fwd * 3.6 + car_right * 3.0 + Vec3::Y * 0.45;
+    let start_eye = target + start_offset;
+    let start_target = target + car_fwd * 0.75 + Vec3::Y * 0.15;
+
+    let eye = start_eye.lerp(chase_camera.eye, s);
+    let cam_target = start_target.lerp(chase_camera.target, s);
+    let up = Vec3::Y.lerp(chase_camera.up, s).normalize_or(Vec3::Y);
+
+    Camera {
+        eye,
+        target: cam_target,
+        up,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_camera_smoothly_eases_into_chase_camera() {
+        let chase = Camera {
+            eye: Vec3::new(0.0, 2.0, 5.0),
+            target: Vec3::new(0.0, 0.8, 0.0),
+            up: Vec3::Y,
+        };
+        let car_target = Vec3::new(0.0, 0.5, 0.0);
+        let car_forward = Vec3::NEG_Z;
+
+        let start = presentation_camera(car_target, car_forward, 0.0, chase);
+        assert!(start.eye.is_finite() && start.target.is_finite());
+        // Front-side perspective at t=0
+        assert!(
+            start.eye.z < car_target.z,
+            "start eye should be in front of car"
+        );
+
+        let mid = presentation_camera(car_target, car_forward, 0.5, chase);
+        assert!(mid.eye.is_finite() && mid.target.is_finite());
+
+        let end = presentation_camera(car_target, car_forward, 1.0, chase);
+        assert!((end.eye.x - chase.eye.x).abs() < 1e-4);
+        assert!((end.eye.y - chase.eye.y).abs() < 1e-4);
+        assert!((end.eye.z - chase.eye.z).abs() < 1e-4);
+        assert!((end.target.x - chase.target.x).abs() < 1e-4);
+        assert!((end.target.y - chase.target.y).abs() < 1e-4);
+        assert!((end.target.z - chase.target.z).abs() < 1e-4);
+    }
     #[test]
     fn every_position_and_target_axis_is_local_persistent_and_resettable() {
         let base = Camera {

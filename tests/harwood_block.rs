@@ -1,4 +1,6 @@
 #![cfg(feature = "harwood-block")]
+#![allow(unknown_lints)]
+#![allow(clippy::chunks_exact_to_as_chunks)]
 
 use rerbr_asset_formats::{dds, lbs};
 use rerbr_probe::harwood::{self, mesh, texture::upload_plan, Camera};

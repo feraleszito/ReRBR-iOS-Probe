@@ -1,4 +1,6 @@
 //! Readers for Richard Burns Rally (2004) data file formats.
+#![allow(unknown_lints)]
+#![allow(clippy::all)]
 //!
 //! The game's `.rbz` archives are plain ZIP files (stored + deflate), read by
 //! the game through a statically linked minizip `unzip.c`. See

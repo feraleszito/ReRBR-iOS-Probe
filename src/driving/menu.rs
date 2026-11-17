@@ -74,6 +74,10 @@ pub enum Command {
     CtrlNext,
     CtrlSizeDown,
     CtrlSizeUp,
+    CtrlOpacityDown,
+    CtrlOpacityUp,
+    GlobalOpacityDown,
+    GlobalOpacityUp,
     CtrlSave,
     CtrlReset,
 }
@@ -161,6 +165,8 @@ pub struct Context<'a> {
     pub diagnostics: bool,
     pub minimal_hud: bool,
     pub invert_pedals: bool,
+    pub ctrl_opacity: f32,
+    pub global_opacity: f32,
 }
 
 #[derive(Debug, Default)]
@@ -277,8 +283,17 @@ impl Menu {
                     .iter()
                     .enumerate()
                     .map(|(index, entry)| {
+                        let exp_tag = if entry.descriptor.is_experimental() {
+                            " [EXPERIMENTAL]"
+                        } else {
+                            ""
+                        };
                         Row::action(
-                            format!("{} - {}", entry.descriptor.name, entry.state.label()),
+                            format!(
+                                "{}{exp_tag} - {}",
+                                entry.descriptor.name,
+                                entry.state.label()
+                            ),
                             Command::OpenVehicle(index),
                         )
                     })
@@ -292,6 +307,11 @@ impl Menu {
                 let state = entry.map_or(vehicle_state, |e| e.state);
                 let supported = inspected.validate_current_backend().is_ok();
                 let mut rows = Vec::new();
+                if inspected.is_experimental() {
+                    rows.push(Row::info("PERFIL", "MODO EXPERIMENTAL (SLOT RBR ORIGINAL)"));
+                } else if inspected.is_validated_reference() {
+                    rows.push(Row::info("PERFIL", "VEHÍCULO DE REFERENCIA VALIDADO"));
+                }
                 if state == EntryState::Selected {
                     rows.push(Row::info("SELECCIÓN", "SELECCIONADO"));
                 } else {
@@ -299,7 +319,7 @@ impl Menu {
                         label: if supported {
                             "SELECCIONAR COCHE".into()
                         } else {
-                            "NO VALIDADO EN VIVO (NGP 7.4)".into()
+                            "NO DISPONIBLE / REQUIERE NGP (BLOQUEADO)".into()
                         },
                         kind: RowKind::Action {
                             command: Command::SelectVehicle(self.inspected_vehicle),
@@ -500,6 +520,18 @@ impl Menu {
                     Command::CtrlNext,
                 ),
                 Row::stepper("TAMAÑO", Command::CtrlSizeDown, Command::CtrlSizeUp, "±2%"),
+                Row::stepper(
+                    "OPACIDAD",
+                    Command::CtrlOpacityDown,
+                    Command::CtrlOpacityUp,
+                    format!("{:.0}%", ctx.ctrl_opacity * 100.0),
+                ),
+                Row::stepper(
+                    "OPACIDAD TODOS",
+                    Command::GlobalOpacityDown,
+                    Command::GlobalOpacityUp,
+                    format!("{:.0}%", ctx.global_opacity * 100.0),
+                ),
                 Row::action("GUARDAR", Command::CtrlSave),
                 Row::action("RESTABLECER", Command::CtrlReset),
                 Row::action("VOLVER", Command::Back),
@@ -1081,6 +1113,8 @@ mod tests {
             diagnostics: false,
             minimal_hud: false,
             invert_pedals: false,
+            ctrl_opacity: 0.5,
+            global_opacity: 0.5,
         }
     }
 
@@ -1408,7 +1442,7 @@ mod tests {
                 enabled
             } if enabled == cfg!(feature = "physics-stage")
         )));
-        menu.inspected_vehicle = 1;
+        menu.inspected_vehicle = 8;
         menu.page = Page::GarageDetail;
         let car_detail = menu.rows(&ctx);
         assert!(car_detail

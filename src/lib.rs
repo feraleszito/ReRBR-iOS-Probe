@@ -1,5 +1,7 @@
 //! The native executable calls this library on the main thread, before UIApplicationMain.
 //! Winit owns UIKit's application loop. There is no second app delegate or SwiftUI loop.
+#![allow(unknown_lints)]
+#![allow(clippy::chunks_exact_to_as_chunks)]
 
 pub use rerbr_content as content;
 use std::sync::Arc;

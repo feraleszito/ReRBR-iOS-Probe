@@ -1,4 +1,6 @@
 #![cfg(feature = "rerbr-3d")]
+#![allow(unknown_lints)]
+#![allow(clippy::chunks_exact_to_as_chunks)]
 
 #[path = "../src/scene_geometry.rs"]
 mod scene_geometry;

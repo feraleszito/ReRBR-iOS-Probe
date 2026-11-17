@@ -114,11 +114,31 @@ impl VehicleDescriptor {
         }
         Ok(())
     }
-    /// Temporary backend compatibility gate, separate from manifest/path validation.
+    pub fn is_original_rbr(&self) -> bool {
+        Self::original_rbr_presets().iter().any(|preset| {
+            self.id == preset.id
+                && self.original_slot == preset.original_slot
+                && self.name == preset.name
+                && self.forward_gears == preset.forward_gears
+                && self.model == preset.model
+                && self.parts == preset.parts
+        })
+    }
+    pub fn is_validated_reference(&self) -> bool {
+        self.id == "toyota-corolla-wrc"
+    }
+    pub fn is_experimental(&self) -> bool {
+        self.is_original_rbr() && !self.is_validated_reference()
+    }
+    /// Backend compatibility gate: accepts all 8 retail RBR cars (with non-Corolla in experimental mode)
+    /// while blocking Ford Focus 2006 and external unvalidated mods.
     pub fn validate_current_backend(&self) -> Result<(), String> {
         self.validate_schema()?;
-        if self != &Self::default() {
-            return Err(format!("unsupported vehicle profile '{}'; this milestone validates only the original Corolla", self.id));
+        if !self.is_original_rbr() {
+            return Err(format!(
+                "unsupported vehicle profile '{}'; only original RBR retail vehicles are supported",
+                self.id
+            ));
         }
         Ok(())
     }
@@ -433,16 +453,15 @@ mod tests {
         assert!(!selection.vehicle.allows("Cars/OTHER/other.sgc"));
     }
     #[test]
-    fn original_slots_are_unique_and_only_existing_corolla_is_accepted() {
+    fn original_slots_are_unique_and_original_cars_supported_with_focus_blocked() {
         let cars = VehicleDescriptor::original_rbr_presets();
         let mut slots = std::collections::BTreeSet::new();
         for car in &cars {
             car.validate_schema().unwrap();
             assert!(slots.insert(car.original_slot));
-            assert_eq!(
-                car.validate_current_backend().is_ok(),
-                car == &VehicleDescriptor::default()
-            );
+            assert!(car.validate_current_backend().is_ok());
+            assert_eq!(car.is_validated_reference(), car.id == "toyota-corolla-wrc");
+            assert_eq!(car.is_experimental(), car.id != "toyota-corolla-wrc");
         }
         assert_eq!(
             slots.into_iter().collect::<Vec<_>>(),

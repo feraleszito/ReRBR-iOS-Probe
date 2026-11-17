@@ -2,6 +2,8 @@
 //! (`rbr_physics::ngp::engine::torque`) in NGP's engine wrapper (`rbr_hybrid::ngp::engine`). [`model`] builds one by
 //! name for a car's [`Params`]; the host builds a fresh one at each start, and steps it once per physics step with
 //! that step's [`Inputs`].
+#![allow(unknown_lints)]
+#![allow(clippy::all)]
 
 pub mod bench;
 pub mod calibrate;

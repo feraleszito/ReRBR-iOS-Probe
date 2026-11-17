@@ -64,7 +64,7 @@ impl Default for Controls {
             sensitivity: 2.0,
             dead_zone: 0.03,
             filtered: 0.0,
-            selected_gear: 2,
+            selected_gear: 1,
             automatic: false,
             invert_pedals: false,
             forward_gears: rerbr_content::VehicleDescriptor::default().forward_gears,
@@ -82,7 +82,7 @@ impl Controls {
         vehicle.validate_schema()?;
         self.clear();
         self.forward_gears = vehicle.forward_gears;
-        self.selected_gear = 2;
+        self.selected_gear = 1;
         Ok(())
     }
     pub fn clear(&mut self) {
@@ -202,7 +202,7 @@ mod tests {
         let layout = ov.apply(DrivingLayout::default());
         let mut c = Controls::new();
         c.touch_layout(&layout, 1, 0.12, 0.63, true, false);
-        assert_eq!(c.selected_gear, 2, "visible throttle covers gear-down");
+        assert_eq!(c.selected_gear, 1, "visible throttle covers gear-down");
         assert!(c.levels_in(&layout).throttle > 0.0);
         for inverted in [false, true] {
             c.clear();
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn shifts_are_edge_triggered_bounded_and_independent_of_pedals() {
         let mut c = Controls::new();
-        for expected in [3, 4, 5, 6, 7, 7] {
+        for expected in [2, 3, 4, 5, 6, 7, 7] {
             c.touch(1, 0.9, 0.63, true, false);
             c.touch(1, 0.9, 0.63, false, false);
             let input = c.input(0.0, 0.02);
@@ -282,7 +282,7 @@ mod tests {
         let mut c = Controls::new();
         c.touch_layout(&layout, 9, 0.05, 0.03, true, false);
         c.touch_layout(&layout, 9, 0.05, 0.03, false, true);
-        assert_eq!(c.input(0.0, 0.02).gear, Some(2));
+        assert_eq!(c.input(0.0, 0.02).gear, Some(1));
         assert_eq!(c.levels().brake, 0.0);
         assert_eq!(c.levels().throttle, 0.0);
     }

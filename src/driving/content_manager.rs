@@ -392,7 +392,12 @@ mod tests {
         let catalog = Catalog::descriptors(&selection);
         assert_eq!(catalog.vehicles.len(), 9);
         assert_eq!(catalog.vehicles[0].state, EntryState::Selected);
-        assert_eq!(catalog.vehicles[1].state, EntryState::Unsupported);
+        for v in &catalog.vehicles[1..8] {
+            assert_eq!(v.state, EntryState::Installed);
+            assert!(v.descriptor.is_experimental());
+        }
+        assert_eq!(catalog.vehicles[8].state, EntryState::Unsupported);
+        assert!(!catalog.vehicles[8].descriptor.is_original_rbr());
         assert_eq!(catalog.stages.len(), 4);
         assert_eq!(catalog.stages[0].state, EntryState::Selected);
         assert!(!catalog.inspected);
