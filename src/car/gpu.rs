@@ -232,7 +232,7 @@ impl Gpu {
         })
     }
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(
+    pub fn draw_with_fov(
         &self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -243,13 +243,18 @@ impl Gpu {
         frame: &Frame,
         interior: bool,
         steering_angle: f32,
+        fov_degrees: Option<f32>,
     ) {
-        let mut bytes: Vec<_> =
-            super::placement::view_projection(frame.camera, size.0 as f32 / size.1 as f32)
-                .to_cols_array()
-                .into_iter()
-                .flat_map(f32::to_ne_bytes)
-                .collect();
+        let aspect = size.0 as f32 / size.1 as f32;
+        let vp = fov_degrees.map_or_else(
+            || super::placement::view_projection(frame.camera, aspect),
+            |f| super::placement::view_projection_with_fov(frame.camera, aspect, f),
+        );
+        let mut bytes: Vec<_> = vp
+            .to_cols_array()
+            .into_iter()
+            .flat_map(f32::to_ne_bytes)
+            .collect();
         for model in frame.models {
             bytes.extend(model.to_cols_array().into_iter().flat_map(f32::to_ne_bytes));
         }

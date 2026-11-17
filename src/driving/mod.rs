@@ -1,13 +1,14 @@
 //! Original physics-owned driving presentation, menus and session controls.
 pub mod audio;
-#[cfg(feature = "physics-stage")]
 pub mod cameras;
 pub mod content_manager;
 pub mod controls;
 pub mod layout;
+pub(crate) mod loading;
 pub mod menu;
 #[cfg(test)]
 mod private_tests;
+mod race;
 mod ui;
 mod worker;
 use crate::{
@@ -29,14 +30,30 @@ use std::time::{Duration, Instant};
 use ui::{ACCENT, BAD, INFO, LINE, PANEL, PANEL_ACTIVE, PANEL_DEEP, TEXT, WARN};
 use winit::event::{Touch, TouchPhase};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SceneAction {
+    Load(Box<rerbr_content::Selection>),
+    Unload,
+}
+
 pub struct Runtime {
     #[cfg(feature = "physics-stage")]
     pub view: cameras::View,
     #[cfg(feature = "physics-stage")]
     pub mounts: Option<cameras::Mounts>,
+    #[cfg(feature = "physics-stage")]
+    pub camera_overrides: cameras::CameraOverrides,
+    pub controls_layout: layout::ControlsLayoutOverrides,
+    pub selected_control: layout::EditableControl,
+    dragging_control: Option<(u64, layout::EditableControl, f32, f32)>,
+    drawable_size: (u32, u32),
+    effective_fov: f32,
     worker: worker::Worker,
     selection: rerbr_content::Selection,
-    pending_scene_reload: Option<rerbr_content::Selection>,
+    pending_scene_action: Option<SceneAction>,
+    race: race::Clock,
+    loading_started: Instant,
+
     pub controls: Controls,
     diagnostics: bool,
     minimal_hud: bool,
@@ -85,10 +102,20 @@ impl Runtime {
             view: cameras::View::from_index(settings.camera),
             #[cfg(feature = "physics-stage")]
             mounts: None,
-            worker: worker::Worker::new_selected(selection.clone(), false),
+            #[cfg(feature = "physics-stage")]
+            camera_overrides: cameras::CameraOverrides::load(),
+            controls_layout: layout::ControlsLayoutOverrides::load(),
+            selected_control: layout::EditableControl::Brake,
+            dragging_control: None,
+            drawable_size: (1024, 768),
+            effective_fov: 65.0,
+            worker: worker::Worker::idle(),
             content: Catalog::scan(&selection),
             selection,
-            pending_scene_reload: None,
+            pending_scene_action: None,
+            race: race::Clock::default(),
+            loading_started: Instant::now(),
+
             controls,
             diagnostics: settings.diagnostics,
             minimal_hud: settings.minimal_hud,
@@ -112,14 +139,43 @@ impl Runtime {
             footprint_at: Instant::now(),
         }
     }
+    pub fn take_scene_action(&mut self) -> Option<SceneAction> {
+        self.pending_scene_action.take()
+    }
+    pub fn camera_fov_degrees(&self) -> f32 {
+        self.effective_fov
+    }
+    fn effective_layout(&self, size: (u32, u32)) -> DrivingLayout {
+        self.controls_layout.apply(DrivingLayout::for_size(size))
+    }
+    fn stage_elapsed_secs(&self) -> Option<f64> {
+        self.race.seconds()
+    }
     pub fn install(&mut self, geometry: &Geometry) {
-        self.pivots = Some(geometry.pivots);
+        self.install_pivots(geometry.pivots);
+    }
+    pub(crate) fn install_pivots(&mut self, pivots: [Vec3; 4]) {
+        self.pivots = Some(pivots);
     }
     pub fn selection(&self) -> &rerbr_content::Selection {
         &self.selection
     }
-    pub fn take_pending_scene_reload(&mut self) -> Option<rerbr_content::Selection> {
-        self.pending_scene_reload.take()
+    fn clear_scene_pose(&mut self) {
+        self.pivots = None;
+        self.offset = None;
+        self.camera = None;
+        self.scene_error = None;
+        self.cockpit_node = None;
+        self.cockpit_ready = false;
+        self.cockpit_error = None;
+        self.steering_angle = 0.0;
+        self.controls.clear();
+        self.controls.selected_gear = 2;
+        self.dragging_control = None;
+        #[cfg(feature = "physics-stage")]
+        {
+            self.mounts = None;
+        }
     }
     pub fn configure_selection(
         &mut self,
@@ -129,33 +185,13 @@ impl Runtime {
         if !stage_supported(&selection.stage) {
             return Err("multiple stages require physics-stage mode".into());
         }
-        selection_change_allowed(
-            self.selection == selection,
-            self.pivots.is_some(),
-            self.scene_error.is_some(),
-        )?;
-        self.controls.configure_vehicle(&selection.vehicle)?;
-        if self.selection != selection {
-            self.pause();
-            self.worker.shutdown();
-            self.worker = worker::Worker::new_selected(selection.clone(), false);
-            self.pivots = None;
-            self.offset = None;
-            self.camera = None;
-            self.scene_error = None;
-            self.cockpit_node = None;
-            self.cockpit_ready = false;
-            self.cockpit_error = None;
-            self.steering_angle = 0.0;
-            self.controls.selected_gear = 2;
-            #[cfg(feature = "physics-stage")]
-            {
-                self.mounts = None;
-            }
-            self.pending_scene_reload = Some(selection.clone());
-            self.content = Catalog::scan(&selection);
+        // Upload may confirm the same selection. Browsing changes only idle metadata.
+        if self.selection != selection && self.race.phase != race::Phase::Idle {
+            return Err("RETURN TO MAIN MENU BEFORE CHANGING CONTENT".into());
         }
+        self.controls.configure_vehicle(&selection.vehicle)?;
         self.selection = selection;
+        self.content = Catalog::scan(&self.selection);
         Ok(())
     }
     pub fn asset_error(&mut self, error: String) {
@@ -167,6 +203,7 @@ impl Runtime {
         self.menu.pause();
         self.controls.clear();
         self.worker.state.lock().unwrap().paused = true;
+        self.race.pause();
         audio::set_paused(true);
         motion(false);
     }
@@ -205,23 +242,57 @@ impl Runtime {
         .save();
     }
     fn menu_command(&mut self, command: menu::Command) {
+        self.apply_command(command);
+        self.save_settings();
+    }
+    fn apply_command(&mut self, command: menu::Command) {
         use menu::Command::*;
         match command {
             Open(page) => self.menu.open(page),
             Back => self.menu.back(),
             ResetToMain => {
-                audio::set_paused(true);
+                self.pause();
                 self.worker.shutdown();
-                self.worker = worker::Worker::new_selected(self.selection.clone(), false);
-                self.offset = None;
-                self.camera = None;
-                self.controls.clear();
-                self.controls.selected_gear = 2;
+                self.worker = worker::Worker::idle();
+                self.clear_scene_pose();
+                self.race = race::Clock::default();
+                self.pending_scene_action = Some(SceneAction::Unload);
                 self.menu.reset_to_main();
-                self.message = Some("NEW SESSION READY".into());
+                self.message = None;
+            }
+            StartRally => {
+                self.content = Catalog::scan(&self.selection);
+                let result = self.selection.validate_current_backend().and_then(|()| {
+                    if self.race.phase != race::Phase::Idle {
+                        return Err("RALLY ALREADY LOADING OR ACTIVE".into());
+                    }
+                    if !stage_supported(&self.selection.stage) {
+                        return Err("STAGE UNAVAILABLE IN THIS MODE".into());
+                    }
+                    if let Some(entry) = self.content.stage(&self.selection.stage.id) {
+                        if entry.files.checked && !entry.files.missing.is_empty() {
+                            return Err(format!("MISSING: {}", entry.files.missing.join(", ")));
+                        }
+                    }
+                    Ok(())
+                });
+                if let Err(error) = result {
+                    self.message = Some(error);
+                } else {
+                    audio::set_paused(true);
+                    self.worker.shutdown();
+                    self.clear_scene_pose();
+                    self.loading_started = Instant::now();
+                    self.race.prepare();
+                    self.worker = worker::Worker::new_selected(self.selection.clone(), false);
+                    self.pending_scene_action =
+                        Some(SceneAction::Load(Box::new(self.selection.clone())));
+                    self.menu.show(menu::Page::Loading);
+                    self.message = None;
+                }
             }
             Start => {
-                let mut state = self.worker.state.lock().unwrap();
+                let state = self.worker.state.lock().unwrap();
                 if self.pivots.is_some()
                     && self.tilt.is_finite()
                     && self.scene_error.is_none()
@@ -229,8 +300,6 @@ impl Runtime {
                     && state.rest.is_some()
                 {
                     self.controls.clear();
-                    state.paused = false;
-                    audio::set_paused(false);
                     self.menu.resume();
                     self.message = None;
                 } else {
@@ -238,15 +307,18 @@ impl Runtime {
                 }
             }
             Restart => {
-                audio::set_paused(true);
+                self.pause();
                 self.worker.shutdown();
                 self.worker = worker::Worker::new_selected(self.selection.clone(), false);
                 self.offset = None;
                 self.camera = None;
+                self.scene_error = None;
                 self.controls.clear();
                 self.controls.selected_gear = 2;
-                self.menu.show(menu::Page::Paused);
-                self.message = Some("SESSION RESET TO ORIGINAL SPAWN".into());
+                self.loading_started = Instant::now();
+                self.race.prepare();
+                self.menu.show(menu::Page::Loading);
+                self.message = None;
             }
             Calibrate => {
                 if self.tilt.is_finite() {
@@ -366,8 +438,8 @@ impl Runtime {
                     })
                 });
                 self.message = Some(match result {
-                    Ok(()) => format!("VEHICLE SELECTED: {}", self.selection.vehicle.name),
-                    Err(error) => format!("VEHICLE REJECTED: {error}"),
+                    Ok(()) => format!("COCHE SELECCIONADO: {}", self.selection.vehicle.name),
+                    Err(error) => format!("COCHE RECHAZADO: {error}"),
                 });
             }
             OpenStage(index) => {
@@ -386,16 +458,110 @@ impl Runtime {
                     }),
                 };
                 self.message = Some(match result {
-                    Ok(()) => format!("LOADING STAGE: {}", self.selection.stage.name),
+                    Ok(()) => format!("SELECTED STAGE: {}", self.selection.stage.name),
                     Err(error) => format!("STAGE REJECTED: {error}"),
                 });
             }
+            CamFovDown | CamFovUp | CamPosXDown | CamPosXUp | CamPosYDown | CamPosYUp
+            | CamPosZDown | CamPosZUp | CamLookXDown | CamLookXUp | CamLookZDown | CamLookZUp
+            | CamLookYDown | CamLookYUp | CamSave | CamReset => {
+                #[cfg(feature = "physics-stage")]
+                {
+                    let ov = self.camera_overrides.for_view_mut(self.view);
+                    match command {
+                        CamFovDown => ov.fov_degrees -= 2.0,
+                        CamFovUp => ov.fov_degrees += 2.0,
+                        CamPosXDown => ov.pos_offset.x -= 0.05,
+                        CamPosXUp => ov.pos_offset.x += 0.05,
+                        CamPosYDown => ov.pos_offset.y -= 0.05,
+                        CamPosYUp => ov.pos_offset.y += 0.05,
+                        CamPosZDown => ov.pos_offset.z -= 0.05,
+                        CamPosZUp => ov.pos_offset.z += 0.05,
+                        CamLookXDown => ov.target_offset.x -= 0.05,
+                        CamLookXUp => ov.target_offset.x += 0.05,
+                        CamLookZDown => ov.target_offset.z -= 0.05,
+                        CamLookZUp => ov.target_offset.z += 0.05,
+                        CamLookYDown => ov.target_offset.y -= 0.05,
+                        CamLookYUp => ov.target_offset.y += 0.05,
+                        CamReset => {
+                            self.camera_overrides.reset_view(self.view);
+                            self.camera_overrides.save();
+                        }
+                        CamSave => self.camera_overrides.save(),
+                        _ => {}
+                    }
+                    *self.camera_overrides.for_view_mut(self.view) =
+                        self.camera_overrides.for_view(self.view).sanitized();
+                }
+            }
+            CtrlNext => {
+                self.selected_control =
+                    layout::EditableControl::ALL[(self.selected_control as usize + 1) % 6];
+            }
+            CtrlSizeDown => {
+                let base = DrivingLayout::for_size(self.drawable_size);
+                self.controls_layout
+                    .resize(self.selected_control, base, -0.02, -0.02);
+            }
+            CtrlSizeUp => {
+                let base = DrivingLayout::for_size(self.drawable_size);
+                self.controls_layout
+                    .resize(self.selected_control, base, 0.02, 0.02);
+            }
+            CtrlSave => {
+                self.controls_layout.save();
+                self.message = Some("DISTRIBUCIÓN DE CONTROLES GUARDADA".into());
+            }
+            CtrlReset => {
+                self.controls_layout.reset();
+                self.controls_layout.save();
+                self.message = Some("CONTROLES RESTABLECIDOS".into());
+            }
         }
-        self.save_settings();
     }
     pub fn touch(&mut self, t: Touch, size: (u32, u32)) {
+        self.drawable_size = size;
         let x = t.location.x / f64::from(size.0.max(1));
         let y = t.location.y / f64::from(size.1.max(1));
+        if self.menu.page == menu::Page::ControlsEditor {
+            let base = DrivingLayout::for_size(size);
+            if t.phase == TouchPhase::Started {
+                let rows = {
+                    let context = self.context();
+                    self.menu.rows(&context)
+                };
+                if let Some(command) = self.menu.press(x, y, &rows) {
+                    self.menu_command(command);
+                    return;
+                }
+                let effective = self.controls_layout.apply(base);
+                for ctrl in layout::EditableControl::ALL.into_iter().rev() {
+                    if effective.control_rect(ctrl).contains(x, y) {
+                        self.selected_control = ctrl;
+                        self.dragging_control = Some((
+                            t.id,
+                            ctrl,
+                            x as f32 - effective.control_rect(ctrl).center_x(),
+                            y as f32
+                                - (effective.control_rect(ctrl).y
+                                    + effective.control_rect(ctrl).h * 0.5),
+                        ));
+                        return;
+                    }
+                }
+            } else if t.phase == TouchPhase::Moved {
+                if let Some((id, ctrl, dx, dy)) = self.dragging_control {
+                    if id != t.id {
+                        return;
+                    }
+                    self.controls_layout
+                        .set_center(ctrl, base, x as f32 - dx, y as f32 - dy);
+                }
+            } else if self.dragging_control.is_some_and(|(id, ..)| id == t.id) {
+                self.dragging_control = None;
+            }
+            return;
+        }
         if self.menu.page != menu::Page::Driving {
             if t.phase == TouchPhase::Started {
                 let rows = {
@@ -408,7 +574,7 @@ impl Runtime {
             }
             return;
         }
-        let layout = DrivingLayout::for_size(size);
+        let layout = self.effective_layout(size);
         if t.phase == TouchPhase::Started {
             if layout.pause.contains(x, y) {
                 self.pause();
@@ -436,6 +602,33 @@ impl Runtime {
             matches!(t.phase, TouchPhase::Ended | TouchPhase::Cancelled),
         );
     }
+    fn sync_race_state(
+        &mut self,
+        now: Instant,
+        seconds: f64,
+        layout: &DrivingLayout,
+        steering_ready: bool,
+    ) -> (Option<(Sample, Sample, Instant)>, Option<Sample>, bool) {
+        let mut state = self.worker.state.lock().unwrap();
+        let healthy = self.pivots.is_some()
+            && state.rest.is_some()
+            && self.scene_error.is_none()
+            && state.error.is_none();
+        if self.menu.page == menu::Page::Loading && healthy {
+            self.race.ready(now);
+            self.menu.resume();
+            self.message = None;
+        }
+        let active = self.menu.page == menu::Page::Driving && steering_ready && healthy;
+        self.race.tick(now, active);
+        // No physical substep is scheduled during countdown, even on slopes.
+        state.paused = !active || self.race.phase != race::Phase::Driving;
+        if state.paused {
+            self.controls.clear();
+        }
+        state.input = self.controls.input_in(layout, self.tilt, seconds);
+        (state.pair.clone(), state.rest.clone(), state.paused)
+    }
     pub fn frame(&mut self, path: &ChasePath) -> Option<Frame> {
         let now = Instant::now();
         let seconds = now.duration_since(self.last).as_secs_f64();
@@ -448,18 +641,9 @@ impl Runtime {
             self.footprint = rerbr_sim::footprint();
             self.footprint_at = now + Duration::from_secs(1);
         }
-        let (pair, rest, paused) = {
-            let mut s = self.worker.state.lock().unwrap();
-            if self.menu.page != menu::Page::Driving {
-                s.paused = true;
-            }
-            if !self.tilt.is_finite() {
-                s.paused = true;
-                self.controls.clear();
-            }
-            s.input = self.controls.input(self.tilt, seconds);
-            (s.pair.clone(), s.rest.clone(), s.paused)
-        };
+        let layout = self.effective_layout(self.drawable_size);
+        let (pair, rest, paused) =
+            self.sync_race_state(now, seconds, &layout, self.tilt.is_finite());
         audio::set_paused(paused);
         let ((a, b, stamp), rest, pivots) = (pair?, rest?, self.pivots?);
         let swap = coords::physics_to_stage();
@@ -507,11 +691,21 @@ impl Runtime {
             self.view == cameras::View::CockpitFallback && self.cockpit_ready,
         );
         #[cfg(feature = "physics-stage")]
-        if let Some(camera) = self
+        if let Some(base) = self
             .mounts
             .and_then(|m| m.camera_with_cockpit(self.view, models[0], self.cockpit_node))
         {
-            if path.camera_supported(camera.eye) {
+            let ov = self.camera_overrides.for_view(self.view);
+            let edited = ov.apply(base, models[0]);
+            let selected = if path.camera_clear(edited, ov.fov_degrees, self.drawable_size) {
+                Some((edited, ov.fov_degrees))
+            } else if path.camera_clear(base, 65.0, self.drawable_size) {
+                Some((base, 65.0))
+            } else {
+                None
+            };
+            if let Some((camera, fov)) = selected {
+                self.effective_fov = fov;
                 return Some(Frame {
                     models,
                     camera,
@@ -526,8 +720,19 @@ impl Runtime {
             eprintln!("physics-stage CAMERA: mount underground/unsupported; returning to chase");
         }
         match path.chase_camera(target, forward) {
-            Ok((camera, boom)) => {
+            Ok((mut camera, boom)) => {
+                self.effective_fov = 65.0;
+                // Cache the unedited chase camera, so target offsets cannot feed back.
                 self.camera = Some(camera);
+                #[cfg(feature = "physics-stage")]
+                {
+                    let ov = self.camera_overrides.for_view(cameras::View::Chase);
+                    let edited = ov.apply(camera, models[0]);
+                    if path.camera_clear(edited, ov.fov_degrees, self.drawable_size) {
+                        camera = edited;
+                        self.effective_fov = ov.fov_degrees;
+                    }
+                }
                 Some(Frame {
                     models,
                     camera,
@@ -549,12 +754,21 @@ impl Runtime {
         self.cpu_ms = cpu.as_secs_f64() * 1000.0;
     }
     fn context(&self) -> menu::Context<'_> {
+        #[cfg(feature = "physics-stage")]
+        let cam_override = self.camera_overrides.for_view(self.view);
+        #[cfg(not(feature = "physics-stage"))]
+        let cam_override = cameras::CameraOverride::default_for(cameras::View::Chase);
         menu::Context {
             selection: &self.selection,
             content: &self.content,
             camera: self.camera_label(),
             steering_ready: self.tilt.is_finite(),
             cockpit_ready: self.cockpit_ready,
+            scene_loaded: self.pivots.is_some(),
+            loading_phase: self.loading_started.elapsed().as_secs_f32() * 5.0,
+            loading_error: self.scene_error.as_deref(),
+            cam_override,
+            selected_control: self.selected_control,
             sensitivity: self.controls.sensitivity,
             dead_zone: self.controls.dead_zone,
             volume: self.volume,
@@ -584,32 +798,77 @@ impl Runtime {
         }
     }
     pub fn overlay(
-        &self,
+        &mut self,
         hud: &Hud,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         size: (u32, u32),
     ) {
+        self.drawable_size = size;
         let state = self.worker.state.lock().unwrap().clone();
         let mut canvas = Canvas::new(size);
-        if self.menu.page != menu::Page::Driving {
+        let layout = self.effective_layout(size);
+        if self.menu.page == menu::Page::ControlsEditor {
+            self.draw_controls_editor(&mut canvas, &layout);
             let status = self.status(&state);
-            self.menu.draw(&mut canvas, &self.context(), &status);
+            let mut ctx = self.context();
+            ctx.loading_error = self.scene_error.as_deref().or(state.error.as_deref());
+            self.menu.draw(&mut canvas, &ctx, &status);
             hud.draw_bytes(queue, encoder, target, &canvas.finish());
             return;
         }
-        let layout = DrivingLayout::for_size(size);
+        if self.menu.page != menu::Page::Driving {
+            let status = self.status(&state);
+            let mut ctx = self.context();
+            ctx.loading_error = self.scene_error.as_deref().or(state.error.as_deref());
+            self.menu.draw(&mut canvas, &ctx, &status);
+            hud.draw_bytes(queue, encoder, target, &canvas.finish());
+            return;
+        }
         self.draw_top_bar(&mut canvas, &layout);
         if let Some((_, sample, _)) = &state.pair {
             draw_cluster(&mut canvas, &layout, sample);
         }
         self.draw_side_controls(&mut canvas, &layout);
+        self.draw_countdown_and_timer(&mut canvas);
         if self.diagnostics {
             self.draw_telemetry(&mut canvas, &layout, &state);
         }
         self.draw_banners(&mut canvas, &layout, &state);
         hud.draw_bytes(queue, encoder, target, &canvas.finish());
+    }
+    fn draw_controls_editor(&self, canvas: &mut Canvas, layout: &DrivingLayout) {
+        for ctrl in layout::EditableControl::ALL {
+            let rect = layout.control_rect(ctrl);
+            let selected = ctrl == self.selected_control;
+            ui::panel(
+                canvas,
+                rect,
+                if selected { PANEL_ACTIVE } else { PANEL_DEEP },
+                if selected { ACCENT } else { INFO },
+            );
+            ui::text_center(canvas, rect, ctrl.label(), 0.8, TEXT);
+        }
+    }
+    fn draw_countdown_and_timer(&self, canvas: &mut Canvas) {
+        if let Some(rem) = self.race.countdown() {
+            let rect = Rect::new(0.41, 0.24, 0.18, 0.18);
+            ui::panel(canvas, rect, PANEL_DEEP, ACCENT);
+            ui::text_center(canvas, rect, &rem.to_string(), 2.6, TEXT);
+        } else if self.race.go_visible(Instant::now()) {
+            let rect = Rect::new(0.39, 0.24, 0.22, 0.16);
+            ui::panel(canvas, rect, PANEL_DEEP, ui::GOOD);
+            ui::text_center(canvas, rect, "GO!", 2.2, ui::GOOD);
+        }
+        if let Some(secs) = self.stage_elapsed_secs() {
+            let mins = (secs / 60.0).floor() as u32;
+            let rem = secs - f64::from(mins) * 60.0;
+            let timer = format!("{mins:02}:{rem:04.1}");
+            let r = Rect::new(0.43, 0.015, 0.14, 0.055);
+            ui::panel(canvas, r, PANEL_DEEP, LINE);
+            ui::text_center(canvas, r, &timer, 0.85, TEXT);
+        }
     }
     fn draw_top_bar(&self, canvas: &mut Canvas, layout: &DrivingLayout) {
         ui::button(canvas, layout.pause, "PAUSE", false, true);
@@ -633,7 +892,7 @@ impl Runtime {
         }
     }
     fn draw_side_controls(&self, canvas: &mut Canvas, layout: &DrivingLayout) {
-        let levels = self.controls.levels();
+        let levels = self.controls.levels_in(layout);
         draw_control(canvas, layout.handbrake, "HB", levels.handbrake);
         draw_control(canvas, layout.clutch, "CLUTCH", levels.clutch);
         draw_control(canvas, layout.gear_down, "GEAR -", 0.0);
@@ -875,13 +1134,6 @@ fn stage_supported(stage: &rerbr_content::StageDescriptor) -> bool {
     stage.validate_current_backend().is_ok()
         && (cfg!(feature = "physics-stage") || stage.id == "harwood-forest")
 }
-fn selection_change_allowed(same: bool, ready: bool, failed: bool) -> Result<(), String> {
-    if same || ready || failed {
-        Ok(())
-    } else {
-        Err("SCENE STILL LOADING - WAIT BEFORE SELECTING ANOTHER STAGE".into())
-    }
-}
 #[cfg(test)]
 mod reload_tests {
     use super::*;
@@ -910,17 +1162,200 @@ mod reload_tests {
     }
 
     #[test]
-    fn repeated_changes_require_completed_load_or_recoverable_failure() {
-        for _ in 0..8 {
-            assert!(selection_change_allowed(false, true, false).is_ok());
-            assert!(selection_change_allowed(false, false, false).is_err());
-            assert!(selection_change_allowed(true, false, false).is_ok());
-            assert!(selection_change_allowed(false, false, true).is_ok());
+    fn main_menu_browsing_keeps_all_four_stages_and_never_starts_scene_workers() {
+        let mut app = Runtime::new();
+        assert_eq!(app.menu.page, menu::Page::Main);
+        assert!(app.worker.is_idle());
+        assert!(app.pending_scene_action.is_none());
+        assert!(app.pivots.is_none());
+        for _ in 0..3 {
+            for stage in rerbr_content::StageDescriptor::presets() {
+                if !stage_supported(&stage) {
+                    continue;
+                }
+                let selected = rerbr_content::Selection {
+                    stage,
+                    ..Default::default()
+                };
+                app.configure_selection(selected.clone()).unwrap();
+                assert_eq!(app.selection(), &selected);
+                assert!(app.worker.is_idle());
+                assert!(app.pending_scene_action.is_none());
+            }
         }
-        assert!(stage_supported(&rerbr_content::StageDescriptor::default()));
-        assert_eq!(
-            stage_supported(&rerbr_content::StageDescriptor::cote_darbroz()),
-            cfg!(feature = "physics-stage")
+        let previous = app.selection.clone();
+        let bad = rerbr_content::Selection {
+            vehicle: rerbr_content::VehicleDescriptor::ford_focus_2006(),
+            ..previous.clone()
+        };
+        assert!(app.configure_selection(bad).is_err());
+        assert_eq!(app.selection, previous);
+        app.race.prepare();
+        let other = rerbr_content::Selection::default();
+        if app.selection != other {
+            assert!(app.configure_selection(other).is_err());
+        }
+        app.apply_command(menu::Command::ResetToMain);
+        assert_eq!(app.race.phase, race::Phase::Idle);
+        assert!(matches!(app.take_scene_action(), Some(SceneAction::Unload)));
+        assert!(app.worker.is_idle());
+        assert!(app.cockpit_node.is_none() && !app.cockpit_ready);
+    }
+
+    #[test]
+    fn loading_cancel_restart_and_countdown_preserve_physics_pause_and_timer() {
+        let mut app = Runtime::new();
+        app.apply_command(menu::Command::StartRally);
+        assert_eq!(app.menu.page, menu::Page::Loading);
+        assert_eq!(app.race.phase, race::Phase::Preparing);
+        assert!(matches!(
+            app.take_scene_action(),
+            Some(SceneAction::Load(_))
+        ));
+
+        app.apply_command(menu::Command::ResetToMain);
+        assert_eq!(app.menu.page, menu::Page::Main);
+        assert_eq!(app.race.phase, race::Phase::Idle);
+        assert!(matches!(app.take_scene_action(), Some(SceneAction::Unload)));
+
+        // Cancel followed immediately by restart queues a clean fresh load.
+        app.apply_command(menu::Command::StartRally);
+        assert_eq!(app.menu.page, menu::Page::Loading);
+        assert!(matches!(
+            app.take_scene_action(),
+            Some(SceneAction::Load(_))
+        ));
+
+        // Swap to an isolated idle worker so filesystem absence cannot race this state-machine test.
+        app.worker.shutdown();
+        app.worker = worker::Worker::idle();
+        app.install_pivots([Vec3::ZERO; 4]);
+        app.tilt = 0.0;
+        {
+            let mut st = app.worker.state.lock().unwrap();
+            st.rest = Some(Sample::default());
+        }
+        let layout = DrivingLayout::default();
+        let t0 = Instant::now();
+        let (_, _, paused) = app.sync_race_state(t0, 1.0 / 60.0, &layout, true);
+        assert_eq!(app.menu.page, menu::Page::Driving);
+        assert_eq!(app.race.phase, race::Phase::Countdown);
+        assert!(paused, "physics must remain paused while countdown starts");
+        assert_eq!(app.race.countdown(), Some(5));
+        assert_eq!(app.stage_elapsed_secs(), None);
+
+        // Mid-countdown pause and resume preserves exact countdown progress and paused physics.
+        let (_, _, paused) =
+            app.sync_race_state(t0 + Duration::from_secs(2), 1.0 / 60.0, &layout, true);
+        assert!(paused);
+        assert_eq!(app.race.countdown(), Some(3));
+        app.pause();
+        assert_eq!(app.menu.page, menu::Page::Paused);
+        let (_, _, paused) =
+            app.sync_race_state(t0 + Duration::from_secs(50), 1.0 / 60.0, &layout, true);
+        assert!(paused);
+        assert_eq!(app.race.countdown(), Some(3));
+
+        app.apply_command(menu::Command::Start);
+        assert_eq!(app.menu.page, menu::Page::Driving);
+        let (_, _, paused) =
+            app.sync_race_state(t0 + Duration::from_secs(51), 1.0 / 60.0, &layout, true);
+        assert!(paused);
+        assert_eq!(app.race.countdown(), Some(3));
+
+        // Advancing 3 more active seconds hits GO! and unpauses physics.
+        let (_, _, paused) =
+            app.sync_race_state(t0 + Duration::from_secs(54), 1.0 / 60.0, &layout, true);
+        assert!(!paused, "physics must unpause once countdown hits GO");
+        assert_eq!(app.race.phase, race::Phase::Driving);
+        assert_eq!(app.stage_elapsed_secs(), Some(0.0));
+
+        let (_, _, paused) =
+            app.sync_race_state(t0 + Duration::from_secs(56), 1.0 / 60.0, &layout, true);
+        assert!(!paused);
+        assert_eq!(app.stage_elapsed_secs(), Some(2.0));
+    }
+
+    #[test]
+    fn controls_editor_respects_panel_priority_and_drags_without_driving() {
+        let mut app = Runtime::new();
+        app.apply_command(menu::Command::Open(menu::Page::ControlsEditor));
+        assert_eq!(app.menu.page, menu::Page::ControlsEditor);
+        let rows = {
+            let ctx = app.context();
+            app.menu.rows(&ctx)
+        };
+        let next_row = app.menu.row_rect_for(0, rows.len());
+        let before = app.selected_control;
+        app.touch(
+            winit::event::Touch {
+                device_id: winit::event::DeviceId::dummy(),
+                phase: TouchPhase::Started,
+                location: winit::dpi::PhysicalPosition::new(
+                    f64::from(next_row.center_x()) * 1024.0,
+                    f64::from(next_row.y + next_row.h * 0.5) * 768.0,
+                ),
+                force: None,
+                id: 1,
+            },
+            (1024, 768),
         );
+        assert_ne!(app.selected_control, before);
+        assert!(app.dragging_control.is_none());
+
+        // Drag throttle without changing selected gear or driving pedals.
+        let base = DrivingLayout::for_size((1024, 768));
+        let throttle = app.controls_layout.apply(base).throttle;
+        for (phase, nx, ny) in [
+            (
+                TouchPhase::Started,
+                f64::from(throttle.center_x()),
+                f64::from(throttle.y + throttle.h * 0.5),
+            ),
+            (TouchPhase::Moved, 0.5, 0.55),
+            (TouchPhase::Ended, 0.5, 0.55),
+        ] {
+            app.touch(
+                winit::event::Touch {
+                    device_id: winit::event::DeviceId::dummy(),
+                    phase,
+                    location: winit::dpi::PhysicalPosition::new(nx * 1024.0, ny * 768.0),
+                    force: None,
+                    id: 2,
+                },
+                (1024, 768),
+            );
+        }
+        let moved = app.controls_layout.apply(base).throttle;
+        assert!((moved.center_x() - 0.5).abs() < 0.02);
+        assert_eq!(app.controls.levels().throttle, 0.0);
+        assert_eq!(app.controls.selected_gear, 2);
+
+        // Even if a control overlaps the top editor panel, tapping the panel button wins by draw order.
+        app.controls_layout.set_center(
+            layout::EditableControl::Throttle,
+            base,
+            next_row.center_x(),
+            next_row.y + next_row.h * 0.5,
+        );
+        let selected_before = app.selected_control;
+        app.touch(
+            winit::event::Touch {
+                device_id: winit::event::DeviceId::dummy(),
+                phase: TouchPhase::Started,
+                location: winit::dpi::PhysicalPosition::new(
+                    f64::from(next_row.center_x()) * 1024.0,
+                    f64::from(next_row.y + next_row.h * 0.5) * 768.0,
+                ),
+                force: None,
+                id: 3,
+            },
+            (1024, 768),
+        );
+        assert_ne!(app.selected_control, selected_before);
+        assert!(app.dragging_control.is_none());
+
+        app.apply_command(menu::Command::CtrlReset);
+        assert_eq!(app.controls_layout.rects, [None; 6]);
     }
 }

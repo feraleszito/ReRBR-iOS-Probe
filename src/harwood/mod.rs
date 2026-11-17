@@ -93,10 +93,17 @@ impl Camera {
     }
 
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
+        self.view_projection_with_fov(aspect, coords::FOV_DEGREES)
+    }
+    pub fn view_projection_with_fov(&self, aspect: f32, fov_degrees: f32) -> Mat4 {
         let forward = (self.target - self.eye).normalize_or(Vec3::Z);
         let up = self.up.normalize_or(Vec3::Y);
-        coords::projection(coords::FOV_DEGREES.to_radians(), aspect)
-            * look_to_lh(self.eye, forward, up)
+        let fov = if fov_degrees.is_finite() {
+            fov_degrees.clamp(30.0, 110.0)
+        } else {
+            coords::FOV_DEGREES
+        };
+        coords::projection(fov.to_radians(), aspect) * look_to_lh(self.eye, forward, up)
     }
 }
 

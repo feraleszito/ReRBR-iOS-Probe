@@ -10,6 +10,7 @@ use crate::harwood::benchmark::hud::Canvas;
 pub enum Page {
     #[default]
     Main,
+    Loading,
     Drive,
     Garage,
     GarageDetail,
@@ -20,6 +21,8 @@ pub enum Page {
     ContentCompatibility,
     Settings,
     Controls,
+    CameraEditor,
+    ControlsEditor,
     About,
     Paused,
     Driving,
@@ -30,6 +33,7 @@ pub enum Command {
     Open(Page),
     Back,
     ResetToMain,
+    StartRally,
     Start,
     Restart,
     Calibrate,
@@ -51,6 +55,27 @@ pub enum Command {
     SelectVehicle(usize),
     OpenStage(usize),
     SelectStage(usize),
+    CamFovDown,
+    CamFovUp,
+    CamPosXDown,
+    CamPosXUp,
+    CamPosYDown,
+    CamPosYUp,
+    CamPosZDown,
+    CamPosZUp,
+    CamLookXDown,
+    CamLookXUp,
+    CamLookZDown,
+    CamLookZUp,
+    CamLookYDown,
+    CamLookYUp,
+    CamSave,
+    CamReset,
+    CtrlNext,
+    CtrlSizeDown,
+    CtrlSizeUp,
+    CtrlSave,
+    CtrlReset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +149,11 @@ pub struct Context<'a> {
     pub camera: &'a str,
     pub steering_ready: bool,
     pub cockpit_ready: bool,
+    pub scene_loaded: bool,
+    pub loading_phase: f32,
+    pub loading_error: Option<&'a str>,
+    pub cam_override: super::cameras::CameraOverride,
+    pub selected_control: super::layout::EditableControl,
     pub sensitivity: f64,
     pub dead_zone: f64,
     pub volume: f64,
@@ -171,16 +201,20 @@ impl Menu {
     }
     pub fn title(&self) -> &'static str {
         match self.page {
-            Page::Main => "ReRBR iOS",
-            Page::Drive => "DRIVE",
-            Page::Garage | Page::GarageDetail => "GARAGE",
-            Page::Stages | Page::StageDetail => "STAGES",
-            Page::Content | Page::ContentImport | Page::ContentCompatibility => "CONTENT MANAGER",
-            Page::Settings => "SETTINGS",
-            Page::Controls => "CONTROLS",
-            Page::About => "ABOUT",
-            Page::Paused => "PAUSED",
-            Page::Driving => "DRIVING",
+            Page::Main | Page::Loading => "RICHARD BURNS RALLY",
+            Page::Drive => "INICIAR RALLY",
+            Page::Garage | Page::GarageDetail => "SELECCIONAR COCHE",
+            Page::Stages | Page::StageDetail => "SELECCIONAR TRAMO",
+            Page::Content | Page::ContentImport | Page::ContentCompatibility => {
+                "GESTOR DE CONTENIDO"
+            }
+            Page::Settings => "CONFIGURACIÓN",
+            Page::Controls => "CONTROLES",
+            Page::CameraEditor => "EDITOR DE CÁMARAS",
+            Page::ControlsEditor => "EDITOR DE CONTROLES",
+            Page::About => "ACERCA DE",
+            Page::Paused => "PAUSA",
+            Page::Driving => "CONDUCCIÓN",
         }
     }
     pub fn rows(&self, ctx: &Context) -> Vec<Row> {
@@ -196,29 +230,45 @@ impl Menu {
             .map_or(EntryState::Selected, |entry| entry.state);
         match self.page {
             Page::Main => vec![
-                Row::action("DRIVE", Command::Open(Page::Drive)),
-                Row::action("GARAGE", Command::Open(Page::Garage)),
-                Row::action("STAGES", Command::Open(Page::Stages)),
-                Row::action("CONTENT MANAGER", Command::Open(Page::Content)),
-                Row::action("SETTINGS", Command::Open(Page::Settings)),
-                Row::action("CONTROLS", Command::Open(Page::Controls)),
-                Row::action("ABOUT", Command::Open(Page::About)),
+                Row::action(
+                    format!("SELECCIONAR COCHE: {}", vehicle.name),
+                    Command::Open(Page::Garage),
+                ),
+                Row::action(
+                    format!("SELECCIONAR TRAMO: {}", stage.name),
+                    Command::Open(Page::Stages),
+                ),
+                Row::action("INICIAR RALLY", Command::StartRally),
+                Row::action("CONFIGURACIÓN", Command::Open(Page::Settings)),
+                Row::action("CONTROLES", Command::Open(Page::Controls)),
+                Row::action("GESTOR DE CONTENIDO", Command::Open(Page::Content)),
+                Row::action("ACERCA DE", Command::Open(Page::About)),
             ],
+            Page::Loading => {
+                if ctx.loading_error.is_some() {
+                    vec![Row::action(
+                        "Volver al menú principal",
+                        Command::ResetToMain,
+                    )]
+                } else {
+                    vec![Row::action("CANCELAR", Command::ResetToMain)]
+                }
+            }
             Page::Drive => vec![
-                Row::info("STAGE", stage.name.clone()),
-                Row::info("VEHICLE", vehicle.name.clone()),
+                Row::info("TRAMO", stage.name.clone()),
+                Row::info("COCHE", vehicle.name.clone()),
                 Row {
                     label: if ctx.steering_ready {
-                        "START DRIVING".into()
+                        "INICIAR RALLY".into()
                     } else {
-                        "START DRIVING - HOLD LANDSCAPE".into()
+                        "INICIAR RALLY - SUJETA EN HORIZONTAL".into()
                     },
                     kind: RowKind::Action {
-                        command: Command::Start,
+                        command: Command::StartRally,
                         enabled: ctx.steering_ready,
                     },
                 },
-                Row::action("BACK", Command::Back),
+                Row::action("VOLVER", Command::Back),
             ],
             Page::Garage => {
                 let mut rows: Vec<Row> = ctx
@@ -233,11 +283,7 @@ impl Menu {
                         )
                     })
                     .collect();
-                rows.push(Row::info(
-                    "INSTALLED",
-                    format!("{} CARS / 1 SUPPORTED", ctx.content.vehicles.len()),
-                ));
-                rows.push(Row::action("BACK", Command::Back));
+                rows.push(Row::action("VOLVER", Command::Back));
                 rows
             }
             Page::GarageDetail => {
@@ -247,13 +293,13 @@ impl Menu {
                 let supported = inspected.validate_current_backend().is_ok();
                 let mut rows = Vec::new();
                 if state == EntryState::Selected {
-                    rows.push(Row::info("SELECTION", "SELECTED"));
+                    rows.push(Row::info("SELECCIÓN", "SELECCIONADO"));
                 } else {
                     rows.push(Row {
                         label: if supported {
-                            "SELECT VEHICLE".into()
+                            "SELECCIONAR COCHE".into()
                         } else {
-                            "UNSUPPORTED - NGP 7.5 / FMOD".into()
+                            "NO VALIDADO EN VIVO (NGP 7.4)".into()
                         },
                         kind: RowKind::Action {
                             command: Command::SelectVehicle(self.inspected_vehicle),
@@ -262,10 +308,10 @@ impl Menu {
                     });
                 }
                 rows.push(Row::action(
-                    "INSPECT PRIVATE FILES",
+                    "INSPECCIONAR ARCHIVOS",
                     Command::InspectContent,
                 ));
-                rows.push(Row::action("BACK", Command::Back));
+                rows.push(Row::action("VOLVER", Command::Back));
                 rows
             }
             Page::Stages => {
@@ -281,11 +327,7 @@ impl Menu {
                         )
                     })
                     .collect();
-                rows.push(Row::info(
-                    "PRESETS",
-                    format!("{} STAGES IN CATALOG", ctx.content.stages.len()),
-                ));
-                rows.push(Row::action("BACK", Command::Back));
+                rows.push(Row::action("VOLVER", Command::Back));
                 rows
             }
             Page::StageDetail => {
@@ -314,10 +356,10 @@ impl Menu {
                     });
                 }
                 rows.push(Row::action(
-                    "INSPECT PRIVATE FILES",
+                    "INSPECCIONAR ARCHIVOS",
                     Command::InspectContent,
                 ));
-                rows.push(Row::action("BACK", Command::Back));
+                rows.push(Row::action("VOLVER", Command::Back));
                 rows
             }
             Page::Content => vec![
@@ -356,67 +398,137 @@ impl Menu {
             }
             Page::Settings => vec![
                 Row::stepper(
-                    "STEERING SENSITIVITY",
+                    "SENSIBILIDAD GIROSCOPIO",
                     Command::SensDown,
                     Command::SensUp,
                     format!("{:.2}", ctx.sensitivity),
                 ),
                 Row::stepper(
-                    "STEERING DEAD ZONE",
+                    "ZONA MUERTA",
                     Command::DeadDown,
                     Command::DeadUp,
                     format!("{:.2}", ctx.dead_zone),
                 ),
-                Row::action(format!("CAMERA: {}", ctx.camera), Command::CameraNext),
+                Row::action(format!("CÁMARA: {}", ctx.camera), Command::CameraNext),
                 Row::stepper(
-                    "MASTER VOLUME",
+                    "VOLUMEN",
                     Command::VolumeDown,
                     Command::VolumeUp,
                     format!("{:.0}%", ctx.volume * 100.0),
                 ),
                 Row::action(
-                    format!("FPS COUNTER: {}", on_off(ctx.fps)),
+                    format!("INVERTIR PEDALES: {}", on_off(ctx.invert_pedals)),
+                    Command::ToggleInvertPedals,
+                ),
+                Row::action(
+                    format!("CONTADOR FPS: {}", on_off(ctx.fps)),
                     Command::ToggleFps,
                 ),
                 Row::action(
-                    format!("ADVANCED TELEMETRY: {}", on_off(ctx.diagnostics)),
+                    format!("TELEMETRÍA: {}", on_off(ctx.diagnostics)),
                     Command::ToggleDiagnostics,
                 ),
                 Row::action(
-                    format!("MINIMAL HUD: {}", on_off(ctx.minimal_hud)),
+                    format!("HUD MÍNIMO: {}", on_off(ctx.minimal_hud)),
                     Command::ToggleMinimalHud,
                 ),
-                Row::action(
-                    format!("INVERT PEDALS: {}", on_off(ctx.invert_pedals)),
-                    Command::ToggleInvertPedals,
+                Row {
+                    label: if ctx.scene_loaded {
+                        "EDITAR CÁMARAS".into()
+                    } else {
+                        "EDITAR CÁMARAS (INICIA RALLY)".into()
+                    },
+                    kind: RowKind::Action {
+                        command: Command::Open(Page::CameraEditor),
+                        enabled: ctx.scene_loaded && cfg!(feature = "physics-stage"),
+                    },
+                },
+                Row::action("EDITAR CONTROLES", Command::Open(Page::ControlsEditor)),
+                Row::action("VOLVER", Command::Back),
+            ],
+            Page::CameraEditor => vec![
+                Row::action(format!("CÁMARA: {}", ctx.camera), Command::CameraNext),
+                Row::stepper(
+                    "FOV",
+                    Command::CamFovDown,
+                    Command::CamFovUp,
+                    format!("{:.0}°", ctx.cam_override.fov_degrees),
                 ),
-                Row::action("BACK", Command::Back),
+                Row::stepper(
+                    "POS X",
+                    Command::CamPosXDown,
+                    Command::CamPosXUp,
+                    format!("{:.2}", ctx.cam_override.pos_offset.x),
+                ),
+                Row::stepper(
+                    "POS Y",
+                    Command::CamPosYDown,
+                    Command::CamPosYUp,
+                    format!("{:.2}", ctx.cam_override.pos_offset.y),
+                ),
+                Row::stepper(
+                    "POS Z",
+                    Command::CamPosZDown,
+                    Command::CamPosZUp,
+                    format!("{:.2}", ctx.cam_override.pos_offset.z),
+                ),
+                Row::stepper(
+                    "MIRA X",
+                    Command::CamLookXDown,
+                    Command::CamLookXUp,
+                    format!("{:.2}", ctx.cam_override.target_offset.x),
+                ),
+                Row::stepper(
+                    "MIRA Y",
+                    Command::CamLookYDown,
+                    Command::CamLookYUp,
+                    format!("{:.2}", ctx.cam_override.target_offset.y),
+                ),
+                Row::stepper(
+                    "MIRA Z",
+                    Command::CamLookZDown,
+                    Command::CamLookZUp,
+                    format!("{:.2}", ctx.cam_override.target_offset.z),
+                ),
+                Row::action("GUARDAR", Command::CamSave),
+                Row::action("RESTABLECER", Command::CamReset),
+                Row::action("VOLVER", Command::Back),
+            ],
+            Page::ControlsEditor => vec![
+                Row::action(
+                    format!("CONTROL: {}", ctx.selected_control.label()),
+                    Command::CtrlNext,
+                ),
+                Row::stepper("TAMAÑO", Command::CtrlSizeDown, Command::CtrlSizeUp, "±2%"),
+                Row::action("GUARDAR", Command::CtrlSave),
+                Row::action("RESTABLECER", Command::CtrlReset),
+                Row::action("VOLVER", Command::Back),
             ],
             Page::Controls => vec![
                 Row {
-                    label: "CALIBRATE STEERING".into(),
+                    label: "CALIBRAR GIROSCOPIO".into(),
                     kind: RowKind::Action {
                         command: Command::Calibrate,
                         enabled: ctx.steering_ready,
                     },
                 },
-                Row::action("RESET CALIBRATION", Command::ResetCalibration),
-                Row::info("TRANSMISSION", format!("MANUAL {}", vehicle.forward_gears)),
-                Row::info("SHIFTING", "TAP GEAR - / +"),
-                Row::action("BACK", Command::Back),
+                Row::action("RESTABLECER CALIBRACIÓN", Command::ResetCalibration),
+                Row::info("TRANSMISIÓN", format!("MANUAL {}", vehicle.forward_gears)),
+                Row::info("CAMBIO", "PULSA GEAR - / +"),
+                Row::action("VOLVER", Command::Back),
             ],
             Page::About => vec![
-                Row::info("VERSION", env!("CARGO_PKG_VERSION")),
+                Row::info("VERSIÓN", env!("CARGO_PKG_VERSION")),
                 Row::info("BUILD", option_env!("GITHUB_RUN_NUMBER").unwrap_or("LOCAL")),
-                Row::info("LICENSE", "GPL-3.0-OR-LATER"),
-                Row::action("BACK", Command::Back),
+                Row::info("LICENCIA", "GPL-3.0-OR-LATER"),
+                Row::action("VOLVER", Command::Back),
             ],
             Page::Paused => vec![
-                Row::action("RESUME", Command::Start),
-                Row::action("RESTART / RESET TO START", Command::Restart),
-                Row::action("SETTINGS", Command::Open(Page::Settings)),
-                Row::action("CONTROLS", Command::Open(Page::Controls)),
-                Row::action("MAIN MENU", Command::ResetToMain),
+                Row::action("REANUDAR", Command::Start),
+                Row::action("REINICIAR TRAMO", Command::Restart),
+                Row::action("CONFIGURACIÓN", Command::Open(Page::Settings)),
+                Row::action("CONTROLES", Command::Open(Page::Controls)),
+                Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
             ],
             Page::Driving => Vec::new(),
         }
@@ -425,34 +537,21 @@ impl Menu {
         let vehicle = &ctx.selection.vehicle;
         let stage = &ctx.selection.stage;
         match self.page {
-            Page::Main => vec![
-                format!("{} / {}", stage.name, vehicle.name),
-                format!("{} SPEED MANUAL / TILT STEERING", vehicle.forward_gears),
-                "COROLLA + VERIFIED GRAVEL/TARMAC STAGES".into(),
+            Page::Main | Page::Loading => vec![
+                "iOS ALPHA".into(),
+                format!("{} — {}", vehicle.name, stage.name),
             ],
             Page::Drive => vec![
-                format!("STAGE {} / {}", stage.name, stage.stem),
-                format!(
-                    "{} / {} FORWARD GEARS / MANUAL",
-                    vehicle.name, vehicle.forward_gears
-                ),
-                if ctx.cockpit_ready {
-                    "ORIGINAL COCKPIT READY".into()
-                } else {
-                    "COCKPIT ASSETS MISSING - EXTERIOR VIEWS REMAIN".into()
-                },
+                format!("TRAMO {} ({})", stage.name, stage.stem),
+                format!("{} / MANUAL {} VEL.", vehicle.name, vehicle.forward_gears),
             ],
             Page::Garage => {
                 let audit = ctx
                     .content
                     .vehicle(&vehicle.id)
                     .map(|entry| entry.files.summary())
-                    .unwrap_or_else(|| "PRIVATE FILES NOT INSPECTED".into());
-                vec![
-                    "READ-ONLY INSTALLED VEHICLE CATALOG".into(),
-                    audit,
-                    "PHYSICS STOCK DATA / NGP NOT CERTIFIED".into(),
-                ]
+                    .unwrap_or_else(|| "ARCHIVOS PRIVADOS SIN INSPECCIONAR".into());
+                vec!["CATÁLOGO DE VEHÍCULOS ORIGINALES RBR".into(), audit]
             }
             Page::GarageDetail => {
                 let entry = ctx.content.vehicles.get(self.inspected_vehicle);
@@ -471,7 +570,11 @@ impl Menu {
                         }
                     )
                 } else {
-                    "BLOCKED: REQUIRES NGP 7.5 + FMOD BANK + SGC".into()
+                    if inspected.id == "ford-focus-rs-wrc-2006" {
+                        "BLOCKED: REQUIRES NGP 7.5 + FMOD BANK + SGC".into()
+                    } else {
+                        "BLOCKED: ORIGINAL CAR NOT VALIDATED IN LIVE PHYSICS".into()
+                    }
                 };
                 vec![
                     format!(
@@ -514,6 +617,7 @@ impl Menu {
                     audit,
                 ]
             }
+            Page::CameraEditor | Page::ControlsEditor => Vec::new(),
             Page::Content => vec![
                 "PRIVATE DOCUMENTS CATALOG / NO NEW DIRECTORY LAYOUT".into(),
                 "IMPORT AND INSTALL ARE NOT AVAILABLE IN THIS BUILD".into(),
@@ -562,68 +666,130 @@ impl Menu {
             Page::Driving => Vec::new(),
         }
     }
+    fn row_bounds(&self) -> (f32, f32, f32, f32) {
+        match self.page {
+            Page::CameraEditor => (0.03, 0.43, 0.10, 0.94),
+            Page::Loading => (0.28, 0.44, 0.76, 0.86),
+            Page::ControlsEditor => (0.28, 0.44, 0.04, 0.36),
+            _ => (ROW_X, ROW_WIDTH, ROW_TOP, ROW_BOTTOM),
+        }
+    }
+    pub(crate) fn row_rect_for(&self, index: usize, rows: usize) -> Rect {
+        let (rx, rw, top, bottom) = self.row_bounds();
+        if rows == 0 {
+            return Rect::default();
+        }
+        let h = ((bottom - top) / rows as f32).min(0.078);
+        let gap = (h * 0.16).min(0.009);
+        Rect::new(rx, top + index as f32 * h, rw, (h - gap).max(0.02))
+    }
+    fn stepper_split_for(&self, value: &str) -> f32 {
+        let (rx, rw, _, _) = self.row_bounds();
+        let right_px = (rx + rw) * 640.0;
+        let value_width = ui::texture_width(value, 0.78);
+        (right_px - 34.0 - value_width * 0.5) / 640.0
+    }
     /// Resolves a touch to a command using the same rectangles used for drawing.
     pub fn press(&self, x: f64, y: f64, rows: &[Row]) -> Option<Command> {
-        if !x.is_finite() || !y.is_finite() {
+        if !x.is_finite() || !y.is_finite() || rows.is_empty() {
             return None;
         }
-        let index = row_index(x, y, rows.len())?;
+        let (xf, yf) = (x as f32, y as f32);
+        let index = (0..rows.len()).find(|&i| {
+            let r = self.row_rect_for(i, rows.len());
+            xf >= r.x && xf <= r.x + r.w && yf >= r.y && yf <= r.y + r.h
+        })?;
         match &rows[index].kind {
             RowKind::Action {
                 command,
                 enabled: true,
             } => Some(*command),
             RowKind::Stepper { down, up, value } => {
-                let split_x = stepper_split_x(value);
-                Some(if (x as f32) < split_x { *down } else { *up })
+                let split_x = self.stepper_split_for(value);
+                Some(if xf < split_x { *down } else { *up })
             }
             RowKind::Action { .. } | RowKind::Info { .. } => None,
         }
     }
     /// Draws the complete menu screen. Uses only the existing Metal HUD atlas.
     pub fn draw(&self, canvas: &mut Canvas, ctx: &Context, status: &str) {
-        let height = canvas.height();
-        ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 1.0), ui::BACKDROP);
-        ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 0.10), [10, 15, 24, 255]);
-        ui::fill(canvas, Rect::new(0.055, 0.045, 0.008, 0.045), ACCENT);
-        canvas.text(0.075 * 640.0, 0.034 * height, self.title(), 1.55, TEXT);
-        ui::rule(canvas, 0.055, 0.105, 0.89, LINE);
-
-        let subtitle = self.subtitle(ctx);
-        let mut lines = Vec::new();
-        for line in subtitle {
-            lines.extend(ui::wrap(&line, 52));
+        if self.page == Page::Loading {
+            self.draw_loading(canvas, ctx);
+            return;
         }
-        let scale = 0.78;
-        for (index, line) in lines.iter().take(5).enumerate() {
-            canvas.text(
-                0.055 * 640.0,
-                (0.118 + index as f32 * 0.029) * height,
-                line,
-                scale,
-                DIM,
+        let compact = matches!(self.page, Page::CameraEditor | Page::ControlsEditor);
+        let height = canvas.height();
+        if !compact {
+            ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 1.0), ui::BACKDROP);
+            ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 0.11), [12, 15, 21, 255]);
+            ui::fill(canvas, Rect::new(0.055, 0.042, 0.006, 0.045), ACCENT);
+            canvas.text(0.072 * 640.0, 0.032 * height, self.title(), 1.45, TEXT);
+            ui::rule(canvas, 0.055, 0.110, 0.89, LINE);
+
+            let subtitle = self.subtitle(ctx);
+            let mut lines = Vec::new();
+            for line in subtitle {
+                lines.extend(ui::wrap(&line, 56));
+            }
+            let scale = 0.78;
+            for (index, line) in lines.iter().take(4).enumerate() {
+                canvas.text(
+                    0.055 * 640.0,
+                    (0.125 + index as f32 * 0.030) * height,
+                    line,
+                    scale,
+                    DIM,
+                );
+            }
+        } else if self.page == Page::CameraEditor {
+            ui::panel(
+                canvas,
+                Rect::new(0.02, 0.02, 0.45, 0.96),
+                [8, 10, 14, 218],
+                LINE,
+            );
+            canvas.text(0.035 * 640.0, 0.028 * height, self.title(), 0.95, TEXT);
+        } else {
+            ui::panel(
+                canvas,
+                Rect::new(0.27, 0.015, 0.46, 0.37),
+                [8, 10, 14, 218],
+                LINE,
             );
         }
 
         let rows = self.rows(ctx);
-        let label_scale = if rows.len() > 7 { 0.76 } else { 0.82 };
+        let label_scale = if rows.len() > 7 { 0.74 } else { 0.82 };
         for (index, row) in rows.iter().enumerate() {
-            let rect = row_rect(index, rows.len());
+            let rect = self.row_rect_for(index, rows.len());
             let (x, y, w, h) = ui::px(rect, canvas);
             let interactive = matches!(
                 row.kind,
                 RowKind::Action { enabled: true, .. } | RowKind::Stepper { .. }
             );
-            let panel = if interactive {
+            let is_primary = matches!(
+                row.kind,
+                RowKind::Action {
+                    command: Command::StartRally,
+                    enabled: true,
+                }
+            );
+            let panel = if is_primary {
+                [150, 28, 28, 235]
+            } else if interactive {
                 PANEL_ACTIVE
             } else {
                 PANEL_DEEP
             };
             canvas.rect(x, y, w, h, panel);
-            if interactive {
-                canvas.rect(x, y, 3.0, h, ACCENT);
+            if is_primary {
+                ui::frame(canvas, rect, ACCENT, 1.5);
+            } else {
+                if interactive {
+                    canvas.rect(x, y, 3.0, h, ACCENT);
+                }
+                canvas.rect(x, y, w, 1.0, LINE);
             }
-            canvas.rect(x, y, w, 1.0, LINE);
             let text_color = if interactive { TEXT } else { DIM };
             let value_space = match &row.kind {
                 RowKind::Info { value } => ui::texture_width(value, 0.7) + 30.0,
@@ -651,7 +817,7 @@ impl Menu {
                         y + (h - 16.0 * value_scale) * 0.5,
                         value,
                         value_scale,
-                        ACCENT,
+                        TEXT,
                     );
                     canvas.text(
                         x + w - 22.0,
@@ -672,24 +838,89 @@ impl Menu {
             }
         }
 
-        let footer = ui::wrap(status, 58);
-        ui::rule(canvas, 0.055, 0.900, 0.89, LINE);
-        let color =
-            if status.contains("ERROR") || status.contains("FAIL") || status.contains("REJECTED") {
+        if !compact {
+            let footer = ui::wrap(status, 58);
+            ui::rule(canvas, 0.055, 0.900, 0.89, LINE);
+            let color = if status.contains("ERROR")
+                || status.contains("FAIL")
+                || status.contains("REJECTED")
+            {
                 BAD
             } else if status.contains("MISSING") || status.contains("UNAVAILABLE") {
                 WARN
             } else {
                 GOOD
             };
-        for (index, line) in footer.iter().take(2).enumerate() {
-            canvas.text(
-                0.055 * 640.0,
-                (0.912 + index as f32 * 0.026) * height,
-                line,
-                0.7,
-                color,
+            for (index, line) in footer.iter().take(2).enumerate() {
+                canvas.text(
+                    0.055 * 640.0,
+                    (0.912 + index as f32 * 0.026) * height,
+                    line,
+                    0.7,
+                    color,
+                );
+            }
+        }
+    }
+    fn draw_loading(&self, canvas: &mut Canvas, ctx: &Context) {
+        let height = canvas.height();
+        ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 1.0), ui::BACKDROP);
+        ui::text_center(
+            canvas,
+            Rect::new(0.0, 0.16, 1.0, 0.08),
+            "RICHARD BURNS RALLY",
+            1.65,
+            TEXT,
+        );
+        ui::text_center(
+            canvas,
+            Rect::new(0.0, 0.24, 1.0, 0.05),
+            "iOS ALPHA",
+            0.95,
+            DIM,
+        );
+        if let Some(error) = ctx.loading_error {
+            ui::panel(canvas, Rect::new(0.14, 0.36, 0.72, 0.22), PANEL_DEEP, BAD);
+            let lines = ui::wrap(error, 48);
+            for (i, line) in lines.iter().take(4).enumerate() {
+                ui::text_center(
+                    canvas,
+                    Rect::new(0.16, 0.39 + i as f32 * 0.04, 0.68, 0.04),
+                    line,
+                    0.78,
+                    BAD,
+                );
+            }
+            let rows = self.rows(ctx);
+            for (index, row) in rows.iter().enumerate() {
+                let rect = self.row_rect_for(index, rows.len());
+                ui::panel(canvas, rect, PANEL_ACTIVE, ACCENT);
+                ui::text_center(canvas, rect, &row.label, 0.85, TEXT);
+            }
+        } else {
+            canvas.spinner(320.0, height * 0.45, 22.0, 3.5, ctx.loading_phase, TEXT);
+            ui::text_center(
+                canvas,
+                Rect::new(0.0, 0.56, 1.0, 0.06),
+                "Cargando tramo...",
+                1.0,
+                TEXT,
             );
+            ui::text_center(
+                canvas,
+                Rect::new(0.0, 0.62, 1.0, 0.05),
+                "Preparando coche y escenario",
+                0.82,
+                DIM,
+            );
+        }
+        if ctx.loading_error.is_none() {
+            let rows = self.rows(ctx);
+            for (index, row) in rows.iter().enumerate() {
+                let rect = self.row_rect_for(index, rows.len());
+                ui::panel(canvas, rect, PANEL_ACTIVE, LINE);
+                ui::text_center(canvas, rect, &row.label, 0.85, TEXT);
+            }
         }
     }
 }
@@ -707,13 +938,6 @@ pub const ROW_BOTTOM: f32 = 0.88;
 pub const ROW_X: f32 = 0.14;
 pub const ROW_WIDTH: f32 = 0.72;
 
-/// Normalized X midpoint between the drawn `-` and `+` stepper buttons in a row.
-fn stepper_split_x(value: &str) -> f32 {
-    let right_px = (ROW_X + ROW_WIDTH) * 640.0;
-    let value_width = ui::texture_width(value, 0.78);
-    (right_px - 34.0 - value_width * 0.5) / 640.0
-}
-
 pub fn row_height(rows: usize) -> f32 {
     if rows == 0 {
         0.0
@@ -730,22 +954,6 @@ pub fn row_rect(index: usize, rows: usize) -> Rect {
         ROW_WIDTH,
         (height - gap).max(0.0),
     )
-}
-fn row_index(x: f64, y: f64, rows: usize) -> Option<usize> {
-    let height = row_height(rows);
-    if rows == 0 || height <= 0.0 {
-        return None;
-    }
-    let relative = (y as f32 - ROW_TOP) / height;
-    if relative < 0.0 {
-        return None;
-    }
-    let index = relative.floor() as usize;
-    if index >= rows {
-        return None;
-    }
-    let rect = row_rect(index, rows);
-    rect.contains(x, y).then_some(index)
 }
 
 #[derive(Debug, Clone)]
@@ -859,6 +1067,13 @@ mod tests {
             camera: "CHASE",
             steering_ready: true,
             cockpit_ready: true,
+            scene_loaded: true,
+            loading_phase: 0.5,
+            loading_error: None,
+            cam_override: crate::driving::cameras::CameraOverride::default_for(
+                crate::driving::cameras::View::Chase,
+            ),
+            selected_control: crate::driving::layout::EditableControl::Brake,
             sensitivity: 2.0,
             dead_zone: 0.03,
             volume: 0.8,
@@ -877,26 +1092,18 @@ mod tests {
         let mut menu = Menu::default();
         let rows = menu.rows(&ctx);
         assert_eq!(rows.len(), 7);
-        assert_eq!(rows[0].label, "DRIVE");
-        for label in [
-            "DRIVE",
-            "GARAGE",
-            "STAGES",
-            "CONTENT MANAGER",
-            "SETTINGS",
-            "CONTROLS",
-            "ABOUT",
-        ] {
-            assert!(rows.iter().any(|row| row.label == label), "{label}");
-        }
-        let drive_row = row_rect(0, rows.len());
+        assert!(rows[0].label.contains("SELECCIONAR COCHE"));
+        assert!(rows[1].label.contains("SELECCIONAR TRAMO"));
+        assert_eq!(rows[2].label, "INICIAR RALLY");
+        assert_eq!(rows[3].label, "CONFIGURACIÓN");
+        let start_rect = menu.row_rect_for(2, rows.len());
         assert_eq!(
             menu.press(
-                drive_row.center_x() as f64,
-                drive_row.y as f64 + 0.01,
+                start_rect.center_x() as f64,
+                start_rect.y as f64 + 0.01,
                 &rows
             ),
-            Some(Command::Open(Page::Drive))
+            Some(Command::StartRally)
         );
         menu.open(Page::Drive);
         let drive = menu.rows(&ctx);
@@ -906,16 +1113,16 @@ mod tests {
                 matches!(
                     row.kind,
                     RowKind::Action {
-                        command: Command::Start,
+                        command: Command::StartRally,
                         ..
                     }
                 )
             })
             .unwrap();
-        let rect = row_rect(start_row, drive.len());
+        let rect = menu.row_rect_for(start_row, drive.len());
         assert_eq!(
             menu.press(rect.center_x() as f64, rect.y as f64 + 0.01, &drive),
-            Some(Command::Start)
+            Some(Command::StartRally)
         );
         menu.page = Page::Driving;
         menu.pause();
@@ -940,16 +1147,16 @@ mod tests {
                 matches!(
                     row.kind,
                     RowKind::Action {
-                        command: Command::Start,
+                        command: Command::StartRally,
                         ..
                     }
                 )
             })
             .unwrap();
-        let rect = row_rect(start_row, rows.len());
+        let rect = menu.row_rect_for(start_row, rows.len());
         assert_eq!(
             menu.press(rect.center_x() as f64, rect.y as f64 + 0.01, &rows),
-            Some(Command::Start)
+            Some(Command::StartRally)
         );
         ctx.steering_ready = false;
         let rows = menu.rows(&ctx);
@@ -969,14 +1176,12 @@ mod tests {
             ..Menu::default()
         };
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 9);
-        // Verify tapping the drawn `-` glyph (on the right side, left of the value) decreases,
-        // and tapping the drawn `+` glyph increases, for both Sensitivity (row 0) and Volume (row 3).
+        assert_eq!(rows.len(), 11);
         for (row_idx, value, expected_down, expected_up) in [
             (0usize, "2.00", Command::SensDown, Command::SensUp),
             (3usize, "80%", Command::VolumeDown, Command::VolumeUp),
         ] {
-            let rect = row_rect(row_idx, rows.len());
+            let rect = menu.row_rect_for(row_idx, rows.len());
             let (rx, _ry, rw, _rh) = (rect.x * 640.0, rect.y, rect.w * 640.0, rect.h);
             let value_width = ui::texture_width(value, 0.78);
             let minus_center_x = f64::from((rx + rw - value_width - 42.0) / 640.0);
@@ -991,7 +1196,7 @@ mod tests {
                 Some(expected_up)
             );
         }
-        let inv_rect = row_rect(7, rows.len());
+        let inv_rect = menu.row_rect_for(4, rows.len());
         assert_eq!(
             menu.press(
                 inv_rect.center_x() as f64,
@@ -1055,7 +1260,7 @@ mod tests {
             ..Menu::default()
         };
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), content.vehicles.len() + 1);
         assert!(rows[0]
             .label
             .to_ascii_uppercase()
@@ -1069,8 +1274,95 @@ mod tests {
             .contains("HARWOOD FOREST"));
         menu.page = Page::GarageDetail;
         let rows = menu.rows(&ctx);
-        assert!(rows.iter().any(|row| row.label == "INSPECT PRIVATE FILES"));
-        assert!(!rows.iter().any(|row| row.label.contains("SELECT VEHICLE")));
+        assert!(rows
+            .iter()
+            .any(|row| row.label == "INSPECTOR ARCHIVOS" || row.label == "INSPECCIONAR ARCHIVOS"));
+        assert!(!rows
+            .iter()
+            .any(|row| row.label.contains("SELECCIONAR COCHE")));
+    }
+
+    #[test]
+    fn loading_and_editors_render_within_vertex_budget() {
+        use crate::harwood::benchmark::hud::{Canvas, MAX_CANVAS_VERTICES};
+        let selection = Selection::default();
+        let content = Catalog::descriptors(&selection);
+        let mut ctx = context(&selection, &content);
+        for page in [Page::Loading, Page::CameraEditor, Page::ControlsEditor] {
+            let menu = Menu {
+                page,
+                ..Menu::default()
+            };
+            let mut canvas = Canvas::new((1024, 768));
+            menu.draw(&mut canvas, &ctx, "OK");
+            let bytes = canvas.finish();
+            assert!(!bytes.is_empty());
+            assert!(bytes.len() / 20 <= MAX_CANVAS_VERTICES);
+        }
+        ctx.loading_error = Some("MISSING TRACK");
+        let loading = Menu {
+            page: Page::Loading,
+            ..Menu::default()
+        };
+        let rows = loading.rows(&ctx);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "Volver al menú principal");
+    }
+
+    #[test]
+    fn loading_animates_and_all_camera_axes_have_working_stepper_regions() {
+        let selection = Selection::default();
+        let content = Catalog::descriptors(&selection);
+        let mut ctx = context(&selection, &content);
+        let mut menu = Menu {
+            page: Page::Loading,
+            ..Menu::default()
+        };
+        let mut first = Canvas::new((1024, 768));
+        menu.draw(&mut first, &ctx, "");
+        ctx.loading_phase += 1.0;
+        let mut next = Canvas::new((1024, 768));
+        menu.draw(&mut next, &ctx, "");
+        assert_ne!(first.finish(), next.finish());
+        let rows = menu.rows(&ctx);
+        let r = menu.row_rect_for(0, rows.len());
+        assert_eq!(
+            menu.press(f64::from(r.center_x()), f64::from(r.y + r.h * 0.5), &rows),
+            Some(Command::ResetToMain)
+        );
+        menu.page = Page::CameraEditor;
+        let rows = menu.rows(&ctx);
+        for expected in [
+            Command::CamPosXUp,
+            Command::CamPosYUp,
+            Command::CamPosZUp,
+            Command::CamLookXUp,
+            Command::CamLookYUp,
+            Command::CamLookZUp,
+        ] {
+            let i = rows
+                .iter()
+                .position(|r| matches!(r.kind, RowKind::Stepper { up, .. } if up == expected))
+                .unwrap();
+            let r = menu.row_rect_for(i, rows.len());
+            assert_eq!(
+                menu.press(
+                    f64::from(r.right() - 0.01),
+                    f64::from(r.y + r.h * 0.5),
+                    &rows
+                ),
+                Some(expected)
+            );
+        }
+        assert_eq!(content.stages.len(), 4);
+        for (i, stage) in content.stages.iter().enumerate() {
+            menu.inspected_stage = i;
+            menu.page = Page::StageDetail;
+            assert!(menu
+                .subtitle(&ctx)
+                .iter()
+                .any(|line| line.contains(&stage.descriptor.stem)));
+        }
     }
 
     #[test]

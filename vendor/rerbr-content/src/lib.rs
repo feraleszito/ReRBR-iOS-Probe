@@ -102,7 +102,7 @@ impl VehicleDescriptor {
     }
     pub fn validate_schema(&self) -> Result<(), String> {
         validate_identity(&self.id, &self.name)?;
-        if self.original_slot == 0 || !(1..=8).contains(&self.forward_gears) {
+        if self.original_slot > 7 || !(1..=8).contains(&self.forward_gears) {
             return Err("content vehicle slot/gear count is invalid".into());
         }
         for path in self
@@ -240,8 +240,102 @@ impl VehicleDescriptor {
             audio_index: "AudioFMOD/Focus_Mk2_WRC.bank".into(),
         }
     }
-    pub fn presets() -> [Self; 2] {
-        [Self::toyota_corolla_wrc(), Self::ford_focus_2006()]
+    fn original_rbr(
+        id: &str,
+        name: &str,
+        original_slot: u32,
+        folder: &str,
+        prefix: &str,
+        tex_prefix: &str,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            original_slot,
+            tyre_type: 4,
+            forward_gears: 6,
+            index: "Cars/Cars.ini".into(),
+            model: format!("Cars/{folder}/{prefix}.sgc"),
+            parts: format!("Cars/{folder}/{prefix}.ini"),
+            shaders: format!("Cars/{folder}/{prefix}_shaders.ini"),
+            shader_settings: format!("Cars/{folder}/{prefix}_shader_settings_clear.ini"),
+            required_textures: [
+                format!("{tex_prefix}_external.dds"),
+                format!("{tex_prefix}_external_dynamic.dds"),
+                format!("{tex_prefix}_external_transparent.dds"),
+            ]
+            .map(|n| format!("Cars/{folder}/Textures/{n}"))
+            .into(),
+            optional_textures: [
+                format!("{tex_prefix}_internal.dds"),
+                format!("{tex_prefix}_internal_transparent.dds"),
+                format!("{tex_prefix}_internal_scrape.dds"),
+            ]
+            .map(|n| format!("Cars/{folder}/Textures/{n}"))
+            .into(),
+            audio_index: "Audio/Cars/Cars.ini".into(),
+        }
+    }
+    /// All 8 original base-game Richard Burns Rally cars.
+    /// Only `toyota-corolla-wrc` is enabled by `validate_current_backend()` until live NGP 7.4.778 validation.
+    pub fn original_rbr_presets() -> [Self; 8] {
+        [
+            Self::toyota_corolla_wrc(),
+            Self::original_rbr(
+                "subaru-impreza-2003",
+                "Subaru Impreza WRC 2003",
+                5,
+                "impreza03",
+                "impreza03",
+                "impreza03",
+            ),
+            Self::original_rbr(
+                "subaru-impreza-2000",
+                "Subaru Impreza WRC 2000",
+                7,
+                "impreza00",
+                "impreza00",
+                "impreza00",
+            ),
+            Self::original_rbr(
+                "peugeot-206-wrc",
+                "Peugeot 206 WRC",
+                4,
+                "Peugeot_206",
+                "Peugeot_206",
+                "e_p206",
+            ),
+            Self::original_rbr(
+                "mitsubishi-lancer-evo-vii",
+                "Mitsubishi Lancer Evo VII",
+                3,
+                "Lancer_EVO_VII",
+                "lancer_evo_vII",
+                "Lancer_wrc",
+            ),
+            Self::original_rbr(
+                "hyundai-accent-wrc",
+                "Hyundai Accent WRC",
+                1,
+                "accent",
+                "accent",
+                "accent",
+            ),
+            Self::original_rbr("mg-zr-s1600", "MG ZR Super 1600", 2, "zr", "zr", "zr"),
+            Self::original_rbr(
+                "citroen-xsara",
+                "Citroen Xsara (Car00)",
+                0,
+                "xsara",
+                "xsara",
+                "xsara",
+            ),
+        ]
+    }
+    pub fn presets() -> Vec<Self> {
+        let mut cars = Self::original_rbr_presets().to_vec();
+        cars.push(Self::ford_focus_2006());
+        cars
     }
 }
 impl Default for StageDescriptor {
@@ -337,6 +431,27 @@ mod tests {
             .vehicle
             .allows("cars\\corolla\\textures\\COROLLA_INTERNAL.dds"));
         assert!(!selection.vehicle.allows("Cars/OTHER/other.sgc"));
+    }
+    #[test]
+    fn original_slots_are_unique_and_only_existing_corolla_is_accepted() {
+        let cars = VehicleDescriptor::original_rbr_presets();
+        let mut slots = std::collections::BTreeSet::new();
+        for car in &cars {
+            car.validate_schema().unwrap();
+            assert!(slots.insert(car.original_slot));
+            assert_eq!(
+                car.validate_current_backend().is_ok(),
+                car == &VehicleDescriptor::default()
+            );
+        }
+        assert_eq!(
+            slots.into_iter().collect::<Vec<_>>(),
+            (0..8).collect::<Vec<_>>()
+        );
+        assert_eq!(VehicleDescriptor::presets().len(), 9);
+        assert!(VehicleDescriptor::ford_focus_2006()
+            .validate_current_backend()
+            .is_err());
     }
     #[test]
     fn paths_cannot_escape_private_roots() {

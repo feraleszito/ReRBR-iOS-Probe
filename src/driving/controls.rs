@@ -26,9 +26,23 @@ enum Pedal {
     Handbrake,
     Clutch,
 }
-fn pressure(y: f64, invert_pedals: bool) -> f32 {
-    let raw = if invert_pedals { 0.92 - y } else { y - 0.72 };
-    (raw / 0.20).clamp(0.0, 1.0) as f32
+fn pressure(y: f64, rect: super::layout::Rect, invert_pedals: bool) -> f32 {
+    let top_margin = 0.02_f64.min(f64::from(rect.h) * 0.2);
+    let top = f64::from(rect.y) + top_margin;
+    let span = (f64::from(rect.h) - 0.06).max(0.05);
+    let raw = if invert_pedals {
+        (top + span) - y
+    } else {
+        y - top
+    };
+    let v = (raw / span).clamp(0.0, 1.0) as f32;
+    if v < 0.001 {
+        0.0
+    } else if v > 0.999 {
+        1.0
+    } else {
+        v
+    }
 }
 
 pub struct Controls {
@@ -93,28 +107,29 @@ impl Controls {
             return;
         }
         if started {
-            if layout.gear_down.contains(x, y) {
-                if !self.automatic {
-                    self.selected_gear = self.selected_gear.saturating_sub(1);
+            use super::layout::EditableControl;
+            let hit = EditableControl::ALL
+                .into_iter()
+                .rev()
+                .find(|&c| layout.control_rect(c).contains(x, y));
+            let pedal = match hit {
+                Some(EditableControl::GearDown) => {
+                    if !self.automatic {
+                        self.selected_gear = self.selected_gear.saturating_sub(1);
+                    }
+                    return;
                 }
-                return;
-            }
-            if layout.gear_up.contains(x, y) {
-                if !self.automatic {
-                    self.selected_gear = (self.selected_gear + 1).min(self.forward_gears + 1);
+                Some(EditableControl::GearUp) => {
+                    if !self.automatic {
+                        self.selected_gear = (self.selected_gear + 1).min(self.forward_gears + 1);
+                    }
+                    return;
                 }
-                return;
-            }
-            let pedal = if layout.handbrake.contains(x, y) {
-                Some(Pedal::Handbrake)
-            } else if layout.clutch.contains(x, y) {
-                Some(Pedal::Clutch)
-            } else if layout.brake.contains(x, y) {
-                Some(Pedal::Brake)
-            } else if layout.throttle.contains(x, y) {
-                Some(Pedal::Throttle)
-            } else {
-                None
+                Some(EditableControl::Handbrake) => Some(Pedal::Handbrake),
+                Some(EditableControl::Clutch) => Some(Pedal::Clutch),
+                Some(EditableControl::Brake) => Some(Pedal::Brake),
+                Some(EditableControl::Throttle) => Some(Pedal::Throttle),
+                None => None,
             };
             if let Some(pedal) = pedal {
                 // The role is captured at touch start and cannot change while dragging.
@@ -126,20 +141,33 @@ impl Controls {
         }
     }
     pub fn levels(&self) -> Levels {
+        self.levels_in(&DrivingLayout::default())
+    }
+    pub fn levels_in(&self, layout: &DrivingLayout) -> Levels {
         let mut levels = Levels::default();
         for &(pedal, y) in self.touches.values() {
             match pedal {
                 Pedal::Clutch => levels.clutch = 1.0,
                 Pedal::Handbrake => levels.handbrake = 1.0,
-                Pedal::Brake => levels.brake = levels.brake.max(pressure(y, self.invert_pedals)),
+                Pedal::Brake => {
+                    levels.brake = levels
+                        .brake
+                        .max(pressure(y, layout.brake, self.invert_pedals))
+                }
                 Pedal::Throttle => {
-                    levels.throttle = levels.throttle.max(pressure(y, self.invert_pedals))
+                    levels.throttle =
+                        levels
+                            .throttle
+                            .max(pressure(y, layout.throttle, self.invert_pedals))
                 }
             }
         }
         levels
     }
     pub fn input(&mut self, tilt: f64, seconds: f64) -> Control {
+        self.input_in(&DrivingLayout::default(), tilt, seconds)
+    }
+    pub fn input_in(&mut self, layout: &DrivingLayout, tilt: f64, seconds: f64) -> Control {
         let d = if tilt.is_finite() {
             (tilt - self.centre + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
                 - std::f64::consts::PI
@@ -149,26 +177,56 @@ impl Controls {
         let target = d.signum() * ((d.abs() - self.dead_zone).max(0.0) * self.sensitivity).min(1.0);
         let a = 1.0 - (-seconds.clamp(0.0, 0.1) / 0.035).exp();
         self.filtered += (target - self.filtered) * a;
-        let mut c = Control {
+        let levels = self.levels_in(layout);
+        Control {
             steering: self.filtered as f32,
             flags: if self.automatic { 0 } else { 4 },
             gear: (!self.automatic).then_some(self.selected_gear),
+            clutch: levels.clutch,
+            handbrake: levels.handbrake,
+            brake: levels.brake,
+            throttle: levels.throttle,
             ..Default::default()
-        };
-        for &(pedal, y) in self.touches.values() {
-            match pedal {
-                Pedal::Clutch => c.clutch = 1.0,
-                Pedal::Handbrake => c.handbrake = 1.0,
-                Pedal::Brake => c.brake = c.brake.max(pressure(y, self.invert_pedals)),
-                Pedal::Throttle => c.throttle = c.throttle.max(pressure(y, self.invert_pedals)),
-            }
         }
-        c
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_targets_follow_draw_order_and_moved_pedals_invert_together() {
+        use crate::driving::layout::{ControlsLayoutOverrides, EditableControl, Rect};
+        let mut ov = ControlsLayoutOverrides::default();
+        ov.rects[EditableControl::Throttle as usize] = Some(Rect::new(0.1, 0.55, 0.2, 0.2));
+        let layout = ov.apply(DrivingLayout::default());
+        let mut c = Controls::new();
+        c.touch_layout(&layout, 1, 0.12, 0.63, true, false);
+        assert_eq!(c.selected_gear, 2, "visible throttle covers gear-down");
+        assert!(c.levels_in(&layout).throttle > 0.0);
+        for inverted in [false, true] {
+            c.clear();
+            c.invert_pedals = inverted;
+            let layout = DrivingLayout::default();
+            for (id, rect) in [(1, layout.brake), (2, layout.throttle)] {
+                let y = if inverted {
+                    rect.y + 0.02
+                } else {
+                    rect.bottom() - 0.01
+                };
+                c.touch_layout(
+                    &layout,
+                    id,
+                    f64::from(rect.center_x()),
+                    f64::from(y),
+                    true,
+                    false,
+                );
+            }
+            let levels = c.levels_in(&layout);
+            assert!(levels.brake > 0.95 && levels.throttle > 0.95);
+        }
+    }
 
     #[test]
     fn shifts_are_edge_triggered_bounded_and_independent_of_pedals() {

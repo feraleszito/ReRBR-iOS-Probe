@@ -12,9 +12,17 @@ pub const MAX_WHEEL_TRAVEL: f32 = 0.25;
 /// The original reRBR playback chase FOV; previous modes keep their own FOV.
 pub const CHASE_FOV: f32 = 65.0;
 pub fn view_projection(camera: Camera, aspect: f32) -> Mat4 {
+    view_projection_with_fov(camera, aspect, CHASE_FOV)
+}
+pub fn view_projection_with_fov(camera: Camera, aspect: f32, fov_degrees: f32) -> Mat4 {
     let forward = (camera.target - camera.eye).normalize_or(Vec3::Z);
     let up = camera.up.normalize_or(Vec3::Y);
-    coords::projection(CHASE_FOV.to_radians(), aspect)
+    let fov = if fov_degrees.is_finite() {
+        fov_degrees.clamp(30.0, 110.0)
+    } else {
+        CHASE_FOV
+    };
+    coords::projection(fov.to_radians(), aspect)
         * crate::harwood::look_to_lh(camera.eye, forward, up)
 }
 
@@ -48,6 +56,29 @@ impl ChasePath {
         self.ground
             .support_height(position)
             .is_some_and(|y| position.y >= y + 0.05)
+    }
+    #[cfg(feature = "physics-stage")]
+    pub(crate) fn camera_clear(&self, camera: Camera, fov: f32, size: (u32, u32)) -> bool {
+        if !camera.eye.is_finite()
+            || !camera.target.is_finite()
+            || !self.camera_supported(camera.eye)
+        {
+            return false;
+        }
+        let forward = (camera.target - camera.eye).normalize_or(Vec3::NEG_Z);
+        let right = camera.up.cross(forward).normalize_or(Vec3::X);
+        let up = forward.cross(right).normalize_or(Vec3::Y);
+        let near = camera.eye + forward * 0.05;
+        let hy = 0.05 * (fov.clamp(30.0, 110.0).to_radians() * 0.5).tan();
+        let hx = hy * size.0.max(1) as f32 / size.1.max(1) as f32;
+        [
+            near - right * hx - up * hy,
+            near + right * hx - up * hy,
+            near - right * hx + up * hy,
+            near + right * hx + up * hy,
+        ]
+        .iter()
+        .all(|&p| self.camera_supported(p) && self.ground.segment_clear(camera.target, p))
     }
     #[cfg(feature = "physics-drive")]
     pub(crate) fn supports_driving(&self, position: Vec3) -> bool {

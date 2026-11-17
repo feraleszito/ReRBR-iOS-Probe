@@ -33,6 +33,163 @@ impl Rect {
             h: (self.h - 2.0 * y).max(0.0),
         }
     }
+    pub fn clamped_to_screen(self) -> Self {
+        let w = if self.w.is_finite() {
+            self.w.clamp(0.06, 0.35)
+        } else {
+            0.14
+        };
+        let h = if self.h.is_finite() {
+            self.h.clamp(0.06, 0.45)
+        } else {
+            0.14
+        };
+        let x = if self.x.is_finite() {
+            self.x.clamp(0.01, (0.99 - w).max(0.01))
+        } else {
+            0.05
+        };
+        let y = if self.y.is_finite() {
+            self.y.clamp(0.08, (0.99 - h).max(0.08))
+        } else {
+            0.50
+        };
+        Self { x, y, w, h }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditableControl {
+    Handbrake = 0,
+    Clutch = 1,
+    GearDown = 2,
+    GearUp = 3,
+    Brake = 4,
+    Throttle = 5,
+}
+impl EditableControl {
+    pub const ALL: [Self; 6] = [
+        Self::Handbrake,
+        Self::Clutch,
+        Self::GearDown,
+        Self::GearUp,
+        Self::Brake,
+        Self::Throttle,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Handbrake => "HB",
+            Self::Clutch => "CLUTCH",
+            Self::GearDown => "GEAR -",
+            Self::GearUp => "GEAR +",
+            Self::Brake => "BRAKE",
+            Self::Throttle => "THROTTLE",
+        }
+    }
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Handbrake => "handbrake",
+            Self::Clutch => "clutch",
+            Self::GearDown => "gear_down",
+            Self::GearUp => "gear_up",
+            Self::Brake => "brake",
+            Self::Throttle => "throttle",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ControlsLayoutOverrides {
+    pub rects: [Option<Rect>; 6],
+}
+impl ControlsLayoutOverrides {
+    pub fn apply(self, mut layout: DrivingLayout) -> DrivingLayout {
+        let slots = [
+            &mut layout.handbrake,
+            &mut layout.clutch,
+            &mut layout.gear_down,
+            &mut layout.gear_up,
+            &mut layout.brake,
+            &mut layout.throttle,
+        ];
+        for (slot, ov) in slots.into_iter().zip(self.rects) {
+            if let Some(rect) = ov {
+                *slot = rect.clamped_to_screen();
+            }
+        }
+        layout
+    }
+    pub fn rect_of(self, control: EditableControl, base: DrivingLayout) -> Rect {
+        self.apply(base).control_rect(control)
+    }
+    pub fn set_center(&mut self, control: EditableControl, base: DrivingLayout, cx: f32, cy: f32) {
+        let cur = self.rect_of(control, base);
+        let moved = Rect::new(cx - cur.w * 0.5, cy - cur.h * 0.5, cur.w, cur.h).clamped_to_screen();
+        self.rects[control as usize] = Some(moved);
+    }
+    pub fn resize(&mut self, control: EditableControl, base: DrivingLayout, dw: f32, dh: f32) {
+        let cur = self.rect_of(control, base);
+        let resized = Rect::new(cur.x - dw * 0.5, cur.y - dh * 0.5, cur.w + dw, cur.h + dh)
+            .clamped_to_screen();
+        self.rects[control as usize] = Some(resized);
+    }
+    pub fn reset(&mut self) {
+        self.rects = [None; 6];
+    }
+    pub fn parse(text: &str) -> Self {
+        let mut out = Self::default();
+        for line in text.lines() {
+            let Some((key, val)) = line.split_once('=') else {
+                continue;
+            };
+            let Some(ctrl) = EditableControl::ALL.into_iter().find(|c| c.key() == key) else {
+                continue;
+            };
+            let parts: Vec<f32> = val
+                .split(',')
+                .map(|s| s.trim().parse::<f32>())
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_default();
+            if parts.len() == 4 {
+                out.rects[ctrl as usize] =
+                    Some(Rect::new(parts[0], parts[1], parts[2], parts[3]).clamped_to_screen());
+            }
+        }
+        out
+    }
+    pub fn serialize(self) -> String {
+        let mut s = String::new();
+        for ctrl in EditableControl::ALL {
+            if let Some(r) = self.rects[ctrl as usize] {
+                let r = r.clamped_to_screen();
+                s.push_str(&format!(
+                    "{}={:.4},{:.4},{:.4},{:.4}\n",
+                    ctrl.key(),
+                    r.x,
+                    r.y,
+                    r.w,
+                    r.h
+                ));
+            }
+        }
+        s
+    }
+    fn path() -> Option<std::path::PathBuf> {
+        std::env::var_os("RERBR_PROBE_DOCUMENTS")
+            .map(|d| std::path::PathBuf::from(d).join("rerbr-controls-layout.txt"))
+    }
+    pub fn load() -> Self {
+        Self::path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map_or_else(Self::default, |s| Self::parse(&s))
+    }
+    pub fn save(self) {
+        if let Some(path) = Self::path() {
+            if let Err(error) = std::fs::write(path, self.serialize()) {
+                eprintln!("CONTROL SETTINGS: {error}");
+            }
+        }
+    }
 }
 
 /// Normalized fractions of the drawable. UIKit reports points; the ratio is
@@ -103,6 +260,16 @@ impl Default for DrivingLayout {
     }
 }
 impl DrivingLayout {
+    pub fn control_rect(&self, control: EditableControl) -> Rect {
+        match control {
+            EditableControl::Handbrake => self.handbrake,
+            EditableControl::Clutch => self.clutch,
+            EditableControl::GearDown => self.gear_down,
+            EditableControl::GearUp => self.gear_up,
+            EditableControl::Brake => self.brake,
+            EditableControl::Throttle => self.throttle,
+        }
+    }
     pub fn for_size(_size: (u32, u32)) -> Self {
         Self::with_insets(Insets::query())
     }
@@ -134,6 +301,63 @@ impl DrivingLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moved_and_resized_controls_restore_the_same_hit_regions() {
+        use crate::driving::controls::Controls;
+        for ctrl in EditableControl::ALL {
+            let base = DrivingLayout::with_insets(Insets {
+                left: 0.05,
+                right: 0.03,
+                ..Insets::ZERO
+            });
+            let mut overrides = ControlsLayoutOverrides::default();
+            overrides.set_center(ctrl, base, 0.5, 0.6);
+            overrides.resize(ctrl, base, 0.04, 0.02);
+            let restored = ControlsLayoutOverrides::parse(&overrides.serialize());
+            let layout = restored.apply(base);
+            let r = layout.control_rect(ctrl);
+            let a = overrides.rects[ctrl as usize].unwrap();
+            let b = restored.rects[ctrl as usize].unwrap();
+            assert!(
+                (a.x - b.x).abs() < 1e-4
+                    && (a.y - b.y).abs() < 1e-4
+                    && (a.w - b.w).abs() < 1e-4
+                    && (a.h - b.h).abs() < 1e-4,
+                "restored rect {b:?} diverged from {a:?}"
+            );
+            assert_eq!(
+                ControlsLayoutOverrides::parse(&restored.serialize()),
+                restored
+            );
+            let mut controls = Controls::new();
+            controls.touch_layout(
+                &layout,
+                1,
+                f64::from(r.center_x()),
+                f64::from(r.y + r.h * 0.5),
+                true,
+                false,
+            );
+            let levels = controls.levels_in(&layout);
+            match ctrl {
+                EditableControl::GearDown => assert_eq!(controls.selected_gear, 1),
+                EditableControl::GearUp => assert_eq!(controls.selected_gear, 3),
+                EditableControl::Handbrake => assert_eq!(levels.handbrake, 1.0),
+                EditableControl::Clutch => assert_eq!(levels.clutch, 1.0),
+                EditableControl::Brake => assert!(levels.brake > 0.0),
+                EditableControl::Throttle => assert!(levels.throttle > 0.0),
+            }
+            controls.touch_layout(&layout, 1, 0.0, 0.0, false, true);
+            assert_eq!(controls.levels_in(&layout).throttle, 0.0);
+            overrides.reset();
+            assert_eq!(overrides.rects, [None; 6]);
+        }
+        assert!(ControlsLayoutOverrides::parse("brake=1,bad,2,3,4")
+            .rects
+            .iter()
+            .all(Option::is_none));
+    }
 
     #[test]
     fn legacy_side_targets_remain_reachable() {

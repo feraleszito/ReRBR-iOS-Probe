@@ -390,7 +390,7 @@ mod tests {
     fn catalog_marks_only_the_shared_validated_profile_selected() {
         let selection = Selection::default();
         let catalog = Catalog::descriptors(&selection);
-        assert_eq!(catalog.vehicles.len(), 2);
+        assert_eq!(catalog.vehicles.len(), 9);
         assert_eq!(catalog.vehicles[0].state, EntryState::Selected);
         assert_eq!(catalog.vehicles[1].state, EntryState::Unsupported);
         assert_eq!(catalog.stages.len(), 4);

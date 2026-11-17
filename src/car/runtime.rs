@@ -53,6 +53,20 @@ pub(crate) struct Runtime {
     fatal: bool,
     reason: &'static str,
 }
+pub(crate) struct Uploaded {
+    selection: rerbr_content::Selection,
+    path: ChasePath,
+    car: Gpu,
+    terrain: Stats,
+    #[cfg(feature = "physics-drive")]
+    pivots: [rerbr_render_core::Vec3; 4],
+    #[cfg(feature = "physics-stage")]
+    mounts: crate::driving::cameras::Mounts,
+    #[cfg(feature = "physics-stage")]
+    cockpit: Option<rerbr_render_core::Mat4>,
+    #[cfg(feature = "physics-stage")]
+    cockpit_error: Option<String>,
+}
 impl Runtime {
     pub fn new() -> Self {
         Self {
@@ -72,6 +86,78 @@ impl Runtime {
             reason: "",
         }
     }
+    pub(crate) fn upload_prepared(
+        prepared: super::Prepared,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+    ) -> Result<(Uploaded, crate::harwood::LoadedBlock), String> {
+        let super::Prepared {
+            path,
+            car,
+            selection,
+            terrain,
+        } = prepared;
+        selection.validate_current_backend()?;
+        if car.vehicle != selection.vehicle {
+            return Err("selected vehicle does not match prepared geometry".into());
+        }
+        let stats = Stats {
+            vertices: terrain.mesh.vertices.len(),
+            triangles: terrain.mesh.indices.len() / 3,
+            draws: terrain.mesh.draws.len(),
+            textures: terrain.textures.len(),
+        };
+        #[cfg(feature = "physics-drive")]
+        let pivots = car.geometry.pivots;
+        #[cfg(feature = "physics-stage")]
+        let (mounts, cockpit, cockpit_error) =
+            (car.cameras, car.cockpit, car.cockpit_error.clone());
+        let car = Gpu::new(device, queue, format, car)?;
+        Ok((
+            Uploaded {
+                selection,
+                path,
+                car,
+                terrain: stats,
+                #[cfg(feature = "physics-drive")]
+                pivots,
+                #[cfg(feature = "physics-stage")]
+                mounts,
+                #[cfg(feature = "physics-stage")]
+                cockpit,
+                #[cfg(feature = "physics-stage")]
+                cockpit_error,
+            },
+            terrain,
+        ))
+    }
+    pub(crate) fn install_uploaded(&mut self, uploaded: Uploaded) -> Result<(), String> {
+        uploaded.selection.validate_current_backend()?;
+        #[cfg(feature = "physics-drive")]
+        {
+            if self.driving.selection() != &uploaded.selection {
+                return Err("stale scene selection".into());
+            }
+            self.driving.install_pivots(uploaded.pivots);
+        }
+        #[cfg(feature = "physics-stage")]
+        {
+            self.driving.mounts = Some(uploaded.mounts);
+            self.driving.cockpit_ready = uploaded.cockpit.is_some();
+            self.driving.cockpit_node = uploaded.cockpit;
+            self.driving.cockpit_error = uploaded.cockpit_error;
+        }
+        self.car = Some(uploaded.car);
+        self.path = Some(uploaded.path);
+        self.terrain = uploaded.terrain;
+        self.session = None;
+        self.frame = None;
+        self.fatal = false;
+        self.reason = "";
+        Ok(())
+    }
+    #[cfg(not(feature = "physics-drive"))]
     pub fn install(
         &mut self,
         prepared: super::Prepared,
@@ -79,40 +165,8 @@ impl Runtime {
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
     ) -> Result<crate::harwood::LoadedBlock, String> {
-        let super::Prepared {
-            path,
-            car,
-            selection,
-            terrain,
-        } = prepared;
-        let stats = Stats {
-            vertices: terrain.mesh.vertices.len(),
-            triangles: terrain.mesh.indices.len() / 3,
-            draws: terrain.mesh.draws.len(),
-            textures: terrain.textures.len(),
-        };
-        selection.validate_current_backend()?;
-        if car.vehicle != selection.vehicle {
-            return Err("selected vehicle does not match prepared car geometry".into());
-        }
-        #[cfg(feature = "physics-drive")]
-        self.driving.configure_selection(selection)?;
-        #[cfg(feature = "physics-drive")]
-        self.driving.install(&car.geometry);
-        #[cfg(feature = "physics-stage")]
-        {
-            self.driving.mounts = Some(car.cameras);
-            self.driving.cockpit_ready = car.cockpit.is_some();
-            self.driving.cockpit_node = car.cockpit;
-            self.driving.cockpit_error = car.cockpit_error.clone();
-        }
-        self.car = Some(Gpu::new(device, queue, format, car)?);
-        self.path = Some(path);
-        self.terrain = stats;
-        self.session = None;
-        self.frame = None;
-        self.fatal = false;
-        self.reason = "";
+        let (uploaded, terrain) = Self::upload_prepared(prepared, device, queue, format)?;
+        self.install_uploaded(uploaded)?;
         Ok(terrain)
     }
     #[cfg(feature = "physics-drive")]
@@ -216,10 +270,14 @@ impl Runtime {
         let steering = self.driving.steering_angle;
         #[cfg(not(feature = "physics-drive"))]
         let steering = 0.0;
+        #[cfg(feature = "physics-drive")]
+        let fov = Some(self.driving.camera_fov_degrees());
+        #[cfg(not(feature = "physics-drive"))]
+        let fov = None;
         if self.comparison.car_visible && !self.fatal {
             if let (Some(gpu), Some(frame)) = (&self.car, &self.frame) {
-                gpu.draw(
-                    queue, encoder, target, depth, size, format, frame, interior, steering,
+                gpu.draw_with_fov(
+                    queue, encoder, target, depth, size, format, frame, interior, steering, fov,
                 );
             }
         }

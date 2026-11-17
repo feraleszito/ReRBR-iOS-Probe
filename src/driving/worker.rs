@@ -29,6 +29,26 @@ pub struct Worker {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Worker {
+    #[cfg(test)]
+    pub(crate) fn is_idle(&self) -> bool {
+        self.thread.is_none()
+    }
+    pub fn idle() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(Shared {
+                input: Control::default(),
+                paused: true,
+                error: None,
+                pair: None,
+                rest: None,
+                payload_bytes: 0,
+                last_step_ms: 0.0,
+                physics_status: None,
+            })),
+            stop: Arc::new(AtomicBool::new(false)),
+            thread: None,
+        }
+    }
     pub fn new_selected(selection: rerbr_content::Selection, automatic: bool) -> Self {
         let state = Arc::new(Mutex::new(Shared {
             input: Control::default(),
@@ -55,7 +75,7 @@ impl Worker {
                     Ok(Err(e)) => Some(e),
                     Err(e) => Some(rerbr_sim::describe_stop(e.as_ref())),
                 };
-                if let Some(e) = error {
+                if let Some(e) = error.filter(|_| !stop_thread.load(Ordering::Relaxed)) {
                     super::audio::set_paused(true);
                     eprintln!("physics-drive STOP: {e}");
                     let mut s = s.lock().unwrap();
@@ -79,9 +99,9 @@ impl Worker {
     pub fn shutdown(&mut self) {
         super::audio::set_paused(true);
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        // A boot cannot be interrupted inside original code. It retires on its
+        // own worker; never wait for it on the Metal/UI thread.
+        self.thread.take();
     }
 }
 impl Drop for Worker {
@@ -95,9 +115,25 @@ fn run(
     automatic: bool,
     selection: &rerbr_content::Selection,
 ) -> Result<(), String> {
+    static OWNER: Mutex<()> = Mutex::new(());
+    let _owner = loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        match OWNER.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                std::thread::sleep(Duration::from_millis(2))
+            }
+            Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+        }
+    };
     let documents = std::env::var_os("RERBR_PROBE_DOCUMENTS").ok_or("Documents unavailable")?;
     let paths = Paths::for_selection(std::path::Path::new(&documents), selection)?;
     let mut session = Session::boot_selected(&paths, selection, automatic)?;
+    if stop.load(Ordering::Relaxed) {
+        return Ok(());
+    }
     super::audio::init(std::path::Path::new(&documents), &selection.vehicle, 44100);
     let mut previous = session.sample();
     if !valid(&previous) {

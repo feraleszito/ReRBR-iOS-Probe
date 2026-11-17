@@ -8,6 +8,11 @@
         A10000000000000000000002 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003; };
         A10000000000000000000003 /* librerbr_probe.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004; };
 
+        A10000000000000000000004 /* Font licence in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006; };
+        A10000000000000000000005 /* Font notice in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007; };
+        A20000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = text; path = "../assets/fonts/UFL.txt"; sourceTree = SOURCE_ROOT; };
+        A20000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = text; path = "../assets/fonts/NOTICE.md"; sourceTree = SOURCE_ROOT; };
+
         A20000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
         A20000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
         A20000000000000000000003 = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
@@ -16,7 +21,7 @@
 
         A30000000000000000000001 = {
             isa = PBXGroup;
-            children = (A30000000000000000000002, A20000000000000000000004, A30000000000000000000003);
+            children = (A30000000000000000000002, A20000000000000000000004, A20000000000000000000006, A20000000000000000000007, A30000000000000000000003);
             sourceTree = "<group>";
         };
         A30000000000000000000002 = {
@@ -33,7 +38,7 @@
         };
 
         A40000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001); runOnlyForDeploymentPostprocessing = 0; };
-        A40000000000000000000002 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000002); runOnlyForDeploymentPostprocessing = 0; };
+        A40000000000000000000002 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000002, A10000000000000000000004, A10000000000000000000005); runOnlyForDeploymentPostprocessing = 0; };
         A40000000000000000000003 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000003); runOnlyForDeploymentPostprocessing = 0; };
 
         A50000000000000000000001 = {

@@ -13,9 +13,10 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PRIVATE_ASSET_SUFFIXES = {".lbs", ".dds", ".rbz", ".sgc", ".sgs", ".lsp", ".dll", ".exe", ".bin", ".trk", ".dls", ".col", ".fnc", ".mat", ".zip", ".vso", ".pso", ".eng", ".wav", ".ogg", ".flac", ".bank"}
+PRIVATE_ASSET_SUFFIXES = {".lbs", ".dds", ".rbz", ".sgc", ".sgs", ".lsp", ".dll", ".exe", ".bin", ".r8", ".trk", ".dls", ".col", ".fnc", ".mat", ".zip", ".vso", ".pso", ".eng", ".wav", ".ogg", ".flac", ".bank"}
 CPU_TABLES = {"vendor/rerbr-sim/upstream/rbr-physics/data/rsqrt.bin",
               "vendor/rerbr-sim/upstream/rbr-physics/data/rcp.bin"}
+FONT_ATLASES = {"assets/fonts/ubuntu_light_512.r8": "98f2d9a21bc147fad2e83e99e9be6751309fc63aaca8144b7399e319c6b52c3a"}
 
 
 def is_private_asset(name):
@@ -145,13 +146,18 @@ def verify_sources():
         children[:] = [name for name in children if name not in {".git", ".validation", "target", "build"}]
         for name in files:
             relative = (Path(directory) / name).relative_to(ROOT).as_posix()
-            require(not is_private_asset(name) or relative in CPU_TABLES,
+            require(not is_private_asset(name) or relative in CPU_TABLES or relative in FONT_ATLASES,
                     f"private game resource in source tree: {Path(directory) / name}")
     for relative in (
         "xcode/ReRBRProbe/LaunchScreen.storyboard",
         "xcode/ReRBRProbe.xcodeproj/xcshareddata/xcschemes/ReRBRProbe.xcscheme",
     ):
         ET.parse(ROOT / relative)
+    for relative, expected in FONT_ATLASES.items():
+        data = (ROOT / relative).read_bytes()
+        require(len(data) == 512 * 512 and hashlib.sha256(data).hexdigest() == expected, "font atlas mismatch")
+    require("UBUNTU FONT LICENCE Version 1.0" in (ROOT / "assets/fonts/UFL.txt").read_text(), "font licence missing")
+    require("Copyright 2011 Canonical Ltd." in (ROOT / "assets/fonts/NOTICE.md").read_text(), "font copyright missing")
     with (ROOT / "xcode/ReRBRProbe/Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
     require(info["CFBundlePackageType"] == "APPL", "application package type")
@@ -161,6 +167,7 @@ def verify_sources():
     project = (ROOT / "xcode/ReRBRProbe.xcodeproj/project.pbxproj").read_text()
     require(re.findall(r"PRODUCT_BUNDLE_IDENTIFIER\s*=\s*([^;]+);", project) == ["org.rerbr.probe"],
             "preserve installed app bundle identity")
+    require("../assets/fonts/UFL.txt" in project and "../assets/fonts/NOTICE.md" in project, "font notices must ship in the app")
     require("AudioToolbox" in project and "AVFoundation" in project, "native audio frameworks missing")
     definitions = re.findall(r"^\s*([A-F0-9]{24})(?: /\*.*?\*/)? = \{", project, re.MULTILINE)
     require(len(definitions) == len(set(definitions)), "duplicate Xcode object IDs")

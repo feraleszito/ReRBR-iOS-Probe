@@ -2,19 +2,19 @@
 use super::layout::Rect;
 use crate::harwood::benchmark::hud::Canvas;
 
-pub const TEXT: [u8; 4] = [236, 243, 249, 255];
-pub const DIM: [u8; 4] = [128, 139, 152, 255];
-pub const ACCENT: [u8; 4] = [240, 184, 80, 255];
-pub const PANEL: [u8; 4] = [6, 10, 16, 214];
-pub const PANEL_DEEP: [u8; 4] = [3, 5, 9, 236];
-pub const PANEL_ACTIVE: [u8; 4] = [20, 34, 50, 226];
-pub const LINE: [u8; 4] = [64, 82, 102, 255];
-pub const GOOD: [u8; 4] = [104, 214, 154, 255];
-pub const WARN: [u8; 4] = [242, 202, 96, 255];
-pub const BAD: [u8; 4] = [236, 112, 112, 255];
-pub const INFO: [u8; 4] = [118, 198, 236, 255];
+pub const TEXT: [u8; 4] = [245, 247, 250, 255];
+pub const DIM: [u8; 4] = [142, 150, 164, 255];
+pub const ACCENT: [u8; 4] = [220, 48, 48, 255];
+pub const PANEL: [u8; 4] = [14, 18, 25, 228];
+pub const PANEL_DEEP: [u8; 4] = [8, 10, 14, 240];
+pub const PANEL_ACTIVE: [u8; 4] = [24, 30, 40, 242];
+pub const LINE: [u8; 4] = [42, 50, 64, 255];
+pub const GOOD: [u8; 4] = [72, 199, 142, 255];
+pub const WARN: [u8; 4] = [235, 179, 64, 255];
+pub const BAD: [u8; 4] = [224, 72, 72, 255];
+pub const INFO: [u8; 4] = [130, 180, 235, 255];
 
-pub const BACKDROP: [u8; 4] = [3, 5, 8, 248];
+pub const BACKDROP: [u8; 4] = [8, 10, 14, 255];
 
 pub fn px(r: Rect, canvas: &Canvas) -> (f32, f32, f32, f32) {
     (
@@ -45,7 +45,7 @@ pub fn panel(canvas: &mut Canvas, r: Rect, fill_color: [u8; 4], border: [u8; 4])
 }
 
 pub fn texture_width(text: &str, scale: f32) -> f32 {
-    text.chars().count() as f32 * 14.0 * scale
+    Canvas::measure_width(text, scale)
 }
 
 pub fn text_center(canvas: &mut Canvas, r: Rect, value: &str, scale: f32, color: [u8; 4]) {
@@ -82,18 +82,19 @@ pub fn text_clipped(
     scale: f32,
     color: [u8; 4],
 ) {
-    let advance = 14.0 * scale;
-    let max = (max_width / advance).floor().max(1.0) as usize;
-    let upper = value.to_ascii_uppercase();
-    let bytes = upper.as_bytes();
-    if bytes.len() <= max {
-        canvas.text(x, y, &upper, scale, color);
+    if Canvas::measure_width(value, scale) <= max_width {
+        canvas.text(x, y, value, scale, color);
         return;
     }
-    let keep = max.saturating_sub(2);
-    let mut clipped = String::from_utf8_lossy(&bytes[..keep.min(bytes.len())]).into_owned();
-    while clipped.len() < keep {
-        clipped.push(' ');
+    let ellipsis_w = Canvas::measure_width("..", scale);
+    let mut clipped = String::new();
+    for ch in value.chars() {
+        let mut next = clipped.clone();
+        next.push(ch);
+        if Canvas::measure_width(&next, scale) + ellipsis_w > max_width {
+            break;
+        }
+        clipped.push(ch);
     }
     clipped.push_str("..");
     canvas.text(x, y, &clipped, scale, color);

@@ -1,9 +1,25 @@
-//! Small original 5x7 ASCII overlay. No font files or UI dependencies.
-const WIDTH: u32 = 96;
-const HEIGHT: u32 = 32;
-const MAX_VERTICES: usize = 16384;
+//! Modern anti-aliased sans-serif HUD overlay (Ubuntu-Light 512x512 R8 atlas).
+#[path = "font_metrics.rs"]
+mod font_metrics;
 
-/// Virtual-pixel overlay builder on top of the existing 5x7 atlas.
+const WIDTH: u32 = font_metrics::ATLAS_WIDTH;
+const HEIGHT: u32 = font_metrics::ATLAS_HEIGHT;
+const MAX_VERTICES: usize = 32768;
+
+fn find_glyph(ch: char) -> &'static font_metrics::GlyphMetric {
+    let code = ch as u32;
+    font_metrics::GLYPHS
+        .iter()
+        .find(|g| g.code == code)
+        .unwrap_or_else(|| {
+            font_metrics::GLYPHS
+                .iter()
+                .find(|g| g.code == b'?' as u32)
+                .unwrap_or(&font_metrics::GLYPHS[0])
+        })
+}
+
+/// Virtual-pixel overlay builder using the licensed proportional font atlas.
 /// Coordinates are 640 units wide, origin top-left, like `vertices`.
 #[cfg(feature = "physics-drive")]
 pub struct Canvas {
@@ -65,36 +81,94 @@ impl Canvas {
             color,
         );
     }
-    /// Draws uppercase text (unsupported bytes become `?`) and returns the advance.
+    /// Measures proportional text width in virtual pixels.
+    pub fn measure_width(text: &str, scale: f32) -> f32 {
+        let k = scale.max(0.1) * 0.62;
+        text.chars().map(|ch| find_glyph(ch).advance * k).sum()
+    }
+    /// Draws proportional anti-aliased sans-serif text (supporting accents and symbols) and returns the advance.
     pub fn text(&mut self, x: f32, y: f32, text: &str, scale: f32, color: [u8; 4]) -> f32 {
-        let scale = scale.max(0.1);
-        let advance = 14.0 * scale;
+        let k = scale.max(0.1) * 0.62;
         let mut cursor = x;
-        for c in text.to_ascii_uppercase().bytes() {
-            if c == b' ' {
-                cursor += advance;
-                continue;
+        for ch in text.chars() {
+            let g = find_glyph(ch);
+            if ch != ' ' {
+                let u0 = g.x as f32 / WIDTH as f32;
+                let v0 = g.y as f32 / HEIGHT as f32;
+                let u1 = (g.x + g.w) as f32 / WIDTH as f32;
+                let v1 = (g.y + g.h) as f32 / HEIGHT as f32;
+                self.quad(
+                    cursor,
+                    y,
+                    g.w as f32 * k,
+                    g.h as f32 * k,
+                    [u0, v0, u1, v1],
+                    color,
+                );
             }
-            let c = if (32..96).contains(&c) { c } else { b'?' };
-            let i = u32::from(c - 32);
-            let sx = (i % 16) * 6;
-            let sy = (i / 16) * 8;
-            self.quad(
-                cursor,
-                y,
-                12.0 * scale,
-                16.0 * scale,
-                [
-                    sx as f32 / WIDTH as f32,
-                    sy as f32 / HEIGHT as f32,
-                    (sx + 5) as f32 / WIDTH as f32,
-                    (sy + 7) as f32 / HEIGHT as f32,
-                ],
-                color,
-            );
-            cursor += advance;
+            cursor += g.advance * k;
         }
         cursor - x
+    }
+    /// Draws a smooth circular ring spinner (for the animated loading screen).
+    pub fn spinner(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        thickness: f32,
+        phase: f32,
+        color: [u8; 4],
+    ) {
+        let segments = 24usize;
+        let arc_segments = 8usize;
+        let white = [
+            1.5 / WIDTH as f32,
+            1.5 / HEIGHT as f32,
+            1.5 / WIDTH as f32,
+            1.5 / HEIGHT as f32,
+        ];
+        // Subtle dark track ring
+        for i in 0..segments {
+            let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+            let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+            self.ring_segment(cx, cy, radius, thickness, a0, a1, white, [42, 50, 64, 180]);
+        }
+        // Rotating bright arc
+        for i in 0..arc_segments {
+            let frac = (i + 1) as f32 / arc_segments as f32;
+            let a0 = phase + (i as f32 / segments as f32) * std::f32::consts::TAU;
+            let a1 = phase + ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+            let c = [color[0], color[1], color[2], (color[3] as f32 * frac) as u8];
+            self.ring_segment(cx, cy, radius, thickness, a0, a1, white, c);
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn ring_segment(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        thickness: f32,
+        a0: f32,
+        a1: f32,
+        uv: [f32; 4],
+        color: [u8; 4],
+    ) {
+        let r_in = (radius - thickness * 0.5).max(1.0);
+        let r_out = radius + thickness * 0.5;
+        let (s0, c0) = a0.sin_cos();
+        let (s1, c1) = a1.sin_cos();
+        let p00 = (cx + c0 * r_in, cy + s0 * r_in);
+        let p01 = (cx + c0 * r_out, cy + s0 * r_out);
+        let p10 = (cx + c1 * r_in, cy + s1 * r_in);
+        let p11 = (cx + c1 * r_out, cy + s1 * r_out);
+        for (px, py) in [p00, p01, p10, p10, p01, p11] {
+            for value in [px / 320.0 - 1.0, 1.0 - py * 2.0 / self.height, uv[0], uv[1]] {
+                self.out.extend(value.to_ne_bytes());
+            }
+            self.out.extend(color);
+        }
     }
     pub fn finish(self) -> Vec<u8> {
         debug_assert!(self.out.len() / 20 <= MAX_VERTICES);
@@ -152,7 +226,7 @@ impl Hud {
             cache: None,
         });
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("own ASCII bitmap"),
+            label: Some("Ubuntu-Light sans-serif atlas"),
             size: wgpu::Extent3d {
                 width: WIDTH,
                 height: HEIGHT,
@@ -172,7 +246,7 @@ impl Hud {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &atlas(),
+            font_metrics::ATLAS_BYTES,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(WIDTH),
@@ -186,9 +260,9 @@ impl Hud {
         );
         let view = texture.create_view(&Default::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("HUD nearest"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            label: Some("HUD linear"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -300,48 +374,40 @@ pub fn vertices(lines: &[String], size: (u32, u32)) -> Vec<u8> {
         [5, 8, 14, 235],
     );
     for (row, line) in lines.iter().take(12).enumerate() {
-        for (column, c) in line.to_ascii_uppercase().bytes().take(42).enumerate() {
-            if c == b' ' {
-                continue;
+        let mut cursor = 20.0;
+        let scale = 0.55;
+        for ch in line.chars().take(80) {
+            let g = find_glyph(ch);
+            if cursor + g.w as f32 * scale > 620.0 {
+                break;
             }
-            let c = if (32..96).contains(&c) { c } else { b'?' };
-            let i = u32::from(c - 32);
-            let x = (i % 16) * 6;
-            let y = (i / 16) * 8;
-            quad(
-                20.0 + column as f32 * 14.0,
-                32.0 + row as f32 * 20.0,
-                12.0,
-                16.0,
-                [
-                    x as f32 / WIDTH as f32,
-                    y as f32 / HEIGHT as f32,
-                    (x + 5) as f32 / WIDTH as f32,
-                    (y + 7) as f32 / HEIGHT as f32,
-                ],
-                [240, 248, 255, 255],
-            );
+            if ch != ' ' {
+                quad(
+                    cursor,
+                    32.0 + row as f32 * 20.0,
+                    g.w as f32 * scale,
+                    g.h as f32 * scale,
+                    [
+                        g.x as f32 / WIDTH as f32,
+                        g.y as f32 / HEIGHT as f32,
+                        (g.x + g.w) as f32 / WIDTH as f32,
+                        (g.y + g.h) as f32 / HEIGHT as f32,
+                    ],
+                    [240, 248, 255, 255],
+                );
+            }
+            cursor += g.advance * scale;
         }
     }
     debug_assert!(out.len() / 20 <= MAX_VERTICES);
     out
 }
 
+#[allow(dead_code)]
 pub fn atlas() -> Vec<u8> {
-    let mut out = vec![0; (WIDTH * HEIGHT) as usize];
-    for c in 32..96u8 {
-        let id = u32::from(c - 32);
-        for (y, bits) in glyph(c).iter().enumerate() {
-            for x in 0..5 {
-                if bits & (1 << (4 - x)) != 0 {
-                    out[((id / 16 * 8 + y as u32) * WIDTH + id % 16 * 6 + x) as usize] = 255;
-                }
-            }
-        }
-    }
-    out[0] = 255; // White sample for the panel; spaces themselves are not drawn.
-    out
+    font_metrics::ATLAS_BYTES.to_vec()
 }
+#[allow(dead_code)]
 fn glyph(c: u8) -> [u8; 7] {
     match c {
         b'A' => [14, 17, 17, 31, 17, 17, 17],
@@ -393,5 +459,20 @@ fn glyph(c: u8) -> [u8; 7] {
         b')' => [8, 4, 2, 2, 2, 4, 8],
         b' ' => [0; 7],
         _ => [14, 17, 1, 2, 4, 0, 4],
+    }
+}
+
+#[cfg(test)]
+mod atlas_tests {
+    use super::*;
+    #[test]
+    fn licensed_atlas_metrics_stay_inside_the_texture() {
+        assert_eq!(font_metrics::ATLAS_BYTES.len(), (WIDTH * HEIGHT) as usize);
+        assert_eq!(font_metrics::ATLAS_BYTES[0], 255);
+        for g in font_metrics::GLYPHS {
+            assert!(u32::from(g.x) + u32::from(g.w) <= WIDTH);
+            assert!(u32::from(g.y) + u32::from(g.h) <= HEIGHT);
+            assert!(g.advance.is_finite() && g.advance > 0.0);
+        }
     }
 }

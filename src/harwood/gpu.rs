@@ -3,14 +3,16 @@ use super::{texture::upload_plan, Camera, LoadedBlock, MODE_NAME};
 use crate::asset_probe::TextureData;
 use rerbr_asset_formats::dds;
 use rerbr_render_core::coords;
-use std::{collections::BTreeMap, path::PathBuf, sync::mpsc};
+#[cfg(not(feature = "physics-drive"))]
+use std::sync::mpsc;
+use std::{collections::BTreeMap, path::PathBuf};
 use wgpu::util::DeviceExt;
 
 #[cfg(not(feature = "harwood-benchmark"))]
 type Payload = LoadedBlock;
 #[cfg(all(feature = "harwood-benchmark", not(feature = "car-chase-benchmark")))]
 type Payload = super::benchmark::Prepared;
-#[cfg(feature = "car-chase-benchmark")]
+#[cfg(all(feature = "car-chase-benchmark", not(feature = "physics-drive")))]
 type Payload = crate::car::Prepared;
 #[cfg(all(feature = "harwood-benchmark", not(feature = "car-chase-benchmark")))]
 use super::benchmark::Runtime as BenchmarkRuntime;
@@ -18,7 +20,10 @@ use super::benchmark::Runtime as BenchmarkRuntime;
 use crate::car::runtime::Runtime as BenchmarkRuntime;
 
 pub(crate) struct Scene {
+    #[cfg(not(feature = "physics-drive"))]
     pending: Option<mpsc::Receiver<Result<Payload, String>>>,
+    #[cfg(feature = "physics-drive")]
+    loader: crate::driving::loading::Loader<(crate::car::runtime::Uploaded, Block)>,
     gpu: Option<Block>,
     failed: bool,
     mode: u32,
@@ -35,7 +40,10 @@ impl Scene {
     }
     pub fn new(bc_enabled: bool) -> Self {
         let mut scene = Self {
+            #[cfg(not(feature = "physics-drive"))]
             pending: None,
+            #[cfg(feature = "physics-drive")]
+            loader: crate::driving::loading::Loader::default(),
             gpu: None,
             failed: false,
             mode: 0,
@@ -48,38 +56,41 @@ impl Scene {
             scene.fail("DEVICE: BC is unavailable; texture upload not attempted".into());
             return scene;
         }
-        let Some(documents) = std::env::var_os("RERBR_PROBE_DOCUMENTS") else {
-            scene.fail("READ: native Documents path unavailable".into());
-            return scene;
-        };
-        #[cfg(feature = "car-chase-benchmark")]
-        let car_root = crate::car::private_root(std::path::Path::new(&documents));
         #[cfg(feature = "physics-drive")]
-        let selection = scene.benchmark.driving.selection().clone();
-        #[cfg(all(feature = "car-chase-benchmark", not(feature = "physics-drive")))]
-        let selection = rerbr_content::Selection::default();
-        #[cfg(feature = "car-chase-benchmark")]
-        let maps = PathBuf::from(&documents).join(&selection.stage.documents_maps);
-        #[cfg(not(feature = "car-chase-benchmark"))]
-        let maps = PathBuf::from(documents).join("Harwood/Maps");
-        let (tx, rx) = mpsc::channel();
-        match std::thread::Builder::new()
-            .name(format!("{MODE_NAME}-load"))
-            .spawn(move || {
-                #[cfg(not(feature = "harwood-neighbors"))]
-                let result = super::load(&maps);
-                #[cfg(all(feature = "harwood-neighbors", not(feature = "harwood-benchmark")))]
-                let result = super::neighbors::load(&maps).map(|set| set.render);
-                #[cfg(all(feature = "harwood-benchmark", not(feature = "car-chase-benchmark")))]
-                let result = super::benchmark::load(&maps);
-                #[cfg(feature = "car-chase-benchmark")]
-                let result = crate::car::prepare_selected(&car_root, &maps, &selection);
-                let _ = tx.send(result);
-            }) {
-            Ok(_) => scene.pending = Some(rx),
-            Err(e) => scene.fail(format!("READ: could not start worker: {e}")),
+        {
+            scene
         }
-        scene
+        #[cfg(not(feature = "physics-drive"))]
+        {
+            let Some(documents) = std::env::var_os("RERBR_PROBE_DOCUMENTS") else {
+                scene.fail("READ: native Documents path unavailable".into());
+                return scene;
+            };
+            #[cfg(feature = "car-chase-benchmark")]
+            let car_root = crate::car::private_root(std::path::Path::new(&documents));
+            let maps = PathBuf::from(documents).join("Harwood/Maps");
+            let (tx, rx) = mpsc::channel();
+            match std::thread::Builder::new()
+                .name(format!("{MODE_NAME}-load"))
+                .spawn(move || {
+                    #[cfg(not(feature = "harwood-neighbors"))]
+                    let result = super::load(&maps);
+                    #[cfg(all(feature = "harwood-neighbors", not(feature = "harwood-benchmark")))]
+                    let result = super::neighbors::load(&maps).map(|set| set.render);
+                    #[cfg(all(
+                        feature = "harwood-benchmark",
+                        not(feature = "car-chase-benchmark")
+                    ))]
+                    let result = super::benchmark::load(&maps);
+                    #[cfg(feature = "car-chase-benchmark")]
+                    let result = crate::car::prepare(&car_root, &maps);
+                    let _ = tx.send(result);
+                }) {
+                Ok(_) => scene.pending = Some(rx),
+                Err(e) => scene.fail(format!("READ: could not start worker: {e}")),
+            }
+            scene
+        }
     }
 
     fn fail(&mut self, error: String) {
@@ -101,6 +112,7 @@ impl Scene {
         );
     }
 
+    #[cfg(not(feature = "physics-drive"))]
     fn upload(
         &mut self,
         device: &wgpu::Device,
@@ -143,27 +155,52 @@ impl Scene {
         background: wgpu::Color,
     ) {
         #[cfg(feature = "physics-drive")]
-        if let Some(selection) = self.benchmark.driving.take_pending_scene_reload() {
-            if let Some(documents) = std::env::var_os("RERBR_PROBE_DOCUMENTS") {
-                let car_root = crate::car::private_root(std::path::Path::new(&documents));
-                let maps = PathBuf::from(&documents).join(&selection.stage.documents_maps);
+        {
+            if let Some(action) = self.benchmark.driving.take_scene_action() {
                 self.gpu = None;
                 self.benchmark.release_scene();
                 self.failed = false;
                 self.first_frame = true;
-                let (tx, rx) = mpsc::channel();
-                match std::thread::Builder::new()
-                    .name(format!("{MODE_NAME}-reload"))
-                    .spawn(move || {
-                        let _ = tx.send(crate::car::prepare_selected(&car_root, &maps, &selection));
-                    }) {
-                    Ok(_) => self.pending = Some(rx),
-                    Err(e) => self.fail(format!("READ: could not start reload worker: {e}")),
+                match action {
+                    crate::driving::SceneAction::Unload => self.loader.cancel(),
+                    crate::driving::SceneAction::Load(selection) => {
+                        let device = device.clone();
+                        let queue = queue.clone();
+                        self.loader.request(Box::new(move |cancel| {
+                            let documents = std::env::var_os("RERBR_PROBE_DOCUMENTS")
+                                .ok_or("Documents unavailable")?;
+                            let car_root =
+                                crate::car::private_root(std::path::Path::new(&documents));
+                            let maps =
+                                PathBuf::from(&documents).join(&selection.stage.documents_maps);
+                            let prepared =
+                                crate::car::prepare_selected(&car_root, &maps, &selection)?;
+                            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                                return Err("load cancelled".into());
+                            }
+                            let (uploaded, terrain) = BenchmarkRuntime::upload_prepared(
+                                prepared, &device, &queue, format,
+                            )?;
+                            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                                return Err("load cancelled".into());
+                            }
+                            let block = Block::new(&device, &queue, format, terrain)?;
+                            Ok((uploaded, block))
+                        }));
+                    }
                 }
-            } else {
-                self.fail("READ: Documents root unavailable for stage reload".into());
+            }
+            if let Some(result) = self.loader.poll() {
+                match result.and_then(|(uploaded, block)| {
+                    self.benchmark.install_uploaded(uploaded)?;
+                    Ok(block)
+                }) {
+                    Ok(block) => self.gpu = Some(block),
+                    Err(error) => self.fail(error),
+                }
             }
         }
+        #[cfg(not(feature = "physics-drive"))]
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
                 Ok(result) => {
@@ -191,7 +228,11 @@ impl Scene {
                 self.render_scope = Some(device.push_error_scope(wgpu::ErrorFilter::Validation));
                 eprintln!("{MODE_NAME} RENDER: encoding first frame with {} indexed draws; CW/back cull, Depth32Float Greater clear=0", block.draws.len());
             }
-            block.draw(
+            #[cfg(feature = "physics-drive")]
+            let fov = Some(self.benchmark.driving.camera_fov_degrees());
+            #[cfg(not(feature = "physics-drive"))]
+            let fov: Option<f32> = None;
+            block.draw_with_fov(
                 device,
                 queue,
                 encoder,
@@ -200,6 +241,7 @@ impl Scene {
                 self.mode,
                 format.is_srgb(),
                 background,
+                fov,
             );
             #[cfg(feature = "car-chase-benchmark")]
             self.benchmark.draw_car(
@@ -532,7 +574,7 @@ impl Block {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw(
+    fn draw_with_fov(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -542,6 +584,7 @@ impl Block {
         mode: u32,
         srgb: bool,
         background: wgpu::Color,
+        fov_degrees: Option<f32>,
     ) {
         if size != self.depth_size {
             self.depth = Some(
@@ -576,9 +619,24 @@ impl Block {
             );
         }
         #[cfg(not(feature = "car-chase-benchmark"))]
-        let vp = self.camera.view_projection(size.0 as f32 / size.1 as f32);
+        let vp = fov_degrees.map_or_else(
+            || self.camera.view_projection(size.0 as f32 / size.1 as f32),
+            |f| {
+                self.camera
+                    .view_projection_with_fov(size.0 as f32 / size.1 as f32, f)
+            },
+        );
         #[cfg(feature = "car-chase-benchmark")]
-        let vp = crate::car::placement::view_projection(self.camera, size.0 as f32 / size.1 as f32);
+        let vp = fov_degrees.map_or_else(
+            || crate::car::placement::view_projection(self.camera, size.0 as f32 / size.1 as f32),
+            |f| {
+                crate::car::placement::view_projection_with_fov(
+                    self.camera,
+                    size.0 as f32 / size.1 as f32,
+                    f,
+                )
+            },
+        );
         let mut bytes: Vec<_> = vp
             .to_cols_array()
             .into_iter()

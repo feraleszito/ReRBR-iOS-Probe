@@ -227,9 +227,8 @@ fn runtime_restarts_cached_route_and_invalidates_interrupted_runs() {
 #[test]
 fn hud_has_bounded_finite_vertices_and_original_binary_font() {
     let atlas = hud::atlas();
-    assert_eq!(atlas.len(), 96 * 32);
-    assert!(atlas.iter().all(|&v| v == 0 || v == 255));
-    assert!(atlas.iter().filter(|&&v| v == 255).count() > 300);
+    assert_eq!(atlas.len(), 512 * 512);
+    assert!(atlas.iter().filter(|&&v| v > 127).count() > 5000);
     for size in [(1488, 2266), (2266, 1488)] {
         let data = hud::vertices(&vec!["X".repeat(100); 20], size);
         assert!(data.len() / 20 < 8192);
