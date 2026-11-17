@@ -1,0 +1,65 @@
+# Codemagic CI/CD configuration for ReRBR-iOS-Probe
+# Builds the unsigned iPadOS IPA in physics-stage mode on Apple Silicon (M2).
+
+workflows:
+  rerbr-probe-unsigned:
+    name: ReRBRProbe unsigned iPadOS (physics-stage)
+    instance_type: mac_mini_m2
+    max_build_duration: 35
+    environment:
+      xcode: 16.4
+      vars:
+        PROBE_MODE: physics-stage
+        CARGO_TERM_COLOR: always
+    # Triggers are omitted so builds are only run on demand (manual trigger from Codemagic UI).
+    # To enable automatic builds on git push, uncomment the following block:
+    # triggering:
+    #   events:
+    #     - push
+    #   branch_patterns:
+    #     - pattern: main
+    #       include: true
+    #       source: true
+    scripts:
+      - name: Check repository layout
+        script: |
+          for file in Cargo.toml Cargo.lock scripts/build-ios.sh scripts/verify.py xcode/ReRBRProbe.xcodeproj/project.pbxproj; do
+            if [[ ! -f "$file" ]]; then
+              echo "Expected $file at the repository root." >&2
+              exit 1
+            fi
+          done
+
+      - name: Check Xcode and iPhoneOS SDK
+        script: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Install pinned Rust toolchain and target
+        script: |
+          set -e
+          if command -v rustup &> /dev/null; then
+            rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy --target aarch64-apple-ios
+            rustup default 1.97.1
+          else
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 --profile minimal --component rustfmt,clippy --target aarch64-apple-ios
+          fi
+          source "$HOME/.cargo/env" || true
+          rustup target add aarch64-apple-ios
+          rustup component add rustfmt clippy
+          echo "PATH=$HOME/.cargo/bin:$PATH" >> $CM_ENV
+          rustc --version
+          cargo --version
+
+      - name: Compile and inspect unsigned device IPA
+        script: |
+          set -e
+          source "$HOME/.cargo/env" 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
+          rm -rf build
+          bash scripts/build-ios.sh
+
+    artifacts:
+      - build/ReRBRProbe-unsigned.ipa
+      - build/SHA256SUMS
+      - build/*.log
+      - build/*.txt
