@@ -417,6 +417,53 @@ pub struct Image {
     pub blocks: Vec<(u32, u32)>,
     /// The handles of the detachable car parts (`rbr_recording::detach::PARTS`): each part's animation object, with its index.
     pub detach: Vec<(u32, u32)>,
+    /// Unit tangent along the driveline at the finish marker distance, in physics coordinates.
+    pub finish_direction: Option<[f32; 3]>,
+}
+
+fn finish_direction_at(track: &trk::TrkFile, finish_dist: Option<f32>) -> Option<[f32; 3]> {
+    let dist = finish_dist.filter(|&d| d > 0.0 && d.is_finite())?;
+    let dl = track.chunks.iter().find_map(|c| match &c.payload {
+        trk::ChunkPayload::DriveLine(d) => Some(d),
+        _ => None,
+    })?;
+    if dl.records.len() < 2 {
+        return None;
+    }
+    let idx = dl
+        .records
+        .windows(2)
+        .position(|w| w[0].value <= dist && dist <= w[1].value)
+        .unwrap_or_else(|| {
+            dl.records
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| (a.value - dist).abs().total_cmp(&(b.value - dist).abs()))
+                .map(|(i, _)| i.min(dl.records.len() - 2))
+                .unwrap_or(0)
+        });
+    let (a, b) = (&dl.records[idx], &dl.records[idx + 1]);
+    let span = b.value - a.value;
+    let frac = if span.abs() > 1e-5 { ((dist - a.value) / span).clamp(0.0, 1.0) } else { 0.0 };
+    let mut dir = [
+        a.vectors[1].x + (b.vectors[1].x - a.vectors[1].x) * frac,
+        a.vectors[1].y + (b.vectors[1].y - a.vectors[1].y) * frac,
+        a.vectors[1].z + (b.vectors[1].z - a.vectors[1].z) * frac,
+    ];
+    let mut len_sq = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+    if len_sq <= 1e-8 {
+        dir = [
+            b.vectors[0].x - a.vectors[0].x,
+            b.vectors[0].y - a.vectors[0].y,
+            b.vectors[0].z - a.vectors[0].z,
+        ];
+        len_sq = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+    }
+    if len_sq <= 1e-8 || !len_sq.is_finite() {
+        return None;
+    }
+    let inv = 1.0 / len_sq.sqrt();
+    Some([dir[0] * inv, dir[1] * inv, dir[2] * inv])
 }
 
 fn read(data: &Data, path: &str) -> Result<Vec<u8>, String> {
@@ -609,6 +656,7 @@ pub fn build(data: &Data, stage_name: &str, app_state: u32, race: &Race) -> Resu
     mem.set_u32(stage::DRIVE_LINE, drive_line);
     let track =
         trk::parse(&stage_files::read(data, stage_name, "trk")?).map_err(|e| format!("{stage_name}.trk: {e:?}"))?;
+    let finish_direction = finish_direction_at(&track, dls.finish());
     let mesh_capacity: usize = track
         .chunks
         .iter()
@@ -777,6 +825,7 @@ pub fn build(data: &Data, stage_name: &str, app_state: u32, race: &Race) -> Resu
         built,
         blocks: heap.blocks.take(),
         detach,
+        finish_direction,
     })
 }
 

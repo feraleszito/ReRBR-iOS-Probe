@@ -54,6 +54,10 @@ impl FileAudit {
             )
         }
     }
+    pub fn missing_label(&self) -> Option<String> {
+        (self.checked && !self.missing.is_empty())
+            .then(|| format!("MISSING: {}", self.missing.join(", ")))
+    }
 }
 
 #[derive(Debug, Clone)]

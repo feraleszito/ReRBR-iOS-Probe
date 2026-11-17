@@ -24,6 +24,20 @@ use rbr_gameplay::{
     weather::{self, Draws, Preset, Season},
 };
 use rbr_hybrid::pure::{self, Playback};
+use rbr_physics::rigid_body::layout as body;
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StageTiming {
+    pub started: bool,
+    pub driveline_distance: f32,
+    pub start_distance: f32,
+    pub finish_distance: f32,
+    pub splits_passed: usize,
+    pub splits_total: usize,
+    pub split_times: Vec<Option<f64>>,
+    pub finished: bool,
+    pub finish_crossed_forward: bool,
+}
 
 pub struct Session {
     physics_audit: crate::physics_audit::PhysicsAudit,
@@ -31,6 +45,8 @@ pub struct Session {
     control_at: u32,
     dt: f32,
     steps: u32,
+    finish_direction: Option<[f32; 3]>,
+    finish_crossed_forward: bool,
 }
 impl Session {
     /// Call on the dedicated STACK_BYTES worker; callers must catch pure-host panics there.
@@ -128,7 +144,15 @@ impl Session {
             std::env::consts::ARCH,
             std::env::consts::OS
         );
-        Ok(Self { physics_audit, playback, control_at: image.control_at, dt, steps: 0 })
+        Ok(Self {
+            physics_audit,
+            playback,
+            control_at: image.control_at,
+            dt,
+            steps: 0,
+            finish_direction: image.finish_direction,
+            finish_crossed_forward: false,
+        })
     }
     pub fn physics_audit(&self) -> &crate::physics_audit::PhysicsAudit {
         &self.physics_audit
@@ -147,9 +171,45 @@ impl Session {
         for (k, word) in input.words().iter().enumerate() {
             payload[k * 4..k * 4 + 4].copy_from_slice(&word.unwrap_or(0).to_le_bytes());
         }
+        let before = pure::time_keeper(&self.playback.pure.mem);
         self.playback.step(Some(&payload), 1);
         self.steps = self.steps.checked_add(1).ok_or("physics step counter exhausted")?;
+        if before.card.finish_time.is_none() {
+            let after = pure::time_keeper(&self.playback.pure.mem);
+            if after.card.finish_time.is_some()
+                && after.card.finish > 0.0
+                && after.card.passed >= after.card.splits().len()
+            {
+                let mem = &self.playback.pure.mem;
+                let car = mem.u32(pure::CAR_PTR);
+                let vel: [f32; 3] = mem.f32s(car + body::LINEAR_VELOCITY);
+                let forward = match self.finish_direction {
+                    Some(dir) => vel[0] * dir[0] + vel[1] * dir[1] + vel[2] * dir[2] > 0.0,
+                    None => after.card.last >= before.card.last,
+                };
+                if forward {
+                    self.finish_crossed_forward = true;
+                }
+            }
+        }
         Ok(())
+    }
+    pub fn timing(&self) -> StageTiming {
+        let tk = pure::time_keeper(&self.playback.pure.mem);
+        let splits_total = tk.card.splits().len();
+        let finished =
+            tk.card.finish_time.is_some() && tk.card.finish > 0.0 && tk.card.passed >= splits_total;
+        StageTiming {
+            started: tk.card.started,
+            driveline_distance: tk.card.last,
+            start_distance: tk.card.start,
+            finish_distance: tk.card.finish,
+            splits_passed: tk.card.passed,
+            splits_total,
+            split_times: tk.card.splits().iter().map(|s| s.time.map(|t| t - tk.card.origin)).collect(),
+            finished,
+            finish_crossed_forward: finished && self.finish_crossed_forward,
+        }
     }
     pub fn sample(&self) -> diagnostics::Sample {
         diagnostics::read(&self.playback, self.control_at, self.steps)

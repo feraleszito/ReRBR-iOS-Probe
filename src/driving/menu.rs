@@ -26,6 +26,14 @@ pub enum Page {
     About,
     Paused,
     Driving,
+    StageComplete,
+}
+
+pub(crate) fn format_stage_time(seconds: f64) -> String {
+    let tenths = (seconds.max(0.0) * 10.0).round() as u64;
+    let mins = tenths / 600;
+    let secs = (tenths % 600) as f64 / 10.0;
+    format!("{mins:02}:{secs:04.1}")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +175,7 @@ pub struct Context<'a> {
     pub invert_pedals: bool,
     pub ctrl_opacity: f32,
     pub global_opacity: f32,
+    pub stage_result: Option<super::race::StageResult>,
 }
 
 #[derive(Debug, Default)]
@@ -221,6 +230,7 @@ impl Menu {
             Page::About => "ACERCA DE",
             Page::Paused => "PAUSA",
             Page::Driving => "CONDUCCIÓN",
+            Page::StageComplete => "STAGE COMPLETE",
         }
     }
     pub fn rows(&self, ctx: &Context) -> Vec<Row> {
@@ -327,6 +337,9 @@ impl Menu {
                         },
                     });
                 }
+                if let Some(missing) = entry.and_then(|e| e.files.missing_label()) {
+                    rows.push(Row::info("FILES", missing));
+                }
                 rows.push(Row::action(
                     "INSPECCIONAR ARCHIVOS",
                     Command::InspectContent,
@@ -374,6 +387,9 @@ impl Menu {
                             enabled: supported && files_ready,
                         },
                     });
+                }
+                if let Some(missing) = entry.and_then(|e| e.files.missing_label()) {
+                    rows.push(Row::info("FILES", missing));
                 }
                 rows.push(Row::action(
                     "INSPECCIONAR ARCHIVOS",
@@ -563,6 +579,34 @@ impl Menu {
                 Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
             ],
             Page::Driving => Vec::new(),
+            Page::StageComplete => {
+                let mut rows = Vec::new();
+                if let Some(res) = ctx.stage_result {
+                    rows.push(Row::info(
+                        "DRIVING TIME",
+                        format_stage_time(res.driving_seconds),
+                    ));
+                    rows.push(Row::info(
+                        "PENALTIES",
+                        if res.false_start {
+                            format!("+{:.0}s FALSE START", res.penalty_seconds)
+                        } else {
+                            "0.0s".into()
+                        },
+                    ));
+                    rows.push(Row::info(
+                        "TOTAL TIME",
+                        format_stage_time(res.total_seconds),
+                    ));
+                    rows.push(Row::info(
+                        "CHECKPOINTS",
+                        format!("{}/{}", res.splits_passed, res.splits_total),
+                    ));
+                }
+                rows.push(Row::action("RESTART", Command::Restart));
+                rows.push(Row::action("MAIN MENU", Command::ResetToMain));
+                rows
+            }
         }
     }
     pub fn subtitle(&self, ctx: &Context) -> Vec<String> {
@@ -696,6 +740,14 @@ impl Menu {
                 "RESTART RESETS TO THE ORIGINAL SPAWN".into(),
             ],
             Page::Driving => Vec::new(),
+            Page::StageComplete => vec![
+                format!("{} — {}", vehicle.name, stage.name),
+                if ctx.stage_result.is_some_and(|r| r.false_start) {
+                    "TIMED FINISH WITH JUMP-START PENALTY".into()
+                } else {
+                    "TIMED FINISH VERIFIED".into()
+                },
+            ],
         }
     }
     fn row_bounds(&self) -> (f32, f32, f32, f32) {
@@ -1115,6 +1167,7 @@ mod tests {
             invert_pedals: false,
             ctrl_opacity: 0.5,
             global_opacity: 0.5,
+            stage_result: None,
         }
     }
 
@@ -1462,5 +1515,65 @@ mod tests {
         assert_eq!(restored.camera, 2);
         assert_eq!(restored.volume, 0.25);
         assert!(restored.invert_pedals);
+    }
+
+    #[test]
+    fn stage_complete_and_missing_filenames_render_expected_rows() {
+        use crate::driving::race::StageResult;
+        let selection = Selection::default();
+        let mut content = Catalog::descriptors(&selection);
+        content.stages[1].files = crate::driving::content_manager::FileAudit {
+            checked: true,
+            present: 9,
+            total: 10,
+            missing: vec!["track-22_N_textures.rbz".into()],
+        };
+        let mut ctx = context(&selection, &content);
+        ctx.stage_result = Some(StageResult {
+            driving_seconds: 125.4,
+            penalty_seconds: 10.0,
+            total_seconds: 135.4,
+            false_start: true,
+            splits_passed: 2,
+            splits_total: 2,
+        });
+
+        let mut menu = Menu {
+            page: Page::StageComplete,
+            ..Menu::default()
+        };
+        let rows = menu.rows(&ctx);
+        assert!(rows.iter().any(|r| r.label == "DRIVING TIME"));
+        assert!(rows.iter().any(|r| r.label == "TOTAL TIME"));
+        assert!(rows.iter().any(|r| matches!(
+            &r.kind,
+            RowKind::Info { value } if value == "02:15.4"
+        )));
+        assert!(rows.iter().any(|r| matches!(
+            &r.kind,
+            RowKind::Info { value } if value == "2/2"
+        )));
+        assert!(rows.iter().any(|r| matches!(
+            r.kind,
+            RowKind::Action {
+                command: Command::Restart,
+                enabled: true
+            }
+        )));
+        assert!(rows.iter().any(|r| matches!(
+            r.kind,
+            RowKind::Action {
+                command: Command::ResetToMain,
+                enabled: true
+            }
+        )));
+
+        menu.page = Page::StageDetail;
+        menu.inspected_stage = 1;
+        let detail_rows = menu.rows(&ctx);
+        assert!(detail_rows.iter().any(|r| matches!(
+            &r.kind,
+            RowKind::Info { value } if value.contains("track-22_N_textures.rbz")
+        )));
     }
 }

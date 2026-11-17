@@ -1,6 +1,6 @@
 use rerbr_sim::{
     diagnostics::Sample,
-    drive::{Control, Session},
+    drive::{Control, Session, StageTiming},
     inputs::Paths,
     STACK_BYTES,
 };
@@ -22,6 +22,7 @@ pub struct Shared {
     pub payload_bytes: usize,
     pub last_step_ms: f64,
     pub physics_status: Option<String>,
+    pub timing: StageTiming,
 }
 pub struct Worker {
     pub state: Arc<Mutex<Shared>>,
@@ -44,6 +45,7 @@ impl Worker {
                 payload_bytes: 0,
                 last_step_ms: 0.0,
                 physics_status: None,
+                timing: StageTiming::default(),
             })),
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
@@ -59,6 +61,7 @@ impl Worker {
             payload_bytes: 0,
             last_step_ms: 0.0,
             physics_status: None,
+            timing: StageTiming::default(),
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let s = state.clone();
@@ -144,6 +147,7 @@ fn run(
         s.rest = Some(previous.clone());
         s.physics_status = Some(session.physics_audit().summary());
         s.payload_bytes = session.payload_bytes();
+        s.timing = session.timing();
         s.pair = Some((previous.clone(), previous.clone(), Instant::now()));
     }
     let dt = f64::from(session.dt());
@@ -190,6 +194,7 @@ fn run(
             let mut s = shared.lock().unwrap();
             s.last_step_ms = began.elapsed().as_secs_f64() * 1000.0;
             s.payload_bytes = session.payload_bytes();
+            s.timing = session.timing();
             // Publish the simulated boundary, retaining fractional fixed-step debt.
             let boundary = now
                 .checked_sub(Duration::from_secs_f64((clock.debt - dt).max(0.0)))

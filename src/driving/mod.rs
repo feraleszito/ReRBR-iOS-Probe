@@ -270,8 +270,8 @@ impl Runtime {
                         return Err("STAGE UNAVAILABLE IN THIS MODE".into());
                     }
                     if let Some(entry) = self.content.stage(&self.selection.stage.id) {
-                        if entry.files.checked && !entry.files.missing.is_empty() {
-                            return Err(format!("MISSING: {}", entry.files.missing.join(", ")));
+                        if let Some(missing) = entry.files.missing_label() {
+                            return Err(missing);
                         }
                     }
                     Ok(())
@@ -293,7 +293,8 @@ impl Runtime {
             }
             Start => {
                 let state = self.worker.state.lock().unwrap();
-                if self.pivots.is_some()
+                if self.race.phase != race::Phase::Finished
+                    && self.pivots.is_some()
                     && self.tilt.is_finite()
                     && self.scene_error.is_none()
                     && state.error.is_none()
@@ -449,8 +450,8 @@ impl Runtime {
             SelectStage(index) => {
                 let result = match self.content.stages.get(index).cloned() {
                     None => Err("UNKNOWN STAGE".into()),
-                    Some(entry) if entry.files.checked && !entry.files.missing.is_empty() => {
-                        Err(format!("MISSING {} FILES", entry.files.missing.len()))
+                    Some(entry) if entry.files.missing_label().is_some() => {
+                        Err(entry.files.missing_label().unwrap())
                     }
                     Some(entry) => self.configure_selection(rerbr_content::Selection {
                         vehicle: self.selection.vehicle.clone(),
@@ -635,8 +636,20 @@ impl Runtime {
         }
         let active = self.menu.page == menu::Page::Driving && steering_ready && healthy;
         self.race.tick(now, active);
-        // Physics and engine revving are active during countdown and driving; paused during presentation and menus.
-        state.paused = !active
+        if self.race.phase == race::Phase::Driving
+            && state.timing.finished
+            && state.timing.finish_crossed_forward
+            && self
+                .race
+                .finish(state.timing.splits_passed, state.timing.splits_total)
+        {
+            self.controls.clear();
+            self.menu.show(menu::Page::StageComplete);
+            self.message = None;
+        }
+        let running = self.menu.page == menu::Page::Driving && steering_ready && healthy;
+        // Physics and engine revving are active during countdown and driving; paused during presentation, menus, and finished state.
+        state.paused = !running
             || (self.race.phase != race::Phase::Driving
                 && self.race.phase != race::Phase::Countdown);
         if state.paused {
@@ -822,6 +835,7 @@ impl Runtime {
             invert_pedals: self.controls.invert_pedals,
             ctrl_opacity: self.controls_layout.opacity_for(self.selected_control),
             global_opacity: self.controls_layout.global_opacity,
+            stage_result: self.race.result(),
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
@@ -837,7 +851,9 @@ impl Runtime {
         if let Some(message) = &self.message {
             return message.clone();
         }
-        if self.menu.page == menu::Page::Paused {
+        if self.menu.page == menu::Page::StageComplete {
+            "STAGE COMPLETE / SELECT RESTART OR MAIN MENU".into()
+        } else if self.menu.page == menu::Page::Paused {
             "PAUSED / RESUME WHEN READY".into()
         } else {
             "READY - TAP A ROW".into()
@@ -909,9 +925,7 @@ impl Runtime {
             ui::text_center(canvas, rect, "GO!", 2.2, ui::GOOD);
         }
         if let Some(secs) = self.stage_elapsed_secs() {
-            let mins = (secs / 60.0).floor() as u32;
-            let rem = secs - f64::from(mins) * 60.0;
-            let timer = format!("{mins:02}:{rem:04.1}");
+            let timer = menu::format_stage_time(secs);
             let r = Rect::new(0.43, 0.015, 0.14, 0.055);
             ui::panel(canvas, r, PANEL_DEEP, LINE);
             ui::text_center(canvas, r, &timer, 0.85, TEXT);
@@ -991,6 +1005,16 @@ impl Runtime {
         }
         if let Some(status) = &state.physics_status {
             lines.extend(ui::wrap(status, 34));
+        }
+        if state.timing.finish_distance > 0.0 || state.timing.splits_total > 0 {
+            lines.push(format!(
+                "STAGE {:.0}M / {:.0}M | SPLITS {}/{} | FIN {}",
+                state.timing.driveline_distance,
+                state.timing.finish_distance,
+                state.timing.splits_passed,
+                state.timing.splits_total,
+                if state.timing.finished { "YES" } else { "NO" }
+            ));
         }
         if let Some((_, b, _)) = &state.pair {
             lines.extend([
@@ -1466,5 +1490,88 @@ mod reload_tests {
 
         app.apply_command(menu::Command::CtrlReset);
         assert_eq!(app.controls_layout.rects, [None; 6]);
+    }
+
+    #[test]
+    fn stage_complete_triggers_only_on_forward_finish_with_checkpoints_and_resets_cleanly() {
+        let mut app = Runtime::new();
+        app.apply_command(menu::Command::StartRally);
+        app.worker.shutdown();
+        app.worker = worker::Worker::idle();
+        app.install_pivots([Vec3::ZERO; 4]);
+        app.tilt = 0.0;
+        {
+            let mut st = app.worker.state.lock().unwrap();
+            st.rest = Some(Sample::default());
+        }
+        let layout = DrivingLayout::default();
+        let t0 = Instant::now();
+        app.sync_race_state(t0, 1.0 / 60.0, &layout, true);
+        let t_count = t0 + Duration::from_millis(3500);
+        app.sync_race_state(t_count, 1.0 / 60.0, &layout, true);
+        assert_eq!(app.race.phase, race::Phase::Countdown);
+        let t_go = t_count + Duration::from_secs(5);
+        app.sync_race_state(t_go, 1.0 / 60.0, &layout, true);
+        assert_eq!(app.race.phase, race::Phase::Driving);
+
+        // Reaching finish distance without clearing splits or without forward crossing must NOT finish.
+        {
+            let mut st = app.worker.state.lock().unwrap();
+            st.timing = rerbr_sim::drive::StageTiming {
+                started: true,
+                driveline_distance: 7150.0,
+                start_distance: 65.0,
+                finish_distance: 7148.0,
+                splits_passed: 2,
+                splits_total: 2,
+                split_times: vec![Some(45.0), Some(90.0)],
+                finished: true,
+                finish_crossed_forward: false,
+            };
+        }
+        let t_drive = t_go + Duration::from_secs(120);
+        let (_, _, paused) = app.sync_race_state(t_drive, 1.0 / 60.0, &layout, true);
+        assert!(!paused);
+        assert_eq!(app.menu.page, menu::Page::Driving);
+        assert_eq!(app.race.phase, race::Phase::Driving);
+
+        // Now cross the finish forward with all splits validated: freezes timer & shows StageComplete.
+        {
+            let mut st = app.worker.state.lock().unwrap();
+            st.timing.finish_crossed_forward = true;
+        }
+        let (_, _, paused) = app.sync_race_state(
+            t_drive + Duration::from_millis(500),
+            1.0 / 60.0,
+            &layout,
+            true,
+        );
+        assert!(paused);
+        assert_eq!(app.menu.page, menu::Page::StageComplete);
+        assert_eq!(app.race.phase, race::Phase::Finished);
+        let result = app.race.result().expect("stage result must be recorded");
+        assert!((result.driving_seconds - 120.5).abs() < 1e-6);
+        assert!((result.total_seconds - 120.5).abs() < 1e-6);
+        assert_eq!(result.splits_passed, 2);
+        assert_eq!(result.splits_total, 2);
+
+        // Further sync calls stay frozen at StageComplete.
+        let (_, _, paused_after) =
+            app.sync_race_state(t_drive + Duration::from_secs(30), 1.0 / 60.0, &layout, true);
+        assert!(paused_after);
+        assert_eq!(app.race.result(), Some(result));
+        assert_eq!(app.stage_elapsed_secs(), Some(result.total_seconds));
+
+        // Restart clears old result and enters Loading cleanly.
+        app.apply_command(menu::Command::Restart);
+        assert_eq!(app.menu.page, menu::Page::Loading);
+        assert_eq!(app.race.phase, race::Phase::Preparing);
+        assert_eq!(app.race.result(), None);
+
+        // ResetToMain returns to Idle and clears result.
+        app.apply_command(menu::Command::ResetToMain);
+        assert_eq!(app.menu.page, menu::Page::Main);
+        assert_eq!(app.race.phase, race::Phase::Idle);
+        assert_eq!(app.race.result(), None);
     }
 }

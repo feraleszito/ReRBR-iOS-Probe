@@ -14,6 +14,17 @@ pub enum Phase {
     Presentation,
     Countdown,
     Driving,
+    Finished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StageResult {
+    pub driving_seconds: f64,
+    pub penalty_seconds: f64,
+    pub total_seconds: f64,
+    pub false_start: bool,
+    pub splits_passed: usize,
+    pub splits_total: usize,
 }
 
 #[derive(Default)]
@@ -27,6 +38,7 @@ pub struct Clock {
     start_pos: Option<[f32; 3]>,
     start_forward: Option<[f32; 3]>,
     false_start_notice_until: Option<Instant>,
+    result: Option<StageResult>,
 }
 
 impl Clock {
@@ -47,6 +59,7 @@ impl Clock {
         self.start_pos = None;
         self.start_forward = None;
         self.false_start_notice_until = None;
+        self.result = None;
     }
 
     /// Progress of the cinematic camera from 0.0 to 1.0.
@@ -61,10 +74,37 @@ impl Clock {
         self.phase = Phase::Countdown;
         self.elapsed = Duration::ZERO;
         self.last = Some(now);
+        self.result = None;
     }
 
     pub fn pause(&mut self) {
         self.last = None;
+    }
+
+    /// Freezes the stage clock once when the car legitimately crosses the finish line.
+    pub fn finish(&mut self, splits_passed: usize, splits_total: usize) -> bool {
+        if self.phase != Phase::Driving || self.result.is_some() {
+            return false;
+        }
+        let driving_seconds = self.elapsed.as_secs_f64();
+        let penalty_seconds = self.penalty.as_secs_f64();
+        self.result = Some(StageResult {
+            driving_seconds,
+            penalty_seconds,
+            total_seconds: driving_seconds + penalty_seconds,
+            false_start: self.false_start,
+            splits_passed,
+            splits_total,
+        });
+        self.phase = Phase::Finished;
+        self.last = None;
+        self.go_until = None;
+        self.false_start_notice_until = None;
+        true
+    }
+
+    pub fn result(&self) -> Option<StageResult> {
+        self.result
     }
 
     /// Records the car's initial resting position and forward direction at start of countdown.
@@ -93,6 +133,9 @@ impl Clock {
     }
 
     pub fn tick(&mut self, now: Instant, active: bool) {
+        if self.phase == Phase::Finished {
+            return;
+        }
         if !active {
             self.pause();
             return;
@@ -133,14 +176,21 @@ impl Clock {
 
     /// Official elapsed race time including any jump-start penalty.
     pub fn seconds(&self) -> Option<f64> {
-        (self.phase == Phase::Driving)
-            .then_some(self.elapsed.as_secs_f64() + self.penalty.as_secs_f64())
+        match self.phase {
+            Phase::Driving => Some(self.elapsed.as_secs_f64() + self.penalty.as_secs_f64()),
+            Phase::Finished => self.result.map(|r| r.total_seconds),
+            _ => None,
+        }
     }
 
     /// Pure driving time without penalty.
     #[allow(dead_code)]
     pub fn raw_seconds(&self) -> Option<f64> {
-        (self.phase == Phase::Driving).then_some(self.elapsed.as_secs_f64())
+        match self.phase {
+            Phase::Driving => Some(self.elapsed.as_secs_f64()),
+            Phase::Finished => self.result.map(|r| r.driving_seconds),
+            _ => None,
+        }
     }
 
     #[allow(dead_code)]
@@ -260,5 +310,44 @@ mod tests {
         clock.prepare();
         assert!(!clock.is_false_start());
         assert_eq!(clock.penalty_seconds(), 0.0);
+        assert_eq!(clock.result(), None);
+    }
+
+    #[test]
+    fn finish_freezes_time_once_preserves_penalty_and_resets_on_prepare() {
+        let t = Instant::now();
+        let mut clock = Clock::default();
+        clock.ready(t);
+        assert!(!clock.finish(2, 2));
+
+        clock.record_start_origin([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        clock.check_jump_start(t + Duration::from_secs(1), [0.0, 0.0, 1.0]);
+        clock.tick(t + Duration::from_secs(5), true);
+        assert_eq!(clock.phase, Phase::Driving);
+
+        clock.tick(t + Duration::from_millis(68400), true);
+        assert!(clock.finish(2, 2));
+        assert!(!clock.finish(2, 2));
+        assert_eq!(clock.phase, Phase::Finished);
+
+        let res = clock.result().expect("stage result must be stored");
+        assert!((res.driving_seconds - 63.4).abs() < 1e-6);
+        assert!((res.penalty_seconds - 10.0).abs() < 1e-6);
+        assert!((res.total_seconds - 73.4).abs() < 1e-6);
+        assert!(res.false_start);
+        assert_eq!(res.splits_passed, 2);
+        assert_eq!(res.splits_total, 2);
+
+        // Further ticks or pauses must not alter the frozen final time.
+        clock.tick(t + Duration::from_secs(200), true);
+        clock.pause();
+        assert_eq!(clock.result(), Some(res));
+        assert_eq!(clock.seconds(), Some(res.total_seconds));
+        assert_eq!(clock.raw_seconds(), Some(res.driving_seconds));
+
+        clock.prepare();
+        assert_eq!(clock.phase, Phase::Preparing);
+        assert_eq!(clock.result(), None);
+        assert_eq!(clock.seconds(), None);
     }
 }
