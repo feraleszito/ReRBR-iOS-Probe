@@ -351,6 +351,24 @@ impl Menu {
                         },
                     });
                 }
+                if let Some(sheet) = entry.and_then(|e| e.tech_sheet.as_ref()) {
+                    rows.push(Row::info("FÍSICA", sheet.physics_summary()));
+                    rows.push(Row::info("TRACCIÓN", sheet.drivetrain_and_mass_summary()));
+                    rows.push(Row::info(
+                        "MOTOR / CAJA",
+                        sheet.gearbox_and_engine_summary(),
+                    ));
+                    rows.push(Row::info("DIFERENCIALES", sheet.differentials_summary()));
+                    rows.push(Row::info(
+                        "NEUMÁTICOS",
+                        sheet.tyres_and_suspension_summary(),
+                    ));
+                } else {
+                    rows.push(Row::info(
+                        "TRANSMISIÓN",
+                        format!("MANUAL {} VEL.", inspected.forward_gears),
+                    ));
+                }
                 if let Some(missing) = entry.and_then(|e| e.files.missing_label()) {
                     rows.push(Row::info("FILES", missing));
                 }
@@ -483,6 +501,10 @@ impl Menu {
                     ),
                     Row::info("STAGE GATE", if stage_ok { "ACCEPTED" } else { "REJECTED" }),
                     Row::info("PHYSICS DATA", "NGP NOT CERTIFIED"),
+                    Row::info(
+                        "BACKEND ACTIVO",
+                        super::ngp_proto::PhysicsBackend::OriginalRetail.label(),
+                    ),
                     Row::action("RUN DESCRIPTOR CHECK", Command::CheckPhysics),
                     Row::action("BACK", Command::Back),
                 ]
@@ -1809,5 +1831,48 @@ mod tests {
                 MAX_CANVAS_VERTICES
             );
         }
+    }
+
+    #[test]
+    fn garage_detail_displays_tech_sheet_and_fits_vertex_budget() {
+        use crate::driving::ngp_proto::{DrivetrainKind, PhysicsProfile, VehicleTechSheet};
+        use crate::harwood::benchmark::hud::{Canvas, MAX_CANVAS_VERTICES};
+
+        let selection = Selection::default();
+        let mut content = Catalog::descriptors(&selection);
+        content.vehicles[3].tech_sheet = Some(VehicleTechSheet {
+            profile: PhysicsProfile::OriginalRbr102,
+            drivetrain: DrivetrainKind::FourWheelDrive,
+            mass_kg: 1400.56,
+            forward_gears: 5,
+            total_gears: 7,
+            turbo: true,
+            rpm_limit: None,
+            front_diff_nm: Some(320.0),
+            center_diff_nm: Some(700.0),
+            rear_diff_nm: Some(600.0),
+            front_rollbar: Some(20000.0),
+            rear_rollbar: Some(30000.0),
+            tyre_radius_m: 0.315,
+            tyre_brand: "MICHELIN",
+            data_crc32: 0x1234_5678,
+        });
+        let ctx = context(&selection, &content);
+        let menu = Menu {
+            page: Page::GarageDetail,
+            inspected_vehicle: 3,
+            ..Menu::default()
+        };
+        let rows = menu.rows(&ctx);
+        assert!(rows.iter().any(|r| r.label == "FÍSICA"));
+        assert!(rows.iter().any(|r| r.label == "TRACCIÓN"));
+        assert!(rows.iter().any(|r| r.label == "MOTOR / CAJA"));
+        assert!(rows.iter().any(|r| r.label == "DIFERENCIALES"));
+        assert!(rows.iter().any(|r| r.label == "NEUMÁTICOS"));
+
+        let mut canvas = Canvas::new((1024, 768));
+        menu.draw(&mut canvas, &ctx, "OK");
+        let bytes = canvas.finish();
+        assert!(bytes.len() / 20 <= MAX_CANVAS_VERTICES);
     }
 }

@@ -6,6 +6,7 @@ pub mod controls;
 pub mod layout;
 pub(crate) mod loading;
 pub mod menu;
+pub mod ngp_proto;
 #[cfg(test)]
 mod private_tests;
 mod race;

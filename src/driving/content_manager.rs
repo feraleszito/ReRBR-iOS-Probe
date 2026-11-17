@@ -65,6 +65,7 @@ pub struct VehicleEntry {
     pub descriptor: VehicleDescriptor,
     pub state: EntryState,
     pub files: FileAudit,
+    pub tech_sheet: Option<super::ngp_proto::VehicleTechSheet>,
 }
 #[derive(Debug, Clone)]
 pub struct StageEntry {
@@ -101,6 +102,7 @@ impl Catalog {
                     descriptor,
                     state,
                     files: FileAudit::unchecked(),
+                    tech_sheet: None,
                 }
             })
             .collect();
@@ -118,6 +120,7 @@ impl Catalog {
                         EntryState::Unsupported
                     },
                     files: FileAudit::unchecked(),
+                    tech_sheet: None,
                 },
             );
         }
@@ -177,6 +180,8 @@ impl Catalog {
         catalog.inspected = true;
         for vehicle in &mut catalog.vehicles {
             vehicle.files = audit_vehicle(root, &vehicle.descriptor);
+            vehicle.tech_sheet =
+                super::ngp_proto::inspect_vehicle_in_documents(root, &vehicle.descriptor);
             vehicle.state = state_of(
                 &vehicle.descriptor.id,
                 &selection.vehicle.id,
