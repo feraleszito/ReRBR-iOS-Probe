@@ -3,8 +3,6 @@
 //! control, the frame clock and the substeps, the stage's states, timing and markers, and the race flow. The
 //! championship around it (the season, the AI, the service park, the saves) is `rbr-season`.
 //! `rbr-gameplay/README.md` lists each module, the original functions it ports and how it is checked.
-#![allow(unknown_lints)]
-#![allow(clippy::all)]
 
 pub mod camera_go;
 pub mod car_damage;

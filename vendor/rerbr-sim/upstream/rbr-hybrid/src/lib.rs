@@ -6,8 +6,6 @@
 //! bytes it pops.
 //!
 //! A binding declines (and the original runs) only before it changes anything. The C ABI is in [`ffi`].
-#![allow(unknown_lints)]
-#![allow(clippy::all)]
 
 pub mod book;
 mod call_memo;

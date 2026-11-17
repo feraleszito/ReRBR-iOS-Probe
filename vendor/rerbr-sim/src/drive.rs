@@ -99,6 +99,7 @@ impl Session {
         );
         race.options.aids.auto_gears = automatic;
         let name = paths.maps.join(&selection.stage.stem).to_string_lossy().into_owned();
+        let finish_direction = finish_direction_for(&data, &name);
         let image = boot::build(&data, &name, State::Load.value(), &race)?;
         let folder = diagnostics::physics_folder(&image.mem, selection.vehicle.original_slot)?;
         let physics_audit = crate::physics_audit::inspect(&audit_archive, &folder, race.surface)?;
@@ -150,7 +151,7 @@ impl Session {
             control_at: image.control_at,
             dt,
             steps: 0,
-            finish_direction: image.finish_direction,
+            finish_direction,
             finish_crossed_forward: false,
         })
     }
@@ -226,6 +227,55 @@ impl Session {
     pub fn payload_bytes(&self) -> usize {
         self.playback.pure.mem.pages().expect("paged boot").allocated_bytes()
     }
+}
+
+fn finish_direction_for(data: &rbr_formats::data::Data, stage_name: &str) -> Option<[f32; 3]> {
+    let dls_bytes = rbr_formats::stage_files::read(data, stage_name, "dls").ok()?;
+    let markers = rbr_formats::markers::parse(&dls_bytes).ok()?;
+    let dist = markers.finish().filter(|&d| d > 0.0 && d.is_finite())?;
+    let trk_bytes = rbr_formats::stage_files::read(data, stage_name, "trk").ok()?;
+    let track = rbr_formats::trk::parse(&trk_bytes).ok()?;
+    let dl = track.chunks.iter().find_map(|c| match &c.payload {
+        rbr_formats::trk::ChunkPayload::DriveLine(d) => Some(d),
+        _ => None,
+    })?;
+    if dl.records.len() < 2 {
+        return None;
+    }
+    let idx = dl
+        .records
+        .windows(2)
+        .position(|w| w[0].value <= dist && dist <= w[1].value)
+        .unwrap_or_else(|| {
+            dl.records
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| (a.value - dist).abs().total_cmp(&(b.value - dist).abs()))
+                .map(|(i, _)| i.min(dl.records.len() - 2))
+                .unwrap_or(0)
+        });
+    let (a, b) = (&dl.records[idx], &dl.records[idx + 1]);
+    let span = b.value - a.value;
+    let frac = if span.abs() > 1e-5 { ((dist - a.value) / span).clamp(0.0, 1.0) } else { 0.0 };
+    let mut dir = [
+        a.vectors[1].x + (b.vectors[1].x - a.vectors[1].x) * frac,
+        a.vectors[1].y + (b.vectors[1].y - a.vectors[1].y) * frac,
+        a.vectors[1].z + (b.vectors[1].z - a.vectors[1].z) * frac,
+    ];
+    let mut len_sq = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+    if len_sq <= 1e-8 {
+        dir = [
+            b.vectors[0].x - a.vectors[0].x,
+            b.vectors[0].y - a.vectors[0].y,
+            b.vectors[0].z - a.vectors[0].z,
+        ];
+        len_sq = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+    }
+    if len_sq <= 1e-8 || !len_sq.is_finite() {
+        return None;
+    }
+    let inv = 1.0 / len_sq.sqrt();
+    Some([dir[0] * inv, dir[1] * inv, dir[2] * inv])
 }
 
 #[cfg(test)]

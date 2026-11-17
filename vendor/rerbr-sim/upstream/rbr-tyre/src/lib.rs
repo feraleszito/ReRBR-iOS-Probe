@@ -1,8 +1,6 @@
 //! Tyre models (ours, experimental): a model gives the contact patch's forces in place of NGP's sliding model's
 //! (`rbr_physics::tyre::model`) in NGP's tyre step (`rbr_hybrid::ngp::tyre_model`). [`model`] builds one by name for
 //! a car's [`Wheel`]s; the host builds a fresh one at each start and asks it at each wheel's step.
-#![allow(unknown_lints)]
-#![allow(clippy::all)]
 
 pub mod brush;
 pub mod calibrate;

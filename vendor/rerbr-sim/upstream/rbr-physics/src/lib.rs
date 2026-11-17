@@ -6,8 +6,12 @@
 // The ports follow the asm's comparisons, so a NaN takes the same branch as in the original: `!(a > b)` is not
 // `a <= b`, and `f32::clamp` would change NaN results. Constants keep the exe's exact bit patterns, and some ports
 // take the original's argument list.
-#![allow(unknown_lints)]
-#![allow(clippy::all)]
+#![allow(
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::manual_clamp,
+    clippy::excessive_precision,
+    clippy::too_many_arguments
+)]
 
 pub mod car_body;
 pub mod collision;
