@@ -36,6 +36,7 @@ pub struct Runtime {
     pub mounts: Option<cameras::Mounts>,
     worker: worker::Worker,
     selection: rerbr_content::Selection,
+    pending_scene_reload: Option<rerbr_content::Selection>,
     pub controls: Controls,
     diagnostics: bool,
     minimal_hud: bool,
@@ -67,7 +68,13 @@ impl Default for Runtime {
 impl Runtime {
     pub fn new() -> Self {
         let settings = menu::Settings::load();
-        let selection = rerbr_content::Selection::default();
+        let default_selection = rerbr_content::Selection::default();
+        let scanned = Catalog::scan(&default_selection);
+        let stage = restored_stage(&scanned, &settings.stage_id);
+        let selection = rerbr_content::Selection {
+            stage,
+            ..default_selection
+        };
         let mut controls = Controls::new();
         controls.sensitivity = settings.sensitivity;
         controls.dead_zone = settings.dead_zone;
@@ -81,6 +88,7 @@ impl Runtime {
             worker: worker::Worker::new_selected(selection.clone(), false),
             content: Catalog::scan(&selection),
             selection,
+            pending_scene_reload: None,
             controls,
             diagnostics: settings.diagnostics,
             minimal_hud: settings.minimal_hud,
@@ -107,18 +115,44 @@ impl Runtime {
     pub fn install(&mut self, geometry: &Geometry) {
         self.pivots = Some(geometry.pivots);
     }
+    pub fn selection(&self) -> &rerbr_content::Selection {
+        &self.selection
+    }
+    pub fn take_pending_scene_reload(&mut self) -> Option<rerbr_content::Selection> {
+        self.pending_scene_reload.take()
+    }
     pub fn configure_selection(
         &mut self,
         selection: rerbr_content::Selection,
     ) -> Result<(), String> {
         selection.validate_current_backend()?;
+        if !stage_supported(&selection.stage) {
+            return Err("multiple stages require physics-stage mode".into());
+        }
+        selection_change_allowed(
+            self.selection == selection,
+            self.pivots.is_some(),
+            self.scene_error.is_some(),
+        )?;
         self.controls.configure_vehicle(&selection.vehicle)?;
         if self.selection != selection {
             self.pause();
             self.worker.shutdown();
             self.worker = worker::Worker::new_selected(selection.clone(), false);
+            self.pivots = None;
             self.offset = None;
             self.camera = None;
+            self.scene_error = None;
+            self.cockpit_node = None;
+            self.cockpit_ready = false;
+            self.cockpit_error = None;
+            self.steering_angle = 0.0;
+            self.controls.selected_gear = 2;
+            #[cfg(feature = "physics-stage")]
+            {
+                self.mounts = None;
+            }
+            self.pending_scene_reload = Some(selection.clone());
             self.content = Catalog::scan(&selection);
         }
         self.selection = selection;
@@ -166,6 +200,7 @@ impl Runtime {
             invert_pedals: self.controls.invert_pedals,
             volume: self.volume,
             camera: self.camera_index(),
+            stage_id: self.selection.stage.id.clone(),
         }
         .save();
     }
@@ -313,17 +348,45 @@ impl Runtime {
                     format!("FAIL: {report}")
                 });
             }
-            SelectVehicle => {
-                let result = self.configure_selection(self.selection.clone());
+            OpenVehicle(index) => {
+                self.menu.inspected_vehicle = index;
+                self.menu.open(menu::Page::GarageDetail);
+            }
+            SelectVehicle(index) => {
+                let candidate = self
+                    .content
+                    .vehicles
+                    .get(index)
+                    .map(|e| e.descriptor.clone())
+                    .ok_or_else(|| "UNKNOWN VEHICLE".to_string());
+                let result = candidate.and_then(|vehicle| {
+                    self.configure_selection(rerbr_content::Selection {
+                        vehicle,
+                        stage: self.selection.stage.clone(),
+                    })
+                });
                 self.message = Some(match result {
                     Ok(()) => format!("VEHICLE SELECTED: {}", self.selection.vehicle.name),
                     Err(error) => format!("VEHICLE REJECTED: {error}"),
                 });
             }
-            SelectStage => {
-                let result = self.configure_selection(self.selection.clone());
+            OpenStage(index) => {
+                self.menu.inspected_stage = index;
+                self.menu.open(menu::Page::StageDetail);
+            }
+            SelectStage(index) => {
+                let result = match self.content.stages.get(index).cloned() {
+                    None => Err("UNKNOWN STAGE".into()),
+                    Some(entry) if entry.files.checked && !entry.files.missing.is_empty() => {
+                        Err(format!("MISSING {} FILES", entry.files.missing.len()))
+                    }
+                    Some(entry) => self.configure_selection(rerbr_content::Selection {
+                        vehicle: self.selection.vehicle.clone(),
+                        stage: entry.descriptor,
+                    }),
+                };
                 self.message = Some(match result {
-                    Ok(()) => format!("STAGE SELECTED: {}", self.selection.stage.name),
+                    Ok(()) => format!("LOADING STAGE: {}", self.selection.stage.name),
                     Err(error) => format!("STAGE REJECTED: {error}"),
                 });
             }
@@ -791,5 +854,73 @@ fn motion(enabled: bool) -> f64 {
     {
         let _ = enabled;
         f64::NAN
+    }
+}
+
+fn restored_stage(catalog: &Catalog, id: &str) -> rerbr_content::StageDescriptor {
+    let default = rerbr_content::StageDescriptor::default();
+    catalog
+        .stage(id)
+        .filter(|entry| {
+            stage_supported(&entry.descriptor)
+                && (!entry.files.checked || entry.files.missing.is_empty())
+        })
+        .or_else(|| catalog.stage(&default.id))
+        .map(|entry| entry.descriptor.clone())
+        .unwrap_or(default)
+}
+
+// The partial Harwood benchmark is intentionally kept available as a fallback.
+fn stage_supported(stage: &rerbr_content::StageDescriptor) -> bool {
+    stage.validate_current_backend().is_ok()
+        && (cfg!(feature = "physics-stage") || stage.id == "harwood-forest")
+}
+fn selection_change_allowed(same: bool, ready: bool, failed: bool) -> Result<(), String> {
+    if same || ready || failed {
+        Ok(())
+    } else {
+        Err("SCENE STILL LOADING - WAIT BEFORE SELECTING ANOTHER STAGE".into())
+    }
+}
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    #[test]
+    fn saved_stage_restores_only_supported_available_content() {
+        let mut catalog = Catalog::descriptors(&rerbr_content::Selection::default());
+        let chosen = restored_stage(&catalog, "chirdonhead");
+        assert_eq!(
+            chosen.id,
+            if cfg!(feature = "physics-stage") {
+                "chirdonhead"
+            } else {
+                "harwood-forest"
+            }
+        );
+        catalog.stages[1].files.checked = true;
+        catalog.stages[1]
+            .files
+            .missing
+            .push("track-22_O.col".into());
+        assert_eq!(restored_stage(&catalog, "chirdonhead").id, "harwood-forest");
+        assert_eq!(
+            restored_stage(&catalog, "../invalid-stage").id,
+            "harwood-forest"
+        );
+    }
+
+    #[test]
+    fn repeated_changes_require_completed_load_or_recoverable_failure() {
+        for _ in 0..8 {
+            assert!(selection_change_allowed(false, true, false).is_ok());
+            assert!(selection_change_allowed(false, false, false).is_err());
+            assert!(selection_change_allowed(true, false, false).is_ok());
+            assert!(selection_change_allowed(false, false, true).is_ok());
+        }
+        assert!(stage_supported(&rerbr_content::StageDescriptor::default()));
+        assert_eq!(
+            stage_supported(&rerbr_content::StageDescriptor::cote_darbroz()),
+            cfg!(feature = "physics-stage")
+        );
     }
 }

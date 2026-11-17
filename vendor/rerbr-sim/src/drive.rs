@@ -77,7 +77,7 @@ impl Session {
         let mut race = boot::Race::quick_race(
             selection.stage.original_map,
             selection.vehicle.original_slot,
-            selection.vehicle.tyre_type,
+            boot::default_tyre(boot::surface(selection.stage.original_map)),
             weather,
             checked.physics,
         );
@@ -165,5 +165,16 @@ impl Session {
     }
     pub fn payload_bytes(&self) -> usize {
         self.playback.pure.mem.pages().expect("paged boot").allocated_bytes()
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    #[test]
+    fn selected_retail_surfaces_use_original_reference_tyres() {
+        for (map, surface, tyre) in [(20, "gravel", 4), (22, "gravel", 4), (41, "tarmac", 0), (46, "tarmac", 0)] {
+            assert_eq!(crate::boot::surface(map), surface);
+            assert_eq!(crate::boot::default_tyre(crate::boot::surface(map)), tyre);
+        }
     }
 }

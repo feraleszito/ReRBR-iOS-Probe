@@ -47,8 +47,10 @@ pub enum Command {
     ToggleInvertPedals,
     InspectContent,
     CheckPhysics,
-    SelectVehicle,
-    SelectStage,
+    OpenVehicle(usize),
+    SelectVehicle(usize),
+    OpenStage(usize),
+    SelectStage(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +137,8 @@ pub struct Context<'a> {
 pub struct Menu {
     pub page: Page,
     stack: Vec<Page>,
+    pub inspected_vehicle: usize,
+    pub inspected_stage: usize,
 }
 impl Menu {
     pub fn open(&mut self, page: Page) {
@@ -190,8 +194,6 @@ impl Menu {
             .content
             .stage(&stage.id)
             .map_or(EntryState::Selected, |entry| entry.state);
-        let vehicle_supported = vehicle.validate_current_backend().is_ok();
-        let stage_supported = stage.validate_current_backend().is_ok();
         match self.page {
             Page::Main => vec![
                 Row::action("DRIVE", Command::Open(Page::Drive)),
@@ -219,30 +221,43 @@ impl Menu {
                 Row::action("BACK", Command::Back),
             ],
             Page::Garage => {
-                let mut rows = vec![Row {
-                    label: format!("{} - {}", vehicle.name, vehicle_state.label()),
-                    kind: RowKind::Action {
-                        command: Command::Open(Page::GarageDetail),
-                        enabled: vehicle_supported,
-                    },
-                }];
+                let mut rows: Vec<Row> = ctx
+                    .content
+                    .vehicles
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        Row::action(
+                            format!("{} - {}", entry.descriptor.name, entry.state.label()),
+                            Command::OpenVehicle(index),
+                        )
+                    })
+                    .collect();
                 rows.push(Row::info(
                     "INSTALLED",
-                    format!("{} CARS / 1 PRESET", ctx.content.vehicles.len()),
+                    format!("{} CARS / 1 SUPPORTED", ctx.content.vehicles.len()),
                 ));
                 rows.push(Row::action("BACK", Command::Back));
                 rows
             }
             Page::GarageDetail => {
+                let entry = ctx.content.vehicles.get(self.inspected_vehicle);
+                let inspected = entry.map(|e| &e.descriptor).unwrap_or(vehicle);
+                let state = entry.map_or(vehicle_state, |e| e.state);
+                let supported = inspected.validate_current_backend().is_ok();
                 let mut rows = Vec::new();
-                if vehicle_state == EntryState::Selected {
+                if state == EntryState::Selected {
                     rows.push(Row::info("SELECTION", "SELECTED"));
                 } else {
                     rows.push(Row {
-                        label: "SELECT VEHICLE".into(),
+                        label: if supported {
+                            "SELECT VEHICLE".into()
+                        } else {
+                            "UNSUPPORTED - NGP 7.5 / FMOD".into()
+                        },
                         kind: RowKind::Action {
-                            command: Command::SelectVehicle,
-                            enabled: vehicle_supported,
+                            command: Command::SelectVehicle(self.inspected_vehicle),
+                            enabled: supported,
                         },
                     });
                 }
@@ -254,30 +269,47 @@ impl Menu {
                 rows
             }
             Page::Stages => {
-                let mut rows = vec![Row {
-                    label: format!("{} - {}", stage.name, stage_state.label()),
-                    kind: RowKind::Action {
-                        command: Command::Open(Page::StageDetail),
-                        enabled: stage_supported,
-                    },
-                }];
+                let mut rows: Vec<Row> = ctx
+                    .content
+                    .stages
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        Row::action(
+                            format!("{} - {}", entry.descriptor.name, entry.state.label()),
+                            Command::OpenStage(index),
+                        )
+                    })
+                    .collect();
                 rows.push(Row::info(
-                    "INSTALLED",
-                    format!("{} STAGES / 1 PRESET", ctx.content.stages.len()),
+                    "PRESETS",
+                    format!("{} STAGES IN CATALOG", ctx.content.stages.len()),
                 ));
                 rows.push(Row::action("BACK", Command::Back));
                 rows
             }
             Page::StageDetail => {
+                let entry = ctx.content.stages.get(self.inspected_stage);
+                let inspected = entry.map(|e| &e.descriptor).unwrap_or(stage);
+                let state = entry.map_or(stage_state, |e| e.state);
+                let supported = super::stage_supported(inspected);
+                let files_ready =
+                    entry.is_none_or(|e| !e.files.checked || e.files.missing.is_empty());
                 let mut rows = Vec::new();
-                if stage_state == EntryState::Selected {
+                if state == EntryState::Selected {
                     rows.push(Row::info("SELECTION", "SELECTED"));
                 } else {
                     rows.push(Row {
-                        label: "SELECT STAGE".into(),
+                        label: if !supported {
+                            "SELECT STAGE - UNSUPPORTED".into()
+                        } else if !files_ready {
+                            "SELECT STAGE - MISSING FILES".into()
+                        } else {
+                            "SELECT STAGE".into()
+                        },
                         kind: RowKind::Action {
-                            command: Command::SelectStage,
-                            enabled: stage_supported,
+                            command: Command::SelectStage(self.inspected_stage),
+                            enabled: supported && files_ready,
                         },
                     });
                 }
@@ -396,7 +428,7 @@ impl Menu {
             Page::Main => vec![
                 format!("{} / {}", stage.name, vehicle.name),
                 format!("{} SPEED MANUAL / TILT STEERING", vehicle.forward_gears),
-                "COROLLA AND HARWOOD ARE THE ONLY VALIDATED CONTENT".into(),
+                "COROLLA + VERIFIED GRAVEL/TARMAC STAGES".into(),
             ],
             Page::Drive => vec![
                 format!("STAGE {} / {}", stage.name, stage.stem),
@@ -423,26 +455,31 @@ impl Menu {
                 ]
             }
             Page::GarageDetail => {
-                let audit = ctx
-                    .content
-                    .vehicle(&vehicle.id)
-                    .map(|entry| entry.files.summary())
+                let entry = ctx.content.vehicles.get(self.inspected_vehicle);
+                let inspected = entry.map(|e| &e.descriptor).unwrap_or(vehicle);
+                let audit = entry
+                    .map(|e| e.files.summary())
                     .unwrap_or_else(|| "PRIVATE FILES NOT INSPECTED".into());
-                vec![
-                    format!(
-                        "ID {} / ORIGINAL SLOT {} / TYRE {}",
-                        vehicle.id, vehicle.original_slot, vehicle.tyre_type
-                    ),
+                let blocker = if inspected.validate_current_backend().is_ok() {
                     format!(
                         "{} FORWARD GEARS / {}",
-                        vehicle.forward_gears,
+                        inspected.forward_gears,
                         if ctx.cockpit_ready {
                             "COCKPIT READY"
                         } else {
                             "COCKPIT ASSETS MISSING"
                         }
+                    )
+                } else {
+                    "BLOCKED: REQUIRES NGP 7.5 + FMOD BANK + SGC".into()
+                };
+                vec![
+                    format!(
+                        "ID {} / SLOT {} / TYRE {}",
+                        inspected.id, inspected.original_slot, inspected.tyre_type
                     ),
-                    format!("MODEL {}", vehicle.model),
+                    blocker,
+                    format!("MODEL {}", inspected.model),
                     audit,
                 ]
             }
@@ -455,25 +492,25 @@ impl Menu {
                 vec![
                     "READ-ONLY INSTALLED STAGE CATALOG".into(),
                     audit,
-                    "HARWOOD FOREST IS THE ONLY VALIDATED STAGE".into(),
+                    "HARWOOD / CHIRDONHEAD / COTE D'ARBROZ".into(),
                 ]
             }
             Page::StageDetail => {
-                let audit = ctx
-                    .content
-                    .stage(&stage.id)
-                    .map(|entry| entry.files.summary())
+                let entry = ctx.content.stages.get(self.inspected_stage);
+                let inspected = entry.map(|e| &e.descriptor).unwrap_or(stage);
+                let audit = entry
+                    .map(|e| e.files.summary())
                     .unwrap_or_else(|| "PRIVATE FILES NOT INSPECTED".into());
                 vec![
                     format!(
                         "ID {} / ORIGINAL MAP {} / DRY WEATHER",
-                        stage.id, stage.original_map
+                        inspected.id, inspected.original_map
                     ),
                     format!(
                         "STEM {} / {} TERRAIN BLOCKS EXPECTED",
-                        stage.stem, stage.terrain_blocks
+                        inspected.stem, inspected.terrain_blocks
                     ),
-                    format!("MAPS {}", stage.documents_maps),
+                    format!("MAPS {}", inspected.documents_maps),
                     audit,
                 ]
             }
@@ -711,7 +748,7 @@ fn row_index(x: f64, y: f64, rows: usize) -> Option<usize> {
     rect.contains(x, y).then_some(index)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Settings {
     pub sensitivity: f64,
     pub dead_zone: f64,
@@ -721,6 +758,7 @@ pub struct Settings {
     pub invert_pedals: bool,
     pub volume: f64,
     pub camera: u8,
+    pub stage_id: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -733,6 +771,7 @@ impl Default for Settings {
             invert_pedals: false,
             volume: 0.8,
             camera: 0,
+            stage_id: rerbr_content::StageDescriptor::default().id,
         }
     }
 }
@@ -774,6 +813,9 @@ impl Settings {
                         settings.camera = v.min(2);
                     }
                 }
+                "stage_id" if !value.trim().is_empty() => {
+                    settings.stage_id = value.trim().to_string();
+                }
                 _ => (),
             }
         }
@@ -788,20 +830,16 @@ impl Settings {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .map_or_else(Self::default, |s| Self::parse(&s))
     }
-    pub fn save(self) {
+    fn encode(&self) -> String {
+        format!(
+            "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nvolume={}\ncamera={}\nstage_id={}\n",
+            self.sensitivity, self.dead_zone, self.fps, self.diagnostics,
+            self.minimal_hud, self.invert_pedals, self.volume, self.camera, self.stage_id
+        )
+    }
+    pub fn save(&self) {
         if let Some(path) = Self::path() {
-            let text = format!(
-                "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nvolume={}\ncamera={}\n",
-                self.sensitivity,
-                self.dead_zone,
-                self.fps,
-                self.diagnostics,
-                self.minimal_hud,
-                self.invert_pedals,
-                self.volume,
-                self.camera
-            );
-            if let Err(error) = std::fs::write(path, text) {
+            if let Err(error) = std::fs::write(path, self.encode()) {
                 eprintln!("SETTINGS: could not save preferences: {error}");
             }
         }
@@ -1017,7 +1055,7 @@ mod tests {
             ..Menu::default()
         };
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         assert!(rows[0]
             .label
             .to_ascii_uppercase()
@@ -1054,5 +1092,49 @@ mod tests {
         let bytes = canvas.finish();
         assert!(!bytes.is_empty());
         assert!(bytes.len() / 20 <= MAX_CANVAS_VERTICES);
+    }
+
+    #[test]
+    fn stage_menu_lists_verified_stages_and_blocks_unsupported_focus() {
+        let selection = Selection::default();
+        let content = Catalog::descriptors(&selection);
+        let ctx = context(&selection, &content);
+        let mut menu = Menu {
+            page: Page::Stages,
+            ..Menu::default()
+        };
+        let rows = menu.rows(&ctx);
+        assert!(rows.iter().any(|r| r.label.contains("Chirdonhead")));
+        assert!(rows.iter().any(|r| r.label.contains("Cote d'Arbroz")));
+        menu.inspected_stage = 1;
+        menu.page = Page::StageDetail;
+        let detail = menu.rows(&ctx);
+        assert!(detail.iter().any(|r| matches!(
+            r.kind,
+            RowKind::Action {
+                command: Command::SelectStage(1),
+                enabled
+            } if enabled == cfg!(feature = "physics-stage")
+        )));
+        menu.inspected_vehicle = 1;
+        menu.page = Page::GarageDetail;
+        let car_detail = menu.rows(&ctx);
+        assert!(car_detail
+            .iter()
+            .any(|r| matches!(r.kind, RowKind::Action { enabled: false, .. })));
+        let parsed = Settings::parse("stage_id=chirdonhead\n");
+        assert_eq!(parsed.stage_id, "chirdonhead");
+        let preferences = Settings {
+            invert_pedals: true,
+            camera: 2,
+            stage_id: "cote-darbroz-ii".into(),
+            volume: 0.25,
+            ..Settings::default()
+        };
+        let restored = Settings::parse(&preferences.encode());
+        assert_eq!(restored.stage_id, preferences.stage_id);
+        assert_eq!(restored.camera, 2);
+        assert_eq!(restored.volume, 0.25);
+        assert!(restored.invert_pedals);
     }
 }

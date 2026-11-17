@@ -44,7 +44,12 @@ pub fn check_selection(paths: &Paths, selection: &rerbr_content::Selection) -> R
     selection.validate_current_backend()?;
     let data = paths.data();
     let mut total = 0;
-    for file in FILES.into_iter().chain(std::iter::once(selection.vehicle.model.as_str())) {
+    let stage_boot = selection.stage.additional_boot_paths();
+    for file in FILES
+        .into_iter()
+        .chain(std::iter::once(selection.vehicle.model.as_str()))
+        .chain(stage_boot.iter().map(String::as_str))
+    {
         let path = data.resolve(file).ok_or_else(|| format!("missing private RBR/{file}"))?;
         let length = path.metadata().map_err(|e| e.to_string())?.len();
         if length == 0 || length > 64 * 1024 * 1024 {
@@ -76,6 +81,7 @@ pub fn check_selection(paths: &Paths, selection: &rerbr_content::Selection) -> R
             selection.vehicle.original_slot, selection.vehicle.model
         ));
     }
-    eprintln!("physics-probe INPUT PASS: 16 private files, {total} bytes; NGP 7.4.778 DLL verified (vehicle compatibility not certified); no files extracted or written");
+    let file_count = FILES.len() + 1 + stage_boot.len() + rerbr_content::PHYSICS_STAGE_EXTENSIONS.len();
+    eprintln!("physics-probe INPUT PASS: {file_count} private files, {total} bytes; NGP 7.4.778 DLL verified (vehicle compatibility not certified); no files extracted or written");
     Ok(Checked { physics: data.resolve("physics.rbz").unwrap() })
 }

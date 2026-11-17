@@ -40,23 +40,38 @@ pub fn prepare_selected(
     selection: &rerbr_content::Selection,
 ) -> Result<Prepared, String> {
     selection.validate_current_backend()?;
+    #[cfg(not(feature = "physics-stage"))]
+    if selection.stage.id != "harwood-forest" {
+        return Err("multiple stages require physics-stage mode".into());
+    }
     #[cfg(feature = "physics-stage")]
     match rerbr_sim::audio_audit::inspect_vehicle(install, &selection.vehicle) {
         Ok(report) => eprintln!("physics-stage AUDIO BANK CPU PASS: {report:?}; output not implemented; silent milestone"),
         Err(error) => eprintln!("physics-stage AUDIO DISABLED: {error}; silent milestone; geometry can still load"),
     }
     let car = load_vehicle(install, &selection.vehicle)?;
-    let terrain = crate::harwood::benchmark::load(maps)?;
     #[cfg(not(feature = "physics-stage"))]
-    let path = placement::ChasePath::new(terrain.route, &terrain.render.mesh, &car.geometry)?;
+    let (path, render) = {
+        let terrain = crate::harwood::benchmark::load(maps)?;
+        let path = placement::ChasePath::new(terrain.route, &terrain.render.mesh, &car.geometry)?;
+        (path, terrain.render)
+    };
     #[cfg(feature = "physics-stage")]
     let (path, render) = {
         let full = crate::harwood::stage::load_selected(maps, &selection.stage)?;
-        let path = placement::ChasePath::new(terrain.route, &full.ground, &car.geometry)?;
+        // Retain the tested Harwood preview. Other stages use live physics;
+        // sparse LBS points must never be invented into a benchmark spline.
+        let path = if selection.stage.id == "harwood-forest" {
+            let route = crate::harwood::benchmark::load(maps)?.route;
+            let path = placement::ChasePath::new(route, &full.ground, &car.geometry)?;
+            path.validate()?;
+            path
+        } else {
+            placement::ChasePath::for_driving(&full.ground, &car.geometry)?
+        };
         (path, full.render)
     };
     #[cfg(not(feature = "physics-stage"))]
-    let render = terrain.render;
     path.validate()?;
     Ok(Prepared {
         selection: selection.clone(),

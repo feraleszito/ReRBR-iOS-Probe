@@ -111,7 +111,19 @@ impl Runtime {
         self.terrain = stats;
         self.session = None;
         self.frame = None;
+        self.fatal = false;
+        self.reason = "";
         Ok(terrain)
+    }
+    #[cfg(feature = "physics-drive")]
+    pub fn release_scene(&mut self) {
+        self.car = None;
+        self.path = None;
+        self.frame = None;
+        self.session = None;
+        self.terrain = Stats::default();
+        self.fatal = false;
+        self.reason = "";
     }
     pub fn fail(&mut self) {
         #[cfg(feature = "physics-drive")]

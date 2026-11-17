@@ -32,6 +32,7 @@ pub struct Stage {
     pub render: LoadedBlock,
     /// Terrain only: vegetation cards must never become camera support surfaces.
     pub ground: Mesh,
+    pub route_points: Vec<Vec3>,
     pub report: Report,
 }
 
@@ -102,7 +103,7 @@ pub fn load(maps: &Path) -> Result<Stage, String> {
 }
 pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Result<Stage, String> {
     stage.validate_current_backend()?;
-    let bytes = asset_probe::read_stage(maps)?;
+    let bytes = asset_probe::read_stage_stem(maps, &stage.stem)?;
     let lbs = lbs::parse(&bytes).map_err(|e| e.to_string())?;
     let mut terrain = Mesh::default();
     let mut scene = Mesh::default();
@@ -145,7 +146,7 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
             address: 1,
         })
         .collect();
-    let names = asset_probe::diffuse_names(maps)?;
+    let names = asset_probe::diffuse_names_stem(maps, &stage.stem)?;
     for c in &lbs.chunks {
         match c {
             lbs::Chunk::Objects(o) => {
@@ -235,6 +236,7 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
             .map(|t| t.map(|p| coords::physics_to_stage().transform_point3(Vec3::from(p))))
             .collect(),
     )?;
+    let mut route_points = Vec::new();
     for p in lbs
         .chunks
         .iter()
@@ -249,6 +251,7 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
     {
         report.route_points += 1;
         let p = Vec3::from(*p);
+        route_points.push(p);
         if let Some(height) = ground.support_height(p) {
             report.supported_points += 1;
             if let Some(col) = collision.support_height(p) {
@@ -277,7 +280,7 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
         .iter()
         .flat_map(|d| d.textures.into_iter().flatten())
         .collect();
-    let shared = asset_probe::load_diffuse_shared(maps, &needed)?;
+    let shared = asset_probe::load_diffuse_shared_stem(maps, &stage.stem, &needed)?;
     for d in &mut scene.draws {
         for t in d.textures.iter_mut().flatten() {
             *t = shared.aliases[t];
@@ -314,6 +317,7 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
             textures: shared.textures,
         },
         ground: terrain,
+        route_points,
         report,
     })
 }

@@ -54,6 +54,13 @@ impl Scene {
         };
         #[cfg(feature = "car-chase-benchmark")]
         let car_root = crate::car::private_root(std::path::Path::new(&documents));
+        #[cfg(feature = "physics-drive")]
+        let selection = scene.benchmark.driving.selection().clone();
+        #[cfg(all(feature = "car-chase-benchmark", not(feature = "physics-drive")))]
+        let selection = rerbr_content::Selection::default();
+        #[cfg(feature = "car-chase-benchmark")]
+        let maps = PathBuf::from(&documents).join(&selection.stage.documents_maps);
+        #[cfg(not(feature = "car-chase-benchmark"))]
         let maps = PathBuf::from(documents).join("Harwood/Maps");
         let (tx, rx) = mpsc::channel();
         match std::thread::Builder::new()
@@ -66,7 +73,7 @@ impl Scene {
                 #[cfg(all(feature = "harwood-benchmark", not(feature = "car-chase-benchmark")))]
                 let result = super::benchmark::load(&maps);
                 #[cfg(feature = "car-chase-benchmark")]
-                let result = crate::car::prepare(&car_root, &maps);
+                let result = crate::car::prepare_selected(&car_root, &maps, &selection);
                 let _ = tx.send(result);
             }) {
             Ok(_) => scene.pending = Some(rx),
@@ -135,6 +142,28 @@ impl Scene {
         format: wgpu::TextureFormat,
         background: wgpu::Color,
     ) {
+        #[cfg(feature = "physics-drive")]
+        if let Some(selection) = self.benchmark.driving.take_pending_scene_reload() {
+            if let Some(documents) = std::env::var_os("RERBR_PROBE_DOCUMENTS") {
+                let car_root = crate::car::private_root(std::path::Path::new(&documents));
+                let maps = PathBuf::from(&documents).join(&selection.stage.documents_maps);
+                self.gpu = None;
+                self.benchmark.release_scene();
+                self.failed = false;
+                self.first_frame = true;
+                let (tx, rx) = mpsc::channel();
+                match std::thread::Builder::new()
+                    .name(format!("{MODE_NAME}-reload"))
+                    .spawn(move || {
+                        let _ = tx.send(crate::car::prepare_selected(&car_root, &maps, &selection));
+                    }) {
+                    Ok(_) => self.pending = Some(rx),
+                    Err(e) => self.fail(format!("READ: could not start reload worker: {e}")),
+                }
+            } else {
+                self.fail("READ: Documents root unavailable for stage reload".into());
+            }
+        }
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
                 Ok(result) => {

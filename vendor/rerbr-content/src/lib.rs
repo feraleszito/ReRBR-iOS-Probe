@@ -1,5 +1,5 @@
 //! Owned runtime descriptors shared by presentation and physics. No assets, importer or registry.
-//! Current backend support remains explicitly limited to the verified Corolla/Harwood profile.
+//! Current backend accepts the original Corolla and four retail stages; NGP parity is not certified.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VehicleDescriptor {
@@ -142,9 +142,23 @@ impl StageDescriptor {
     }
     pub fn validate_current_backend(&self) -> Result<(), String> {
         self.validate_schema()?;
-        if self != &Self::default() {
+        let allowed_maps = ["Harwood/Maps", "RBR/Maps", "Maps"]
+            .into_iter()
+            .any(|p| same_path(&self.documents_maps, p));
+        let matches_preset = allowed_maps
+            && Self::presets().iter().any(|preset| {
+                self.id == preset.id
+                    && self.name == preset.name
+                    && self.original_map == preset.original_map
+                    && self.stem == preset.stem
+                    && self.weather_letter == preset.weather_letter
+                    && self.wetness == preset.wetness
+                    && self.wear == preset.wear
+                    && self.terrain_blocks == preset.terrain_blocks
+            });
+        if !matches_preset {
             return Err(format!(
-                "unsupported stage profile '{}'; this milestone validates only Harwood Forest",
+                "unsupported stage profile '{}'; only validated presets are enabled",
                 self.id
             ));
         }
@@ -189,8 +203,54 @@ impl Default for VehicleDescriptor {
         }
     }
 }
+impl VehicleDescriptor {
+    pub fn toyota_corolla_wrc() -> Self {
+        Self::default()
+    }
+    /// Ford Focus Mk II RS WRC 2006 (RSF NGP6/7.5 + FMOD bank).
+    /// Included in the catalog for honest status reporting; blocked by `validate_current_backend()`.
+    pub fn ford_focus_2006() -> Self {
+        Self {
+            id: "ford-focus-rs-wrc-2006".into(),
+            name: "Ford Focus RS WRC 2006".into(),
+            original_slot: 1,
+            tyre_type: 4,
+            forward_gears: 5,
+            index: "Cars/Cars.ini".into(),
+            model: "Cars/FORD_FOCUS_2006/focus06.sgc".into(),
+            parts: "Cars/FORD_FOCUS_2006/focus06.ini".into(),
+            shaders: "Cars/FORD_FOCUS_2006/focus06_shaders.ini".into(),
+            shader_settings: "Cars/FORD_FOCUS_2006/focus06_shader_settings_clear.ini".into(),
+            required_textures: [
+                "focus_wrc06_external.dds",
+                "focus_wrc06_external_dynamic.dds",
+                "focus_wrc06_external_transparent.dds",
+            ]
+            .map(|n| format!("Cars/FORD_FOCUS_2006/textures/{n}"))
+            .into(),
+            optional_textures: [
+                "focus_wrc06_internal.dds",
+                "focus_wrc06_internal_transparent.dds",
+                "focus_wrc06_internal_scrape.dds",
+                "focus_wrc06_internal_kwindscreen.dds",
+                "focus_wrc06_parts.dds",
+            ]
+            .map(|n| format!("Cars/FORD_FOCUS_2006/textures/{n}"))
+            .into(),
+            audio_index: "AudioFMOD/Focus_Mk2_WRC.bank".into(),
+        }
+    }
+    pub fn presets() -> [Self; 2] {
+        [Self::toyota_corolla_wrc(), Self::ford_focus_2006()]
+    }
+}
 impl Default for StageDescriptor {
     fn default() -> Self {
+        Self::harwood_forest()
+    }
+}
+impl StageDescriptor {
+    pub fn harwood_forest() -> Self {
         Self {
             id: "harwood-forest".into(),
             name: "Harwood Forest".into(),
@@ -202,6 +262,64 @@ impl Default for StageDescriptor {
             wear: 1,
             terrain_blocks: DEFAULT_TERRAIN_BLOCKS,
         }
+    }
+    pub fn chirdonhead() -> Self {
+        Self {
+            id: "chirdonhead".into(),
+            name: "Chirdonhead".into(),
+            original_map: 22,
+            stem: "track-22_O".into(),
+            documents_maps: "RBR/Maps".into(),
+            weather_letter: 3,
+            wetness: 0,
+            wear: 1,
+            terrain_blocks: 229,
+        }
+    }
+    pub fn cote_darbroz() -> Self {
+        Self {
+            id: "cote-darbroz".into(),
+            name: "Cote d'Arbroz".into(),
+            original_map: 41,
+            stem: "track-41_O".into(),
+            documents_maps: "RBR/Maps".into(),
+            weather_letter: 3,
+            wetness: 0,
+            wear: 1,
+            terrain_blocks: 147,
+        }
+    }
+    pub fn cote_darbroz_ii() -> Self {
+        Self {
+            id: "cote-darbroz-ii".into(),
+            name: "Cote d'Arbroz II".into(),
+            original_map: 46,
+            stem: "track-46_O".into(),
+            documents_maps: "RBR/Maps".into(),
+            weather_letter: 3,
+            wetness: 0,
+            wear: 1,
+            terrain_blocks: 144,
+        }
+    }
+    /// Original Montblanc flip-spectator models needed to build the car's handles.
+    /// Britain models remain part of the legacy common boot requirements.
+    pub fn additional_boot_paths(&self) -> Vec<String> {
+        if matches!(self.original_map, 41 | 46) {
+            (0..4)
+                .map(|i| format!("Sgs/mo_spectator_{i:02}.sgs"))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+    pub fn presets() -> [Self; 4] {
+        [
+            Self::harwood_forest(),
+            Self::chirdonhead(),
+            Self::cote_darbroz(),
+            Self::cote_darbroz_ii(),
+        ]
     }
 }
 

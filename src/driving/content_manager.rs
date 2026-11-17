@@ -1,6 +1,6 @@
 //! Read-only installed-content catalog and the future import/validation model.
 //! Nothing here installs, extracts or enables content: only the descriptor-backed
-//! Corolla/Harwood preset is reported as supported and selectable.
+//! Corolla and the four retail stage presets pass the descriptor gate.
 
 use rerbr_content::{Selection, StageDescriptor, VehicleDescriptor, PHYSICS_STAGE_EXTENSIONS};
 use std::path::{Path, PathBuf};
@@ -79,40 +79,100 @@ pub struct Catalog {
 impl Catalog {
     /// Descriptor-only catalog (no filesystem access). Used before an explicit scan.
     pub fn descriptors(selection: &Selection) -> Self {
+        let mut vehicles: Vec<VehicleEntry> = VehicleDescriptor::presets()
+            .into_iter()
+            .map(|descriptor| {
+                let descriptor = if descriptor.id == selection.vehicle.id {
+                    selection.vehicle.clone()
+                } else {
+                    descriptor
+                };
+                let state = state_of(
+                    &descriptor.id,
+                    &selection.vehicle.id,
+                    descriptor.validate_current_backend().is_ok(),
+                    &FileAudit::unchecked(),
+                );
+                VehicleEntry {
+                    descriptor,
+                    state,
+                    files: FileAudit::unchecked(),
+                }
+            })
+            .collect();
+        if !vehicles
+            .iter()
+            .any(|v| v.descriptor.id == selection.vehicle.id)
+        {
+            vehicles.insert(
+                0,
+                VehicleEntry {
+                    descriptor: selection.vehicle.clone(),
+                    state: if selection.vehicle.validate_current_backend().is_ok() {
+                        EntryState::Selected
+                    } else {
+                        EntryState::Unsupported
+                    },
+                    files: FileAudit::unchecked(),
+                },
+            );
+        }
+        let mut stages: Vec<StageEntry> = StageDescriptor::presets()
+            .into_iter()
+            .map(|descriptor| {
+                let descriptor = if descriptor.id == selection.stage.id {
+                    selection.stage.clone()
+                } else {
+                    descriptor
+                };
+                let state = state_of(
+                    &descriptor.id,
+                    &selection.stage.id,
+                    descriptor.validate_current_backend().is_ok(),
+                    &FileAudit::unchecked(),
+                );
+                StageEntry {
+                    descriptor,
+                    state,
+                    files: FileAudit::unchecked(),
+                }
+            })
+            .collect();
+        if !stages.iter().any(|s| s.descriptor.id == selection.stage.id) {
+            stages.insert(
+                0,
+                StageEntry {
+                    descriptor: selection.stage.clone(),
+                    state: if selection.stage.validate_current_backend().is_ok() {
+                        EntryState::Selected
+                    } else {
+                        EntryState::Unsupported
+                    },
+                    files: FileAudit::unchecked(),
+                },
+            );
+        }
         Self {
             root: None,
-            vehicles: vec![VehicleEntry {
-                descriptor: selection.vehicle.clone(),
-                state: if selection.vehicle.validate_current_backend().is_ok() {
-                    EntryState::Selected
-                } else {
-                    EntryState::Unsupported
-                },
-                files: FileAudit::unchecked(),
-            }],
-            stages: vec![StageEntry {
-                descriptor: selection.stage.clone(),
-                state: if selection.stage.validate_current_backend().is_ok() {
-                    EntryState::Selected
-                } else {
-                    EntryState::Unsupported
-                },
-                files: FileAudit::unchecked(),
-            }],
+            vehicles,
+            stages,
             inspected: false,
         }
     }
     /// Builds the current catalog and performs small read-only existence checks
     /// under the existing private Documents layout. No file content is read.
     pub fn scan(selection: &Selection) -> Self {
-        let mut catalog = Self::descriptors(selection);
         let Some(root) = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(PathBuf::from) else {
-            return catalog;
+            return Self::descriptors(selection);
         };
-        catalog.root = Some(root.clone());
+        Self::scan_root(&root, selection)
+    }
+    pub fn scan_root(root: &Path, selection: &Selection) -> Self {
+        let mut catalog = Self::descriptors(selection);
+        catalog.root = Some(root.to_path_buf());
         catalog.inspected = true;
         for vehicle in &mut catalog.vehicles {
-            vehicle.files = audit_vehicle(&root, &vehicle.descriptor);
+            vehicle.files = audit_vehicle(root, &vehicle.descriptor);
             vehicle.state = state_of(
                 &vehicle.descriptor.id,
                 &selection.vehicle.id,
@@ -121,7 +181,10 @@ impl Catalog {
             );
         }
         for stage in &mut catalog.stages {
-            stage.files = audit_stage(&root, &stage.descriptor);
+            if let Some(discovered_maps) = resolve_stage_maps_dir(root, &stage.descriptor) {
+                stage.descriptor.documents_maps = discovered_maps;
+            }
+            stage.files = audit_stage(root, &stage.descriptor);
             stage.state = state_of(
                 &stage.descriptor.id,
                 &selection.stage.id,
@@ -179,6 +242,26 @@ pub fn audit_vehicle(root: &Path, vehicle: &VehicleDescriptor) -> FileAudit {
     audit_paths(&install, &paths)
 }
 
+/// Prefers a complete supported Documents maps directory, then the fewest missing files.
+pub fn resolve_stage_maps_dir(root: &Path, stage: &StageDescriptor) -> Option<String> {
+    let candidates = if stage.id == "harwood-forest" {
+        ["Harwood/Maps", "RBR/Maps", "Maps"]
+    } else {
+        ["RBR/Maps", "Harwood/Maps", "Maps"]
+    };
+    // A stray LBS in the preferred folder must not hide a complete installation.
+    candidates
+        .into_iter()
+        .filter_map(|dir| {
+            let mut candidate = stage.clone();
+            candidate.documents_maps = dir.into();
+            let audit = audit_stage(root, &candidate);
+            (audit.present > 0).then_some((dir, audit.missing.len()))
+        })
+        .min_by_key(|(_, missing)| *missing)
+        .map(|(dir, _)| dir.to_string())
+}
+
 /// Stage files remain in the descriptor's existing `Documents/<maps>` directory.
 pub fn audit_stage(root: &Path, stage: &StageDescriptor) -> FileAudit {
     let mut paths = Vec::new();
@@ -187,14 +270,38 @@ pub fn audit_stage(root: &Path, stage: &StageDescriptor) -> FileAudit {
             paths.push(file);
         }
     }
-    audit_paths(&root.join(&stage.documents_maps), &paths)
+    if let Ok(ini) = stage.file("ini") {
+        paths.push(ini);
+    }
+    paths.push("TextureFilenameMap.dat".into());
+    // Known retail overcast presets share DDS files with these sibling archives.
+    // Existence only; the loader still parses metadata and verifies ZIP/DDS data.
+    paths.push(format!("{}_textures.rbz", stage.stem));
+    let sibling = match stage.original_map {
+        20 | 22 => "N",
+        41 => "M",
+        46 => "E",
+        _ => "O",
+    };
+    paths.push(format!(
+        "track-{}_{sibling}_textures.rbz",
+        stage.original_map
+    ));
+    let mut audit = audit_paths(&root.join(&stage.documents_maps), &paths);
+    let boot = audit_paths(&root.join("RBR"), &stage.additional_boot_paths());
+    audit.present += boot.present;
+    audit.total += boot.total;
+    audit
+        .missing
+        .extend(boot.missing.into_iter().map(|file| format!("RBR/{file}")));
+    audit
 }
 
 fn audit_paths(root: &Path, paths: &[String]) -> FileAudit {
     let mut missing = Vec::new();
     let mut present = 0;
     for path in paths {
-        if root.join(path).is_file() {
+        if rerbr_asset_formats::cars::resolve(root, path).is_some_and(|p| p.is_file()) {
             present += 1;
         } else {
             missing.push(path.clone());
@@ -250,7 +357,7 @@ pub const IMPORT_STEPS: [ImportStep; 6] = [
     },
     ImportStep {
         label: "ACTIVATE CONTENT",
-        detail: "ONLY COROLLA AND HARWOOD VALIDATED",
+        detail: "IMPORT ACTIVATION DISABLED",
         state: StepState::Unavailable,
     },
 ];
@@ -283,12 +390,18 @@ mod tests {
     fn catalog_marks_only_the_shared_validated_profile_selected() {
         let selection = Selection::default();
         let catalog = Catalog::descriptors(&selection);
-        assert_eq!(catalog.vehicles.len(), 1);
+        assert_eq!(catalog.vehicles.len(), 2);
         assert_eq!(catalog.vehicles[0].state, EntryState::Selected);
+        assert_eq!(catalog.vehicles[1].state, EntryState::Unsupported);
+        assert_eq!(catalog.stages.len(), 4);
         assert_eq!(catalog.stages[0].state, EntryState::Selected);
         assert!(!catalog.inspected);
         assert!(catalog.vehicle("toyota-corolla-wrc").is_some());
+        assert!(catalog.vehicle("ford-focus-rs-wrc-2006").is_some());
         assert!(catalog.stage("harwood-forest").is_some());
+        assert!(catalog.stage("chirdonhead").is_some());
+        assert!(catalog.stage("cote-darbroz").is_some());
+        assert!(catalog.stage("cote-darbroz-ii").is_some());
         assert!(catalog.vehicle("unvalidated").is_none());
     }
 
@@ -320,13 +433,61 @@ mod tests {
             selection.vehicle.required_paths().count() + selection.vehicle.optional_textures.len()
         );
         let stage = audit_stage(&root, &selection.stage);
-        assert_eq!(stage.total, PHYSICS_STAGE_EXTENSIONS.len());
+        assert_eq!(stage.total, PHYSICS_STAGE_EXTENSIONS.len() + 4);
         assert!(stage.missing.contains(&"track-20_O.col".to_string()));
         std::fs::create_dir_all(root.join("Harwood/Maps")).unwrap();
         std::fs::write(root.join("Harwood/Maps/track-20_O.lbs"), b"x").unwrap();
         let partial = audit_stage(&root, &selection.stage);
         assert_eq!(partial.present, 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn complete_alternate_maps_wins_and_texture_loss_is_not_installed() {
+        let root = std::env::temp_dir().join(format!("rerbr-map-choice-{}", std::process::id()));
+        let selection = Selection::default();
+        std::fs::create_dir_all(root.join("Harwood/Maps")).unwrap();
+        std::fs::create_dir_all(root.join("RBR/Maps")).unwrap();
+        std::fs::write(root.join("Harwood/Maps/track-20_O.lbs"), b"x").unwrap();
+        let missing = audit_stage(
+            &root,
+            &StageDescriptor {
+                documents_maps: "RBR/Maps".into(),
+                ..selection.stage.clone()
+            },
+        )
+        .missing;
+        for file in missing {
+            std::fs::write(root.join("RBR/Maps").join(file), b"x").unwrap();
+        }
+        let catalog = Catalog::scan_root(&root, &selection);
+        let stage = catalog.stage("harwood-forest").unwrap();
+        assert_eq!(stage.descriptor.documents_maps, "RBR/Maps");
+        assert!(stage.files.missing.is_empty());
+        // Remove only our synthetic file in the test's private temporary directory.
+        std::fs::remove_file(root.join("RBR/Maps/track-20_N_textures.rbz")).unwrap();
+        let catalog = Catalog::scan_root(&root, &selection);
+        let stage = catalog.stage("harwood-forest").unwrap();
+        assert_eq!(stage.state, EntryState::MissingFiles);
+        assert_eq!(stage.files.missing, ["track-20_N_textures.rbz"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tarmac_presets_require_their_original_spectator_models() {
+        let root = std::env::temp_dir().join(format!("rerbr-tarmac-deps-{}", std::process::id()));
+        let stage = StageDescriptor::cote_darbroz();
+        assert!(StageDescriptor::harwood_forest()
+            .additional_boot_paths()
+            .is_empty());
+        let audit = audit_stage(&root, &stage);
+        for file in stage.additional_boot_paths() {
+            assert!(audit.missing.contains(&format!("RBR/{file}")));
+        }
+        assert_eq!(
+            stage.additional_boot_paths(),
+            StageDescriptor::cote_darbroz_ii().additional_boot_paths()
+        );
     }
 
     #[test]

@@ -27,7 +27,7 @@ pub struct Frame {
     pub boom: f32,
 }
 pub struct ChasePath {
-    route: Route,
+    route: Option<Route>,
     ground: Ground,
     pivots: [Vec3; 4],
     contacts: [Vec3; 4],
@@ -54,6 +54,14 @@ impl ChasePath {
         self.ground.support_height(position).is_some()
     }
     pub fn new(route: Route, terrain: &Mesh, car: &Geometry) -> Result<Self, String> {
+        Self::with_route(Some(route), terrain, car)
+    }
+    /// Live physics needs ground/camera queries, not a fabricated benchmark spline.
+    #[cfg(feature = "physics-stage")]
+    pub fn for_driving(terrain: &Mesh, car: &Geometry) -> Result<Self, String> {
+        Self::with_route(None, terrain, car)
+    }
+    fn with_route(route: Option<Route>, terrain: &Mesh, car: &Geometry) -> Result<Self, String> {
         let triangles = terrain
             .indices
             .chunks_exact(3)
@@ -85,7 +93,7 @@ impl ChasePath {
         })
     }
     pub fn length(&self) -> f32 {
-        self.route.length()
+        self.route.as_ref().map_or(0.0, Route::length)
     }
     pub fn pivots(&self) -> [Vec3; 4] {
         self.pivots
@@ -96,9 +104,13 @@ impl ChasePath {
             .ok_or_else(|| format!("CAR GROUND: unsupported pose at XZ ({:.2},{:.2})", p.x, p.z))
     }
     pub fn frame(&self, distance: f32) -> Result<Frame, String> {
-        let eye = self.route.eye(distance)?;
+        let route = self
+            .route
+            .as_ref()
+            .ok_or("CAR: no automatic benchmark route in live stage mode")?;
+        let eye = route.eye(distance)?;
         let center = Vec3::new(eye.x, self.floor(eye)?, eye.z); // Never use driver-eye height as car origin.
-        let path_camera = self.route.camera(distance)?;
+        let path_camera = route.camera(distance)?;
         let direction = path_camera.target - path_camera.eye;
         let forward = Vec3::new(direction.x, 0.0, direction.z).normalize_or(Vec3::Z);
         let mut body = coords::car_to_stage(Vec3::ZERO, forward);
