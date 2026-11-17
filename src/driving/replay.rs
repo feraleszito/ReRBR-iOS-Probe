@@ -29,16 +29,16 @@ impl ReplayFrame {
         let gear = if t < 0.5 { self.gear } else { other.gear };
 
         let mut models = [Mat4::IDENTITY; 5];
-        for i in 0..5 {
-            let p0 = self.models[i].w_axis.truncate();
-            let p1 = other.models[i].w_axis.truncate();
+        for (model, (m0, m1)) in models.iter_mut().zip(self.models.iter().zip(&other.models)) {
+            let p0 = m0.w_axis.truncate();
+            let p1 = m1.w_axis.truncate();
             let p = p0.lerp(p1, t);
 
-            let q0 = Quat::from_mat4(&self.models[i]);
-            let q1 = Quat::from_mat4(&other.models[i]);
+            let q0 = Quat::from_mat4(m0);
+            let q1 = Quat::from_mat4(m1);
             let q = q0.normalize().slerp(q1.normalize(), t);
 
-            models[i] = Mat4::from_rotation_translation(q, p);
+            *model = Mat4::from_rotation_translation(q, p);
         }
 
         Self {

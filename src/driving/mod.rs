@@ -369,13 +369,13 @@ impl Runtime {
                 self.menu.show(menu::Page::StageComplete);
             }
             NextStagePage => {
-                let total = (self.content.stages.len() + 7) / 8;
+                let total = self.content.stages.len().div_ceil(8);
                 if total > 0 {
                     self.menu.stage_page = (self.menu.stage_page + 1) % total;
                 }
             }
             PrevStagePage => {
-                let total = (self.content.stages.len() + 7) / 8;
+                let total = self.content.stages.len().div_ceil(8);
                 if total > 0 {
                     self.menu.stage_page = (self.menu.stage_page + total - 1) % total;
                 }

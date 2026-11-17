@@ -361,7 +361,7 @@ impl Menu {
             Page::Stages => {
                 const PER_PAGE: usize = 8;
                 let total_stages = ctx.content.stages.len();
-                let total_pages = (total_stages + PER_PAGE - 1) / PER_PAGE;
+                let total_pages = total_stages.div_ceil(PER_PAGE);
                 let page_idx = self.stage_page.min(total_pages.saturating_sub(1));
                 let start = page_idx * PER_PAGE;
                 let end = (start + PER_PAGE).min(total_stages);
