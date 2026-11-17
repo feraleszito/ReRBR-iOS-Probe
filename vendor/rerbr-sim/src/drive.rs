@@ -198,8 +198,7 @@ impl Session {
     pub fn timing(&self) -> StageTiming {
         let tk = pure::time_keeper(&self.playback.pure.mem);
         let splits_total = tk.card.splits().len();
-        let finished =
-            tk.card.finish_time.is_some() && tk.card.finish > 0.0 && tk.card.passed >= splits_total;
+        let finished = tk.card.finish_time.is_some() && tk.card.finish > 0.0 && tk.card.passed >= splits_total;
         StageTiming {
             started: tk.card.started,
             driveline_distance: tk.card.last,
@@ -242,18 +241,14 @@ fn finish_direction_for(data: &rbr_formats::data::Data, stage_name: &str) -> Opt
     if dl.records.len() < 2 {
         return None;
     }
-    let idx = dl
-        .records
-        .windows(2)
-        .position(|w| w[0].value <= dist && dist <= w[1].value)
-        .unwrap_or_else(|| {
-            dl.records
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| (a.value - dist).abs().total_cmp(&(b.value - dist).abs()))
-                .map(|(i, _)| i.min(dl.records.len() - 2))
-                .unwrap_or(0)
-        });
+    let idx = dl.records.windows(2).position(|w| w[0].value <= dist && dist <= w[1].value).unwrap_or_else(|| {
+        dl.records
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| (a.value - dist).abs().total_cmp(&(b.value - dist).abs()))
+            .map(|(i, _)| i.min(dl.records.len() - 2))
+            .unwrap_or(0)
+    });
     let (a, b) = (&dl.records[idx], &dl.records[idx + 1]);
     let span = b.value - a.value;
     let frac = if span.abs() > 1e-5 { ((dist - a.value) / span).clamp(0.0, 1.0) } else { 0.0 };
@@ -264,11 +259,7 @@ fn finish_direction_for(data: &rbr_formats::data::Data, stage_name: &str) -> Opt
     ];
     let mut len_sq = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
     if len_sq <= 1e-8 {
-        dir = [
-            b.vectors[0].x - a.vectors[0].x,
-            b.vectors[0].y - a.vectors[0].y,
-            b.vectors[0].z - a.vectors[0].z,
-        ];
+        dir = [b.vectors[0].x - a.vectors[0].x, b.vectors[0].y - a.vectors[0].y, b.vectors[0].z - a.vectors[0].z];
         len_sq = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
     }
     if len_sq <= 1e-8 || !len_sq.is_finite() {
