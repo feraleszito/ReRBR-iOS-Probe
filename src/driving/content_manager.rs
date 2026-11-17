@@ -282,15 +282,16 @@ pub fn audit_stage(root: &Path, stage: &StageDescriptor) -> FileAudit {
     // Existence only; the loader still parses metadata and verifies ZIP/DDS data.
     paths.push(format!("{}_textures.rbz", stage.stem));
     let sibling = match stage.original_map {
-        20 | 22 => "N",
-        41 => "M",
-        46 => "E",
-        _ => "O",
+        20 | 22 => Some("N"),
+        23 => Some("E"),
+        41 | 42 => Some("M"),
+        43 | 45 => Some("N"),
+        44 | 46 => Some("E"),
+        _ => None,
     };
-    paths.push(format!(
-        "track-{}_{sibling}_textures.rbz",
-        stage.original_map
-    ));
+    if let Some(s) = sibling {
+        paths.push(format!("track-{}_{s}_textures.rbz", stage.original_map));
+    }
     let mut audit = audit_paths(&root.join(&stage.documents_maps), &paths);
     let boot = audit_paths(&root.join("RBR"), &stage.additional_boot_paths());
     audit.present += boot.present;
@@ -402,7 +403,7 @@ mod tests {
         }
         assert_eq!(catalog.vehicles[8].state, EntryState::Unsupported);
         assert!(!catalog.vehicles[8].descriptor.is_original_rbr());
-        assert_eq!(catalog.stages.len(), 4);
+        assert_eq!(catalog.stages.len(), 30);
         assert_eq!(catalog.stages[0].state, EntryState::Selected);
         assert!(!catalog.inspected);
         assert!(catalog.vehicle("toyota-corolla-wrc").is_some());

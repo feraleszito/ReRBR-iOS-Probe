@@ -363,6 +363,30 @@ impl DrivingLayout {
     }
 }
 
+/// Screen layout for replay playback overlay and touch interaction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReplayLayout {
+    pub top_bar: Rect,
+    pub timeline: Rect,
+    pub play_pause: Rect,
+    pub restart: Rect,
+    pub camera: Rect,
+    pub exit: Rect,
+}
+
+impl ReplayLayout {
+    pub fn for_size(_size: (u32, u32)) -> Self {
+        Self {
+            top_bar: Rect::new(0.04, 0.02, 0.92, 0.06),
+            timeline: Rect::new(0.04, 0.088, 0.92, 0.016),
+            play_pause: Rect::new(0.04, 0.88, 0.20, 0.08),
+            restart: Rect::new(0.26, 0.88, 0.20, 0.08),
+            camera: Rect::new(0.48, 0.88, 0.24, 0.08),
+            exit: Rect::new(0.74, 0.88, 0.22, 0.08),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -30,6 +30,7 @@ pub struct Prepared {
     pub terrain: crate::harwood::LoadedBlock,
     pub path: placement::ChasePath,
     pub car: Car,
+    pub stage_cameras: Option<crate::driving::replay::StageCameras>,
 }
 pub fn prepare(install: &Path, maps: &Path) -> Result<Prepared, String> {
     prepare_selected(install, maps, &rerbr_content::Selection::default())
@@ -73,11 +74,14 @@ pub fn prepare_selected(
     };
     #[cfg(not(feature = "physics-stage"))]
     path.validate()?;
+    let stage_cameras =
+        crate::driving::replay::StageCameras::load_for_stage(maps, &selection.stage.stem);
     Ok(Prepared {
         selection: selection.clone(),
         terrain: render,
         path,
         car,
+        stage_cameras,
     })
 }
 fn read(

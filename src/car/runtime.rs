@@ -66,6 +66,8 @@ pub(crate) struct Uploaded {
     cockpit: Option<rerbr_render_core::Mat4>,
     #[cfg(feature = "physics-stage")]
     cockpit_error: Option<String>,
+    #[cfg(feature = "physics-stage")]
+    stage_cameras: Option<crate::driving::replay::StageCameras>,
 }
 impl Runtime {
     pub fn new() -> Self {
@@ -97,6 +99,7 @@ impl Runtime {
             car,
             selection,
             terrain,
+            stage_cameras,
         } = prepared;
         selection.validate_current_backend()?;
         if car.vehicle != selection.vehicle {
@@ -128,6 +131,8 @@ impl Runtime {
                 cockpit,
                 #[cfg(feature = "physics-stage")]
                 cockpit_error,
+                #[cfg(feature = "physics-stage")]
+                stage_cameras,
             },
             terrain,
         ))
@@ -147,6 +152,7 @@ impl Runtime {
             self.driving.cockpit_ready = uploaded.cockpit.is_some();
             self.driving.cockpit_node = uploaded.cockpit;
             self.driving.cockpit_error = uploaded.cockpit_error;
+            self.driving.stage_cameras = uploaded.stage_cameras;
         }
         self.car = Some(uploaded.car);
         self.path = Some(uploaded.path);

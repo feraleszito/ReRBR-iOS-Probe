@@ -27,6 +27,7 @@ pub enum Page {
     Paused,
     Driving,
     StageComplete,
+    Replay,
 }
 
 pub(crate) fn format_stage_time(seconds: f64) -> String {
@@ -44,6 +45,13 @@ pub enum Command {
     StartRally,
     Start,
     Restart,
+    StartReplay,
+    ReplayTogglePause,
+    ReplayRestart,
+    ReplayCycleCamera,
+    ReplayExit,
+    NextStagePage,
+    PrevStagePage,
     Calibrate,
     ResetCalibration,
     SensDown,
@@ -176,6 +184,7 @@ pub struct Context<'a> {
     pub ctrl_opacity: f32,
     pub global_opacity: f32,
     pub stage_result: Option<super::race::StageResult>,
+    pub has_replay: bool,
 }
 
 #[derive(Debug, Default)]
@@ -184,6 +193,7 @@ pub struct Menu {
     stack: Vec<Page>,
     pub inspected_vehicle: usize,
     pub inspected_stage: usize,
+    pub stage_page: usize,
 }
 impl Menu {
     pub fn open(&mut self, page: Page) {
@@ -231,6 +241,7 @@ impl Menu {
             Page::Paused => "PAUSA",
             Page::Driving => "CONDUCCIÓN",
             Page::StageComplete => "STAGE COMPLETE",
+            Page::Replay => "REPETICIÓN",
         }
     }
     pub fn rows(&self, ctx: &Context) -> Vec<Row> {
@@ -348,18 +359,41 @@ impl Menu {
                 rows
             }
             Page::Stages => {
-                let mut rows: Vec<Row> = ctx
-                    .content
-                    .stages
+                const PER_PAGE: usize = 8;
+                let total_stages = ctx.content.stages.len();
+                let total_pages = (total_stages + PER_PAGE - 1) / PER_PAGE;
+                let page_idx = self.stage_page.min(total_pages.saturating_sub(1));
+                let start = page_idx * PER_PAGE;
+                let end = (start + PER_PAGE).min(total_stages);
+
+                let mut rows: Vec<Row> = ctx.content.stages[start..end]
                     .iter()
                     .enumerate()
-                    .map(|(index, entry)| {
+                    .map(|(offset, entry)| {
+                        let global_idx = start + offset;
+                        let tag = if entry.descriptor.is_validated_reference() {
+                            "[REF]"
+                        } else {
+                            "[EXP]"
+                        };
                         Row::action(
-                            format!("{} - {}", entry.descriptor.name, entry.state.label()),
-                            Command::OpenStage(index),
+                            format!(
+                                "{} {} ({}) - {}",
+                                tag,
+                                entry.descriptor.name,
+                                entry.descriptor.surface(),
+                                entry.state.label()
+                            ),
+                            Command::OpenStage(global_idx),
                         )
                     })
                     .collect();
+                if total_pages > 1 {
+                    rows.push(Row::action(
+                        format!("PÁGINA {}/{} — SIGUIENTE >>", page_idx + 1, total_pages),
+                        Command::NextStagePage,
+                    ));
+                }
                 rows.push(Row::action("VOLVER", Command::Back));
                 rows
             }
@@ -387,6 +421,22 @@ impl Menu {
                             enabled: supported && files_ready,
                         },
                     });
+                }
+                if let Some(entry) = entry {
+                    rows.push(Row::info("SUPERFICIE", entry.descriptor.surface()));
+                    rows.push(Row::info("PAÍS", entry.descriptor.country()));
+                    rows.push(Row::info(
+                        "BLOQUES TERRENO",
+                        format!("{}", entry.descriptor.terrain_blocks),
+                    ));
+                    rows.push(Row::info(
+                        "ESTADO",
+                        if entry.descriptor.is_validated_reference() {
+                            "REFERENCIA VALIDADA"
+                        } else {
+                            "EXPERIMENTAL RBR"
+                        },
+                    ));
                 }
                 if let Some(missing) = entry.and_then(|e| e.files.missing_label()) {
                     rows.push(Row::info("FILES", missing));
@@ -603,10 +653,14 @@ impl Menu {
                         format!("{}/{}", res.splits_passed, res.splits_total),
                     ));
                 }
+                if ctx.has_replay {
+                    rows.push(Row::action("VER REPETICIÓN", Command::StartReplay));
+                }
                 rows.push(Row::action("RESTART", Command::Restart));
                 rows.push(Row::action("MAIN MENU", Command::ResetToMain));
                 rows
             }
+            Page::Replay => Vec::new(),
         }
     }
     pub fn subtitle(&self, ctx: &Context) -> Vec<String> {
@@ -747,6 +801,10 @@ impl Menu {
                 } else {
                     "TIMED FINISH VERIFIED".into()
                 },
+            ],
+            Page::Replay => vec![
+                "REPETICIÓN OFICIAL DE TRAMO".into(),
+                format!("{} — {}", vehicle.name, stage.name),
             ],
         }
     }
@@ -1168,6 +1226,7 @@ mod tests {
             ctrl_opacity: 0.5,
             global_opacity: 0.5,
             stage_result: None,
+            has_replay: false,
         }
     }
 
@@ -1441,7 +1500,7 @@ mod tests {
                 Some(expected)
             );
         }
-        assert_eq!(content.stages.len(), 4);
+        assert_eq!(content.stages.len(), 30);
         for (i, stage) in content.stages.iter().enumerate() {
             menu.inspected_stage = i;
             menu.page = Page::StageDetail;

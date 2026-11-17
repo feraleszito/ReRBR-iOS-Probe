@@ -9,6 +9,7 @@ pub mod menu;
 #[cfg(test)]
 mod private_tests;
 mod race;
+pub mod replay;
 mod ui;
 mod worker;
 use crate::{
@@ -76,6 +77,10 @@ pub struct Runtime {
     cpu_ms: f64,
     footprint: Option<u64>,
     footprint_at: Instant,
+    pub stage_cameras: Option<replay::StageCameras>,
+    pub replay_recorder: replay::ReplayRecorder,
+    pub saved_replay: Option<replay::Replay>,
+    pub replay_player: Option<replay::ReplayPlayer>,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -137,6 +142,10 @@ impl Runtime {
             cpu_ms: 0.0,
             footprint: None,
             footprint_at: Instant::now(),
+            stage_cameras: None,
+            replay_recorder: replay::ReplayRecorder::new(),
+            saved_replay: None,
+            replay_player: None,
         }
     }
     pub fn take_scene_action(&mut self) -> Option<SceneAction> {
@@ -256,6 +265,9 @@ impl Runtime {
                 self.worker = worker::Worker::idle();
                 self.clear_scene_pose();
                 self.race = race::Clock::default();
+                self.replay_player = None;
+                self.replay_recorder.clear();
+                self.saved_replay = None;
                 self.pending_scene_action = Some(SceneAction::Unload);
                 self.menu.reset_to_main();
                 self.message = None;
@@ -284,6 +296,8 @@ impl Runtime {
                     self.clear_scene_pose();
                     self.loading_started = Instant::now();
                     self.race.prepare();
+                    self.replay_player = None;
+                    self.replay_recorder.clear();
                     self.worker = worker::Worker::new_selected(self.selection.clone(), false);
                     self.pending_scene_action =
                         Some(SceneAction::Load(Box::new(self.selection.clone())));
@@ -318,8 +332,53 @@ impl Runtime {
                 self.controls.selected_gear = 1;
                 self.loading_started = Instant::now();
                 self.race.prepare();
+                self.replay_player = None;
+                self.replay_recorder.clear();
                 self.menu.show(menu::Page::Loading);
                 self.message = None;
+            }
+            StartReplay => {
+                if let Some(replay) = &self.saved_replay {
+                    let mut player =
+                        replay::ReplayPlayer::new(replay.clone(), self.stage_cameras.clone());
+                    player.restart();
+                    self.replay_player = Some(player);
+                    self.menu.show(menu::Page::Replay);
+                    self.message = None;
+                }
+            }
+            ReplayTogglePause => {
+                if let Some(player) = &mut self.replay_player {
+                    player.toggle_pause();
+                }
+            }
+            ReplayRestart => {
+                if let Some(player) = &mut self.replay_player {
+                    player.restart();
+                }
+            }
+            ReplayCycleCamera => {
+                if let Some(player) = &mut self.replay_player {
+                    player.cycle_camera();
+                    self.message = Some(format!("CÁMARA: {}", player.camera_mode.label()));
+                }
+            }
+            ReplayExit => {
+                self.replay_player = None;
+                audio::set_paused(true);
+                self.menu.show(menu::Page::StageComplete);
+            }
+            NextStagePage => {
+                let total = (self.content.stages.len() + 7) / 8;
+                if total > 0 {
+                    self.menu.stage_page = (self.menu.stage_page + 1) % total;
+                }
+            }
+            PrevStagePage => {
+                let total = (self.content.stages.len() + 7) / 8;
+                if total > 0 {
+                    self.menu.stage_page = (self.menu.stage_page + total - 1) % total;
+                }
             }
             Calibrate => {
                 if self.tilt.is_finite() {
@@ -577,6 +636,21 @@ impl Runtime {
             }
             return;
         }
+        if self.menu.page == menu::Page::Replay {
+            if t.phase == TouchPhase::Started {
+                let layout = layout::ReplayLayout::for_size(size);
+                if layout.play_pause.contains(x, y) {
+                    self.menu_command(menu::Command::ReplayTogglePause);
+                } else if layout.restart.contains(x, y) {
+                    self.menu_command(menu::Command::ReplayRestart);
+                } else if layout.camera.contains(x, y) {
+                    self.menu_command(menu::Command::ReplayCycleCamera);
+                } else if layout.exit.contains(x, y) {
+                    self.menu_command(menu::Command::ReplayExit);
+                }
+            }
+            return;
+        }
         if self.menu.page != menu::Page::Driving {
             if t.phase == TouchPhase::Started {
                 let rows = {
@@ -643,6 +717,7 @@ impl Runtime {
                 .race
                 .finish(state.timing.splits_passed, state.timing.splits_total)
         {
+            self.saved_replay = self.replay_recorder.finish();
             self.controls.clear();
             self.menu.show(menu::Page::StageComplete);
             self.message = None;
@@ -670,6 +745,67 @@ impl Runtime {
             self.footprint = rerbr_sim::footprint();
             self.footprint_at = now + Duration::from_secs(1);
         }
+
+        if self.menu.page == menu::Page::Replay {
+            if let Some(player) = &mut self.replay_player {
+                player.step(seconds as f32);
+                let current_frame = player.current_frame()?;
+                let is_paused = player.state != replay::PlaybackState::Playing;
+                audio::set_paused(is_paused);
+                if !is_paused {
+                    let noise = rerbr_sim::engine_audio::EngineNoise::from_rpm_throttle(
+                        current_frame.rpm,
+                        0.7,
+                        current_frame.rpm * 0.1,
+                    );
+                    audio::update_engine_state(&noise, current_frame.gear as i32);
+                }
+                let car_pos = current_frame.car_position();
+                let car_model = current_frame.models[0];
+                let (camera, fov) = player.current_camera(
+                    car_pos,
+                    car_model,
+                    |m| {
+                        let target = m.w_axis.truncate() + Vec3::Y * 0.75;
+                        let forward = -m.z_axis.truncate().normalize_or(Vec3::NEG_Z);
+                        let (cam, _) = path.chase_camera(target, forward).unwrap_or((
+                            Camera {
+                                eye: target - forward * 5.5 + Vec3::Y * 1.8,
+                                target,
+                                up: Vec3::Y,
+                            },
+                            0.0,
+                        ));
+                        cam
+                    },
+                    |m| {
+                        #[cfg(feature = "physics-stage")]
+                        if let Some(cam) = self.mounts.and_then(|mnt| {
+                            mnt.camera_with_cockpit(cameras::View::Bonnet, m, self.cockpit_node)
+                        }) {
+                            return cam;
+                        }
+                        let eye = m.w_axis.truncate() + m.y_axis.truncate() * 0.9
+                            - m.z_axis.truncate() * 0.5;
+                        let target = eye - m.z_axis.truncate() * 10.0;
+                        Camera {
+                            eye,
+                            target,
+                            up: m.y_axis.truncate(),
+                        }
+                    },
+                );
+                self.effective_fov = fov;
+                return Some(Frame {
+                    models: current_frame.models,
+                    camera,
+                    boom: 0.0,
+                    max_wheel_travel: 0.0,
+                    min_wheel_clearance: 0.0,
+                });
+            }
+        }
+
         let layout = self.effective_layout(self.drawable_size);
         let (pair, rest, paused) =
             self.sync_race_state(now, seconds, &layout, self.tilt.is_finite());
@@ -688,6 +824,18 @@ impl Runtime {
             (stamp.elapsed().as_secs_f64() * 720.0).clamp(0.0, 1.0) as f32
         };
         let models = models(&a, &b, alpha, pivots, offset);
+        if self.race.phase == race::Phase::Driving {
+            let car_dist = self.worker.state.lock().unwrap().timing.driveline_distance;
+            let speed_mps = Vec3::from(b.velocity).length();
+            self.replay_recorder.record(
+                self.race.raw_seconds().unwrap_or(0.0) as f32,
+                models,
+                car_dist,
+                speed_mps,
+                b.rpm,
+                b.gear as i8,
+            );
+        }
         self.steering_angle = a.steering_angle + (b.steering_angle - a.steering_angle) * alpha;
         let position =
             swap.transform_point3(Vec3::from(a.position).lerp(Vec3::from(b.position), alpha));
@@ -836,6 +984,7 @@ impl Runtime {
             ctrl_opacity: self.controls_layout.opacity_for(self.selected_control),
             global_opacity: self.controls_layout.global_opacity,
             stage_result: self.race.result(),
+            has_replay: self.saved_replay.is_some(),
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
@@ -880,6 +1029,13 @@ impl Runtime {
             hud.draw_bytes(queue, encoder, target, &canvas.finish());
             return;
         }
+        if self.menu.page == menu::Page::Replay {
+            if let Some(player) = &self.replay_player {
+                self.draw_replay_overlay(&mut canvas, player);
+            }
+            hud.draw_bytes(queue, encoder, target, &canvas.finish());
+            return;
+        }
         if self.menu.page != menu::Page::Driving {
             let status = self.status(&state);
             let mut ctx = self.context();
@@ -899,6 +1055,87 @@ impl Runtime {
         }
         self.draw_banners(&mut canvas, &layout, &state);
         hud.draw_bytes(queue, encoder, target, &canvas.finish());
+    }
+    fn draw_replay_overlay(&self, canvas: &mut Canvas, player: &replay::ReplayPlayer) {
+        let layout = layout::ReplayLayout::for_size(self.drawable_size);
+
+        // Top bar
+        ui::panel(canvas, layout.top_bar, PANEL_DEEP, LINE);
+        let cam_label = match player.camera_mode {
+            replay::ReplayCameraMode::StageTV => {
+                let dist = player.current_frame().map_or(0.0, |f| f.driveline_distance);
+                if let Some((idx, total)) = self
+                    .stage_cameras
+                    .as_ref()
+                    .and_then(|sc| sc.active_camera_index(dist))
+                {
+                    format!("TV CAM ({idx}/{total})")
+                } else {
+                    "TV CAM (CHASE FALLBACK)".into()
+                }
+            }
+            _ => player.camera_mode.label().into(),
+        };
+        let banner = format!(
+            "REPETICIÓN — {} — {} | {}",
+            self.selection.vehicle.name, self.selection.stage.name, cam_label
+        );
+        let (x, y, w, h) = ui::px(layout.top_bar, canvas);
+        ui::text_clipped(
+            canvas,
+            x + 10.0,
+            y + (h - 11.0).max(0.0) * 0.5,
+            w - 20.0,
+            &banner,
+            0.78,
+            TEXT,
+        );
+
+        // Timeline bar
+        ui::fill(canvas, layout.timeline, [30, 35, 45, 200]);
+        let progress = player.progress();
+        if progress > 0.0 {
+            let filled = Rect::new(
+                layout.timeline.x,
+                layout.timeline.y,
+                layout.timeline.w * progress,
+                layout.timeline.h,
+            );
+            ui::fill(canvas, filled, ACCENT);
+        }
+
+        // Time text
+        let time_str = format!(
+            "{} / {}",
+            menu::format_stage_time(player.current_time as f64),
+            menu::format_stage_time(player.total_duration() as f64)
+        );
+        let time_rect = Rect::new(0.40, 0.115, 0.20, 0.04);
+        ui::panel(canvas, time_rect, PANEL_DEEP, LINE);
+        ui::text_center(canvas, time_rect, &time_str, 0.80, TEXT);
+
+        // Bottom control buttons
+        let pause_label = if player.state == replay::PlaybackState::Paused {
+            "PLAY"
+        } else {
+            "PAUSA"
+        };
+        ui::button(
+            canvas,
+            layout.play_pause,
+            pause_label,
+            player.state == replay::PlaybackState::Playing,
+            true,
+        );
+        ui::button(canvas, layout.restart, "REINICIAR", false, true);
+        ui::button(
+            canvas,
+            layout.camera,
+            &format!("CAM: {}", player.camera_mode.label()),
+            false,
+            true,
+        );
+        ui::button(canvas, layout.exit, "SALIR", false, true);
     }
     fn draw_controls_editor(&self, canvas: &mut Canvas, layout: &DrivingLayout) {
         for ctrl in layout::EditableControl::ALL {

@@ -144,6 +144,35 @@ impl VehicleDescriptor {
     }
 }
 impl StageDescriptor {
+    pub fn is_original_rbr(&self) -> bool {
+        Self::presets().iter().any(|preset| {
+            self.id == preset.id
+                && self.original_map == preset.original_map
+                && self.stem == preset.stem
+        })
+    }
+    pub fn is_validated_reference(&self) -> bool {
+        matches!(self.original_map, 20 | 22 | 41 | 46)
+    }
+    pub fn is_experimental(&self) -> bool {
+        self.is_original_rbr() && !self.is_validated_reference()
+    }
+    pub fn surface(&self) -> &'static str {
+        match self.original_map {
+            41..=46 | 51..=56 => "Tarmac",
+            _ => "Gravel",
+        }
+    }
+    pub fn country(&self) -> &'static str {
+        match self.original_map {
+            10..=15 => "Finland",
+            20..=25 => "United Kingdom",
+            41..=46 => "France",
+            51..=56 => "Japan",
+            61..=66 => "United States",
+            _ => "Unknown",
+        }
+    }
     pub fn file(&self, extension: &str) -> Result<String, String> {
         self.validate_schema()?;
         if extension.is_empty() || !extension.bytes().all(|b| b.is_ascii_alphanumeric()) {
@@ -419,7 +448,7 @@ impl StageDescriptor {
     /// Original Montblanc flip-spectator models needed to build the car's handles.
     /// Britain models remain part of the legacy common boot requirements.
     pub fn additional_boot_paths(&self) -> Vec<String> {
-        if matches!(self.original_map, 41 | 46) {
+        if matches!(self.original_map, 41..=46) {
             (0..4)
                 .map(|i| format!("Sgs/mo_spectator_{i:02}.sgs"))
                 .collect()
@@ -427,13 +456,65 @@ impl StageDescriptor {
             Vec::new()
         }
     }
-    pub fn presets() -> [Self; 4] {
+    pub fn validated_presets() -> [Self; 4] {
         [
             Self::harwood_forest(),
             Self::chirdonhead(),
             Self::cote_darbroz(),
             Self::cote_darbroz_ii(),
         ]
+    }
+    pub fn presets() -> Vec<Self> {
+        vec![
+            Self::harwood_forest(),
+            Self::chirdonhead(),
+            Self::cote_darbroz(),
+            Self::cote_darbroz_ii(),
+            // United Kingdom
+            Self::new_rbr(21, "falstone", "Falstone", 193),
+            Self::new_rbr(23, "shepherds-shield", "Shepherds Shield", 250),
+            Self::new_rbr(24, "harwood-forest-ii", "Harwood Forest II", 282),
+            Self::new_rbr(25, "chirdonhead-ii", "Chirdonhead II", 242),
+            // France (Mont Blanc)
+            Self::new_rbr(42, "joux-verte", "Joux Verte", 158),
+            Self::new_rbr(43, "bisanne", "Bisanne", 112),
+            Self::new_rbr(44, "joux-plane", "Joux Plane", 321),
+            Self::new_rbr(45, "joux-verte-ii", "Joux Verte II", 158),
+            // Finland (Arctic)
+            Self::new_rbr(10, "kaihuavaara", "Kaihuavaara", 154),
+            Self::new_rbr(11, "mustaselka", "Mustaselka", 182),
+            Self::new_rbr(12, "sikakama", "Sikakama", 257),
+            Self::new_rbr(13, "autiovaara", "Autiovaara", 177),
+            Self::new_rbr(14, "kaihuavaara-ii", "Kaihuavaara II", 154),
+            Self::new_rbr(15, "mustaselka-ii", "Mustaselka II", 182),
+            // Japan (Hokkaido)
+            Self::new_rbr(51, "noiker", "Noiker", 357),
+            Self::new_rbr(52, "sipirkakim", "Sipirkakim", 344),
+            Self::new_rbr(53, "pirka-menoko", "Pirka Menoko", 183),
+            Self::new_rbr(54, "tanner", "Tanner", 131),
+            Self::new_rbr(55, "noiker-ii", "Noiker II", 357),
+            Self::new_rbr(56, "tanner-ii", "Tanner II", 130),
+            // United States
+            Self::new_rbr(61, "fraizer-wells", "Fraizer Wells", 150),
+            Self::new_rbr(62, "prospect-ridge", "Prospect Ridge", 232),
+            Self::new_rbr(63, "diamond-creek", "Diamond Creek", 139),
+            Self::new_rbr(64, "hualapai-nation", "Hualapai Nation", 332),
+            Self::new_rbr(65, "prospect-ridge-ii", "Prospect Ridge II", 232),
+            Self::new_rbr(66, "diamond-creek-ii", "Diamond Creek II", 139),
+        ]
+    }
+    fn new_rbr(map: u32, id: &str, name: &str, terrain_blocks: usize) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            original_map: map,
+            stem: format!("track-{map}_O"),
+            documents_maps: "RBR/Maps".into(),
+            weather_letter: 3,
+            wetness: 0,
+            wear: 1,
+            terrain_blocks,
+        }
     }
 }
 
