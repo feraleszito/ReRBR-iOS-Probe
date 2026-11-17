@@ -59,6 +59,7 @@ pub struct Runtime {
     diagnostics: bool,
     minimal_hud: bool,
     volume: f64,
+    music_volume: f64,
     content: Catalog,
     message: Option<String>,
     menu: menu::Menu,
@@ -102,6 +103,11 @@ impl Runtime {
         controls.dead_zone = settings.dead_zone;
         controls.invert_pedals = settings.invert_pedals;
         audio::set_master_volume(settings.volume as f32);
+        audio::set_music_volume(settings.music_volume as f32);
+        if let Some(doc) = std::env::var_os("RERBR_PROBE_DOCUMENTS") {
+            audio::init_menu_music(std::path::Path::new(&doc));
+        }
+        audio::set_menu_music_active(true);
         Self {
             #[cfg(feature = "physics-stage")]
             view: cameras::View::from_index(settings.camera),
@@ -125,6 +131,7 @@ impl Runtime {
             diagnostics: settings.diagnostics,
             minimal_hud: settings.minimal_hud,
             volume: settings.volume,
+            music_volume: settings.music_volume,
             message: None,
             menu: menu::Menu::default(),
             fps_visible: settings.fps,
@@ -245,6 +252,7 @@ impl Runtime {
             minimal_hud: self.minimal_hud,
             invert_pedals: self.controls.invert_pedals,
             volume: self.volume,
+            music_volume: self.music_volume,
             camera: self.camera_index(),
             stage_id: self.selection.stage.id.clone(),
         }
@@ -271,6 +279,7 @@ impl Runtime {
                 self.pending_scene_action = Some(SceneAction::Unload);
                 self.menu.reset_to_main();
                 self.message = None;
+                audio::set_menu_music_active(true);
             }
             StartRally => {
                 self.content = Catalog::scan(&self.selection);
@@ -291,6 +300,7 @@ impl Runtime {
                 if let Err(error) = result {
                     self.message = Some(error);
                 } else {
+                    audio::set_menu_music_active(false);
                     audio::set_paused(true);
                     self.worker.shutdown();
                     self.clear_scene_pose();
@@ -345,6 +355,7 @@ impl Runtime {
                     self.replay_player = Some(player);
                     self.menu.show(menu::Page::Replay);
                     self.message = None;
+                    audio::set_menu_music_active(false);
                 }
             }
             ReplayTogglePause => {
@@ -366,6 +377,7 @@ impl Runtime {
             ReplayExit => {
                 self.replay_player = None;
                 audio::set_paused(true);
+                audio::set_menu_music_active(true);
                 self.menu.show(menu::Page::StageComplete);
             }
             NextStagePage => {
@@ -422,7 +434,7 @@ impl Runtime {
                 self.volume = (self.volume - 0.1).max(0.0);
                 audio::set_master_volume(self.volume as f32);
                 self.message = Some(format!(
-                    "VOLUME {:.0}% ({})",
+                    "VOLUMEN MOTOR {:.0}% ({})",
                     self.volume * 100.0,
                     audio::status()
                 ));
@@ -431,9 +443,27 @@ impl Runtime {
                 self.volume = (self.volume + 0.1).min(1.0);
                 audio::set_master_volume(self.volume as f32);
                 self.message = Some(format!(
-                    "VOLUME {:.0}% ({})",
+                    "VOLUMEN MOTOR {:.0}% ({})",
                     self.volume * 100.0,
                     audio::status()
+                ));
+            }
+            MusicVolumeDown => {
+                self.music_volume = (self.music_volume - 0.1).max(0.0);
+                audio::set_music_volume(self.music_volume as f32);
+                self.message = Some(format!(
+                    "VOLUMEN MÚSICA {:.0}% ({})",
+                    self.music_volume * 100.0,
+                    audio::menu_music_status()
+                ));
+            }
+            MusicVolumeUp => {
+                self.music_volume = (self.music_volume + 0.1).min(1.0);
+                audio::set_music_volume(self.music_volume as f32);
+                self.message = Some(format!(
+                    "VOLUMEN MÚSICA {:.0}% ({})",
+                    self.music_volume * 100.0,
+                    audio::menu_music_status()
                 ));
             }
             ToggleFps => {
@@ -721,6 +751,7 @@ impl Runtime {
             self.controls.clear();
             self.menu.show(menu::Page::StageComplete);
             self.message = None;
+            audio::set_menu_music_active(true);
         }
         let running = self.menu.page == menu::Page::Driving && steering_ready && healthy;
         // Physics and engine revving are active during countdown and driving; paused during presentation, menus, and finished state.
@@ -977,6 +1008,7 @@ impl Runtime {
             sensitivity: self.controls.sensitivity,
             dead_zone: self.controls.dead_zone,
             volume: self.volume,
+            music_volume: self.music_volume,
             fps: self.fps_visible,
             diagnostics: self.diagnostics,
             minimal_hud: self.minimal_hud,
@@ -1810,5 +1842,116 @@ mod reload_tests {
         assert_eq!(app.menu.page, menu::Page::Main);
         assert_eq!(app.race.phase, race::Phase::Idle);
         assert_eq!(app.race.result(), None);
+    }
+
+    #[test]
+    fn menu_runtime_actions_and_replay_integration_tests() {
+        let mut app = Runtime::new();
+
+        // 1. Vehicles selection audit (all vehicles in catalog: 8 original RBR + 1 NGP candidate)
+        let total_vehicles = app.content.vehicles.len();
+        assert_eq!(total_vehicles, 9);
+        for i in 0..total_vehicles {
+            let (expected_id, ok) = {
+                let v = &app.content.vehicles[i].descriptor;
+                (v.id.clone(), v.validate_current_backend().is_ok())
+            };
+            if ok {
+                app.apply_command(menu::Command::SelectVehicle(i));
+                assert_eq!(app.selection.vehicle.id, expected_id);
+            } else {
+                let prev_id = app.selection.vehicle.id.clone();
+                app.apply_command(menu::Command::SelectVehicle(i));
+                assert_eq!(app.selection.vehicle.id, prev_id);
+            }
+        }
+        // Restore Corolla
+        app.apply_command(menu::Command::SelectVehicle(0));
+        assert_eq!(app.selection.vehicle.id, "toyota-corolla-wrc");
+
+        // 2. Stage selection & missing files gate
+        assert_eq!(app.content.stages.len(), 30);
+        app.apply_command(menu::Command::SelectStage(0));
+        assert_eq!(app.selection.stage.id, "harwood-forest");
+
+        // Mark stage 1 as having missing files
+        app.content.stages[1].files.checked = true;
+        app.content.stages[1].files.missing = vec!["track-22_O.col".into()];
+        app.apply_command(menu::Command::SelectStage(1));
+        assert_eq!(app.selection.stage.id, "harwood-forest");
+
+        // Attempting StartRally with unsupported vehicle is blocked
+        app.selection.vehicle = rerbr_content::VehicleDescriptor::ford_focus_2006();
+        app.apply_command(menu::Command::StartRally);
+        assert_eq!(app.menu.page, menu::Page::Main);
+        assert!(app.message.is_some());
+
+        // Restore valid vehicle
+        app.selection.vehicle = app.content.vehicles[0].descriptor.clone();
+        app.message = None;
+
+        // 3. Start race, finish, open replay, exit replay to StageComplete
+        app.apply_command(menu::Command::StartRally);
+        assert_eq!(app.menu.page, menu::Page::Loading);
+        app.worker.shutdown();
+        app.worker = worker::Worker::idle();
+        app.install_pivots([Vec3::ZERO; 4]);
+        app.tilt = 0.0;
+        {
+            let mut st = app.worker.state.lock().unwrap();
+            st.rest = Some(Sample::default());
+            st.timing = rerbr_sim::drive::StageTiming {
+                started: true,
+                driveline_distance: 7150.0,
+                start_distance: 65.0,
+                finish_distance: 7148.0,
+                splits_passed: 2,
+                splits_total: 2,
+                split_times: vec![Some(45.0), Some(90.0)],
+                finished: true,
+                finish_crossed_forward: true,
+            };
+        }
+        let layout = DrivingLayout::default();
+        let t0 = Instant::now();
+        app.replay_recorder
+            .record(0.0, [Mat4::IDENTITY; 5], 0.0, 0.0, 1000.0, 1);
+        app.replay_recorder
+            .record(1.0, [Mat4::IDENTITY; 5], 100.0, 20.0, 3000.0, 2);
+        app.race.phase = race::Phase::Driving;
+        app.menu.page = menu::Page::Driving;
+        app.sync_race_state(t0, 1.0 / 60.0, &layout, true);
+        assert_eq!(app.menu.page, menu::Page::StageComplete);
+        assert!(app.saved_replay.is_some());
+
+        // Open replay
+        app.apply_command(menu::Command::StartReplay);
+        assert_eq!(app.menu.page, menu::Page::Replay);
+        assert!(app.replay_player.is_some());
+
+        // Cycle replay cameras
+        app.apply_command(menu::Command::ReplayCycleCamera);
+        app.apply_command(menu::Command::ReplayTogglePause);
+        app.apply_command(menu::Command::ReplayRestart);
+
+        // Exit replay returns to StageComplete
+        app.apply_command(menu::Command::ReplayExit);
+        assert_eq!(app.menu.page, menu::Page::StageComplete);
+        assert!(app.replay_player.is_none());
+
+        // 4. Settings modification and audio
+        let initial_vol = app.volume;
+        app.apply_command(menu::Command::VolumeDown);
+        assert!((app.volume - (initial_vol - 0.1).max(0.0)).abs() < 1e-6);
+
+        let initial_music_vol = app.music_volume;
+        app.apply_command(menu::Command::MusicVolumeDown);
+        assert!((app.music_volume - (initial_music_vol - 0.1).max(0.0)).abs() < 1e-6);
+        app.apply_command(menu::Command::MusicVolumeUp);
+        assert!((app.music_volume - initial_music_vol).abs() < 1e-6);
+
+        // ResetToMain from StageComplete
+        app.apply_command(menu::Command::ResetToMain);
+        assert_eq!(app.menu.page, menu::Page::Main);
     }
 }

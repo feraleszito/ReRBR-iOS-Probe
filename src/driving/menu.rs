@@ -61,6 +61,8 @@ pub enum Command {
     CameraNext,
     VolumeDown,
     VolumeUp,
+    MusicVolumeDown,
+    MusicVolumeUp,
     ToggleFps,
     ToggleDiagnostics,
     ToggleMinimalHud,
@@ -177,6 +179,7 @@ pub struct Context<'a> {
     pub sensitivity: f64,
     pub dead_zone: f64,
     pub volume: f64,
+    pub music_volume: f64,
     pub fps: bool,
     pub diagnostics: bool,
     pub minimal_hud: bool,
@@ -389,9 +392,11 @@ impl Menu {
                     })
                     .collect();
                 if total_pages > 1 {
-                    rows.push(Row::action(
-                        format!("PÁGINA {}/{} — SIGUIENTE >>", page_idx + 1, total_pages),
+                    rows.push(Row::stepper(
+                        "PÁGINA",
+                        Command::PrevStagePage,
                         Command::NextStagePage,
+                        format!("{}/{}", page_idx + 1, total_pages),
                     ));
                 }
                 rows.push(Row::action("VOLVER", Command::Back));
@@ -406,15 +411,15 @@ impl Menu {
                     entry.is_none_or(|e| !e.files.checked || e.files.missing.is_empty());
                 let mut rows = Vec::new();
                 if state == EntryState::Selected {
-                    rows.push(Row::info("SELECTION", "SELECTED"));
+                    rows.push(Row::info("SELECCIÓN", "SELECCIONADO"));
                 } else {
                     rows.push(Row {
                         label: if !supported {
-                            "SELECT STAGE - UNSUPPORTED".into()
+                            "TRAMO NO DISPONIBLE (SIN SOPORTE)".into()
                         } else if !files_ready {
-                            "SELECT STAGE - MISSING FILES".into()
+                            "TRAMO BLOQUEADO - ARCHIVOS FALTANTES".into()
                         } else {
-                            "SELECT STAGE".into()
+                            "SELECCIONAR TRAMO".into()
                         },
                         kind: RowKind::Action {
                             command: Command::SelectStage(self.inspected_stage),
@@ -497,10 +502,16 @@ impl Menu {
                 ),
                 Row::action(format!("CÁMARA: {}", ctx.camera), Command::CameraNext),
                 Row::stepper(
-                    "VOLUMEN",
+                    "VOLUMEN MOTOR",
                     Command::VolumeDown,
                     Command::VolumeUp,
                     format!("{:.0}%", ctx.volume * 100.0),
+                ),
+                Row::stepper(
+                    "VOLUMEN MÚSICA",
+                    Command::MusicVolumeDown,
+                    Command::MusicVolumeUp,
+                    format!("{:.0}%", ctx.music_volume * 100.0),
                 ),
                 Row::action(
                     format!("INVERTIR PEDALES: {}", on_off(ctx.invert_pedals)),
@@ -656,8 +667,8 @@ impl Menu {
                 if ctx.has_replay {
                     rows.push(Row::action("VER REPETICIÓN", Command::StartReplay));
                 }
-                rows.push(Row::action("RESTART", Command::Restart));
-                rows.push(Row::action("MAIN MENU", Command::ResetToMain));
+                rows.push(Row::action("REINICIAR TRAMO", Command::Restart));
+                rows.push(Row::action("MENÚ PRINCIPAL", Command::ResetToMain));
                 rows
             }
             Page::Replay => Vec::new(),
@@ -1075,7 +1086,7 @@ fn on_off(value: bool) -> &'static str {
     }
 }
 
-pub const ROW_TOP: f32 = 0.27;
+pub const ROW_TOP: f32 = 0.23;
 pub const ROW_BOTTOM: f32 = 0.88;
 pub const ROW_X: f32 = 0.14;
 pub const ROW_WIDTH: f32 = 0.72;
@@ -1107,6 +1118,7 @@ pub struct Settings {
     pub minimal_hud: bool,
     pub invert_pedals: bool,
     pub volume: f64,
+    pub music_volume: f64,
     pub camera: u8,
     pub stage_id: String,
 }
@@ -1120,6 +1132,7 @@ impl Default for Settings {
             minimal_hud: false,
             invert_pedals: false,
             volume: 0.8,
+            music_volume: 0.70,
             camera: 0,
             stage_id: rerbr_content::StageDescriptor::default().id,
         }
@@ -1158,6 +1171,13 @@ impl Settings {
                         }
                     }
                 }
+                "music_volume" => {
+                    if let Ok(v) = value.parse::<f64>() {
+                        if v.is_finite() {
+                            settings.music_volume = v.clamp(0.0, 1.0);
+                        }
+                    }
+                }
                 "camera" => {
                     if let Ok(v) = value.parse::<u8>() {
                         settings.camera = v.min(2);
@@ -1182,9 +1202,9 @@ impl Settings {
     }
     fn encode(&self) -> String {
         format!(
-            "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nvolume={}\ncamera={}\nstage_id={}\n",
+            "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nvolume={}\nmusic_volume={}\ncamera={}\nstage_id={}\n",
             self.sensitivity, self.dead_zone, self.fps, self.diagnostics,
-            self.minimal_hud, self.invert_pedals, self.volume, self.camera, self.stage_id
+            self.minimal_hud, self.invert_pedals, self.volume, self.music_volume, self.camera, self.stage_id
         )
     }
     pub fn save(&self) {
@@ -1219,6 +1239,7 @@ mod tests {
             sensitivity: 2.0,
             dead_zone: 0.03,
             volume: 0.8,
+            music_volume: 0.70,
             fps: false,
             diagnostics: false,
             minimal_hud: false,
@@ -1322,10 +1343,16 @@ mod tests {
             ..Menu::default()
         };
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 11);
+        assert_eq!(rows.len(), 12);
         for (row_idx, value, expected_down, expected_up) in [
             (0usize, "2.00", Command::SensDown, Command::SensUp),
             (3usize, "80%", Command::VolumeDown, Command::VolumeUp),
+            (
+                4usize,
+                "70%",
+                Command::MusicVolumeDown,
+                Command::MusicVolumeUp,
+            ),
         ] {
             let rect = menu.row_rect_for(row_idx, rows.len());
             let (rx, _ry, rw, _rh) = (rect.x * 640.0, rect.y, rect.w * 640.0, rect.h);
@@ -1342,7 +1369,7 @@ mod tests {
                 Some(expected_up)
             );
         }
-        let inv_rect = menu.row_rect_for(4, rows.len());
+        let inv_rect = menu.row_rect_for(5, rows.len());
         assert_eq!(
             menu.press(
                 inv_rect.center_x() as f64,
@@ -1567,12 +1594,14 @@ mod tests {
             camera: 2,
             stage_id: "cote-darbroz-ii".into(),
             volume: 0.25,
+            music_volume: 0.60,
             ..Settings::default()
         };
         let restored = Settings::parse(&preferences.encode());
         assert_eq!(restored.stage_id, preferences.stage_id);
         assert_eq!(restored.camera, 2);
         assert_eq!(restored.volume, 0.25);
+        assert_eq!(restored.music_volume, 0.60);
         assert!(restored.invert_pedals);
     }
 
@@ -1634,5 +1663,151 @@ mod tests {
             &r.kind,
             RowKind::Info { value } if value.contains("track-22_N_textures.rbz")
         )));
+    }
+
+    #[test]
+    fn menu_comprehensive_audit_and_navigation_suite() {
+        let selection = Selection::default();
+        let content = Catalog::descriptors(&selection);
+        let ctx = context(&selection, &content);
+        let mut menu = Menu::default();
+
+        // 1. Enter and exit all submenus
+        for page in [
+            Page::Garage,
+            Page::Stages,
+            Page::Settings,
+            Page::Controls,
+            Page::Content,
+            Page::About,
+        ] {
+            menu.open(page);
+            assert_eq!(menu.page, page);
+            menu.back();
+            assert_eq!(menu.page, Page::Main);
+        }
+
+        // Deep submenus
+        menu.open(Page::Garage);
+        menu.open(Page::GarageDetail);
+        assert_eq!(menu.page, Page::GarageDetail);
+        menu.back();
+        assert_eq!(menu.page, Page::Garage);
+        menu.back();
+        assert_eq!(menu.page, Page::Main);
+
+        menu.open(Page::Stages);
+        menu.open(Page::StageDetail);
+        assert_eq!(menu.page, Page::StageDetail);
+        menu.back();
+        assert_eq!(menu.page, Page::Stages);
+        menu.back();
+        assert_eq!(menu.page, Page::Main);
+
+        menu.open(Page::Settings);
+        menu.open(Page::CameraEditor);
+        assert_eq!(menu.page, Page::CameraEditor);
+        menu.back();
+        assert_eq!(menu.page, Page::Settings);
+        menu.open(Page::ControlsEditor);
+        assert_eq!(menu.page, Page::ControlsEditor);
+        menu.back();
+        assert_eq!(menu.page, Page::Settings);
+        menu.back();
+        assert_eq!(menu.page, Page::Main);
+
+        menu.open(Page::Content);
+        menu.open(Page::ContentCompatibility);
+        assert_eq!(menu.page, Page::ContentCompatibility);
+        menu.back();
+        assert_eq!(menu.page, Page::Content);
+        menu.open(Page::ContentImport);
+        assert_eq!(menu.page, Page::ContentImport);
+        menu.back();
+        assert_eq!(menu.page, Page::Content);
+        menu.back();
+        assert_eq!(menu.page, Page::Main);
+
+        // 2. Pagination test across all 4 pages (30 stages)
+        menu.page = Page::Stages;
+        menu.stage_page = 0;
+        let total_stages = content.stages.len();
+        assert_eq!(total_stages, 30);
+        let total_pages = total_stages.div_ceil(8);
+        assert_eq!(total_pages, 4);
+
+        for expected_page in 0..4 {
+            let rows = menu.rows(&ctx);
+            let page_row = rows.iter().find(|r| r.label == "PÁGINA");
+            assert!(page_row.is_some());
+            if let Some(RowKind::Stepper { value, .. }) = page_row.map(|r| &r.kind) {
+                assert_eq!(value, &format!("{}/{}", expected_page + 1, total_pages));
+            }
+            menu.stage_page = (menu.stage_page + 1) % total_pages;
+        }
+
+        // Stepper press on PrevStagePage and NextStagePage
+        let rows = menu.rows(&ctx);
+        let p_rect = menu.row_rect_for(rows.len() - 2, rows.len());
+        let split = menu.stepper_split_for(&format!("{}/{}", menu.stage_page + 1, total_pages));
+        let left_x = f64::from(split - 0.05);
+        let right_x = f64::from(split + 0.05);
+        let cy = f64::from(p_rect.y + p_rect.h * 0.5);
+        assert_eq!(menu.press(left_x, cy, &rows), Some(Command::PrevStagePage));
+        assert_eq!(menu.press(right_x, cy, &rows), Some(Command::NextStagePage));
+
+        // 3. ResetToMain clears navigation stack
+        menu.open(Page::Settings);
+        menu.open(Page::CameraEditor);
+        menu.reset_to_main();
+        assert_eq!(menu.page, Page::Main);
+        menu.back();
+        assert_eq!(menu.page, Page::Main);
+    }
+
+    #[test]
+    fn hud_vertex_budget_all_screens() {
+        use crate::harwood::benchmark::hud::{Canvas, MAX_CANVAS_VERTICES};
+        let selection = Selection::default();
+        let content = Catalog::descriptors(&selection);
+        let ctx = context(&selection, &content);
+
+        let all_pages = [
+            Page::Main,
+            Page::Loading,
+            Page::Drive,
+            Page::Garage,
+            Page::GarageDetail,
+            Page::Stages,
+            Page::StageDetail,
+            Page::Content,
+            Page::ContentImport,
+            Page::ContentCompatibility,
+            Page::Settings,
+            Page::Controls,
+            Page::CameraEditor,
+            Page::ControlsEditor,
+            Page::About,
+            Page::Paused,
+            Page::StageComplete,
+            Page::Replay,
+        ];
+
+        for page in all_pages {
+            let menu = Menu {
+                page,
+                ..Menu::default()
+            };
+            let mut canvas = Canvas::new((1024, 768));
+            menu.draw(&mut canvas, &ctx, "PRUEBA ESTADO HUD");
+            let bytes = canvas.finish();
+            assert!(
+                bytes.len() / 20 <= MAX_CANVAS_VERTICES,
+                "Page {:?} exceeded vertex budget: {} > {}",
+                page,
+                bytes.len() / 20,
+                MAX_CANVAS_VERTICES
+            );
+        }
     }
 }

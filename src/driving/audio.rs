@@ -10,11 +10,71 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// Pre-allocated scratch buffer capacity to prevent allocations in the audio callback.
 const PREALLOC_SCRATCH_FRAMES: usize = 4096;
 
+/// Menu and replay music track streaming decoded 16-bit PCM stereo samples.
+struct MenuMusicTrack {
+    samples: Arc<Vec<[i16; 2]>>,
+    cursor: usize,
+    gain: f32,
+    active: bool,
+}
+
+impl MenuMusicTrack {
+    fn new(samples: Arc<Vec<[i16; 2]>>, active: bool) -> Self {
+        Self {
+            samples,
+            cursor: 0,
+            gain: 0.0,
+            active,
+        }
+    }
+
+    fn mix_into(&mut self, out: &mut [f32], frames: usize, sample_rate: u32, music_volume: f32) {
+        if self.samples.is_empty() || music_volume <= 0.0 {
+            self.gain = 0.0;
+            return;
+        }
+        let target = if self.active { 1.0 } else { 0.0 };
+        if self.gain <= 0.0001 && target == 0.0 {
+            self.gain = 0.0;
+            return;
+        }
+        // ~250 ms smooth fade-in / fade-out
+        let step = 4.0 / sample_rate.max(11025) as f32;
+        let len = self.samples.len();
+        for i in 0..frames {
+            if self.gain < target {
+                self.gain = (self.gain + step).min(target);
+            } else if self.gain > target {
+                self.gain = (self.gain - step).max(target);
+            }
+            if self.gain <= 0.0001 && target == 0.0 {
+                self.gain = 0.0;
+                break;
+            }
+            let frame = self.samples[self.cursor];
+            self.cursor += 1;
+            if self.cursor >= len {
+                self.cursor = 0;
+            }
+            let scale = (self.gain * music_volume) / 32768.0;
+            if i * 2 + 1 < out.len() {
+                out[i * 2] = (out[i * 2] + f32::from(frame[0]) * scale).clamp(-1.0, 1.0);
+                out[i * 2 + 1] = (out[i * 2 + 1] + f32::from(frame[1]) * scale).clamp(-1.0, 1.0);
+            }
+        }
+    }
+}
+
 /// State of the audio runtime.
 struct AudioRuntime {
     car_audio: Option<CarAudio>,
     status: String,
     volume: f32,
+    music_volume: f32,
+    menu_music: Option<MenuMusicTrack>,
+    menu_music_active: bool,
+    menu_music_loading: bool,
+    menu_music_status: String,
     paused: bool,
     interrupted: bool,
     is_cockpit: bool,
@@ -28,6 +88,11 @@ impl AudioRuntime {
             car_audio: None,
             status: "AUDIO UNINITIALIZED".into(),
             volume: volume.clamp(0.0, 1.0),
+            music_volume: 0.70,
+            menu_music: None,
+            menu_music_active: false,
+            menu_music_loading: false,
+            menu_music_status: "MÚSICA NO CARGADA".into(),
             paused: true,
             interrupted: false,
             is_cockpit: false,
@@ -133,6 +198,10 @@ pub fn set_paused(paused: bool) {
         if let Some(audio) = lock.car_audio.as_mut() {
             audio.set_paused(paused);
         }
+        let music_active = lock.menu_music_active;
+        if let Some(track) = lock.menu_music.as_mut() {
+            track.active = music_active && paused;
+        }
     }
 }
 
@@ -152,6 +221,203 @@ pub fn status() -> String {
     let rt = runtime();
     rt.lock()
         .map_or_else(|_| "AUDIO ERROR".into(), |lock| lock.status.clone())
+}
+
+/// Query menu music status.
+pub fn menu_music_status() -> String {
+    let rt = runtime();
+    rt.lock().map_or_else(
+        |_| "ERROR MÚSICA".into(),
+        |lock| lock.menu_music_status.clone(),
+    )
+}
+
+/// Initialize menu music from Documents asynchronously.
+/// Supports authentic RBR `Audio/Music/ba.wav` or custom menu tracks.
+pub fn init_menu_music(documents: &Path) {
+    let candidates = [
+        documents.join("RBR/Audio/Music/ba.wav"),
+        documents.join("Audio/Music/ba.wav"),
+        documents.join("RBR/Audio/Music/menu.wav"),
+        documents.join("Audio/Music/menu.wav"),
+    ];
+    let found = candidates.into_iter().find(|p| p.is_file());
+    let path = match found {
+        Some(p) => p,
+        None => {
+            let ogg_candidates = [
+                documents.join("RBR/Audio/Music/ba.ogg"),
+                documents.join("Audio/Music/ba.ogg"),
+            ];
+            if let Ok(mut lock) = runtime().lock() {
+                if ogg_candidates.iter().any(|p| p.is_file()) {
+                    lock.menu_music_status = "ba.ogg PRESENTE (REQUIERE ba.wav PCM)".into();
+                } else {
+                    lock.menu_music_status = "MÚSICA NO INSTALADA (OPCIONAL)".into();
+                }
+            }
+            return;
+        }
+    };
+
+    {
+        let mut lock = match runtime().lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if lock.menu_music.is_some() || lock.menu_music_loading {
+            return;
+        }
+        lock.menu_music_loading = true;
+        lock.menu_music_status = "CARGANDO MÚSICA...".into();
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("rerbr-menu-music".into())
+        .spawn(move || {
+            let decoded = load_menu_music_file(&path);
+            if let Ok(mut lock) = runtime().lock() {
+                lock.menu_music_loading = false;
+                match decoded {
+                    Ok(samples) if !samples.is_empty() => {
+                        let active = lock.menu_music_active && lock.paused;
+                        lock.menu_music = Some(MenuMusicTrack::new(Arc::new(samples), active));
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("ba.wav");
+                        lock.menu_music_status = format!("MÚSICA ACTIVA ({name})");
+                    }
+                    Ok(_) => {
+                        lock.menu_music_status = "MÚSICA VACÍA".into();
+                    }
+                    Err(e) => {
+                        eprintln!("MENU MUSIC ERROR: {e}");
+                        lock.menu_music_status = format!("ERROR MÚSICA: {e}");
+                    }
+                }
+            }
+        });
+}
+
+/// Enable or disable menu music playback smoothly.
+pub fn set_menu_music_active(active: bool) {
+    if let Ok(mut lock) = runtime().lock() {
+        let paused = lock.paused;
+        lock.menu_music_active = active;
+        if let Some(track) = lock.menu_music.as_mut() {
+            track.active = active && paused;
+        }
+    }
+}
+
+/// Independent music volume (`0.0..=1.0`), separate from engine master volume.
+pub fn set_music_volume(volume: f32) {
+    if let Ok(mut lock) = runtime().lock() {
+        lock.music_volume = if volume.is_finite() {
+            volume.clamp(0.0, 1.0)
+        } else {
+            0.70
+        };
+    }
+}
+
+/// Decodes standard RIFF/WAVE PCM or IEEE-float stereo audio files.
+pub fn load_menu_music_file(path: &Path) -> Result<Vec<[i16; 2]>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    decode_wav_stereo(&bytes)
+}
+
+fn decode_wav_stereo(bytes: &[u8]) -> Result<Vec<[i16; 2]>, String> {
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("WAV: cabecera RIFF/WAVE no válida".into());
+    }
+    let mut pos = 12usize;
+    let mut channels = 0u16;
+    let mut sample_rate = 0u32;
+    let mut bits = 0u16;
+    let mut format_tag = 1u16;
+    let mut data_slice: Option<&[u8]> = None;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let payload_start = pos + 8;
+        let payload_end = payload_start.saturating_add(size).min(bytes.len());
+        if id == b"fmt " && payload_end - payload_start >= 16 {
+            let fmt = &bytes[payload_start..payload_end];
+            format_tag = u16::from_le_bytes([fmt[0], fmt[1]]);
+            channels = u16::from_le_bytes([fmt[2], fmt[3]]);
+            sample_rate = u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]]);
+            bits = u16::from_le_bytes([fmt[14], fmt[15]]);
+        } else if id == b"data" {
+            data_slice = Some(&bytes[payload_start..payload_end]);
+        }
+        pos = payload_start.saturating_add(size + (size & 1));
+    }
+    let data = data_slice.ok_or("WAV: no se encontró chunk data")?;
+    if channels == 0 || sample_rate == 0 {
+        return Err("WAV: canal o sample rate no válido".into());
+    }
+    let ch = usize::from(channels);
+    let mut stereo = Vec::new();
+    if format_tag == 1 && bits == 16 {
+        for frame in data.chunks_exact(ch * 2) {
+            let l = i16::from_le_bytes([frame[0], frame[1]]);
+            let r = if ch >= 2 {
+                i16::from_le_bytes([frame[2], frame[3]])
+            } else {
+                l
+            };
+            stereo.push([l, r]);
+        }
+    } else if format_tag == 1 && bits == 8 {
+        for frame in data.chunks_exact(ch) {
+            let l = (i16::from(frame[0]) - 128) << 8;
+            let r = if ch >= 2 {
+                (i16::from(frame[1]) - 128) << 8
+            } else {
+                l
+            };
+            stereo.push([l, r]);
+        }
+    } else if format_tag == 3 && bits == 32 {
+        for frame in data.chunks_exact(ch * 4) {
+            let fl = f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
+            let fr = if ch >= 2 {
+                f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]])
+            } else {
+                fl
+            };
+            stereo.push([
+                (fl * 32767.0).clamp(-32768.0, 32767.0) as i16,
+                (fr * 32767.0).clamp(-32768.0, 32767.0) as i16,
+            ]);
+        }
+    } else {
+        return Err(format!(
+            "WAV: formato no soportado (tag {format_tag}, {bits} bits)"
+        ));
+    }
+    if sample_rate != 44100 && !stereo.is_empty() {
+        stereo = resample_linear(&stereo, sample_rate, 44100);
+    }
+    Ok(stereo)
+}
+
+fn resample_linear(input: &[[i16; 2]], src_rate: u32, dst_rate: u32) -> Vec<[i16; 2]> {
+    let out_len = ((input.len() as u64 * u64::from(dst_rate)) / u64::from(src_rate)) as usize;
+    let mut out = Vec::with_capacity(out_len);
+    let ratio = src_rate as f64 / dst_rate as f64;
+    for i in 0..out_len {
+        let pos = i as f64 * ratio;
+        let idx = (pos as usize).min(input.len() - 1);
+        let next = (idx + 1).min(input.len() - 1);
+        let t = (pos - idx as f64) as f32;
+        let l = f32::from(input[idx][0]) * (1.0 - t) + f32::from(input[next][0]) * t;
+        let r = f32::from(input[idx][1]) * (1.0 - t) + f32::from(input[next][1]) * t;
+        out.push([l as i16, r as i16]);
+    }
+    out
 }
 
 /// Render interleaved stereo float audio frames for audio output.
@@ -176,26 +442,31 @@ pub fn render(out: &mut [f32], frames: usize, sample_rate: u32) {
         return;
     }
 
-    if lock.paused || lock.interrupted || lock.volume <= 0.0 || lock.car_audio.is_none() {
+    if lock.interrupted {
         out.fill(0.0);
         return;
     }
 
-    let mut scratch = std::mem::take(&mut lock.stereo_scratch);
-    if let Some(audio) = lock.car_audio.as_mut() {
-        let render_slice = &mut scratch[..frames];
-        render_slice.fill([0.0, 0.0]);
-        audio.render_stereo(render_slice);
-        for (i, frame) in render_slice.iter().enumerate() {
-            if i * 2 + 1 < out.len() {
-                out[i * 2] = frame[0];
-                out[i * 2 + 1] = frame[1];
+    if !lock.paused && lock.volume > 0.0 && lock.car_audio.is_some() {
+        let mut scratch = std::mem::take(&mut lock.stereo_scratch);
+        if let Some(audio) = lock.car_audio.as_mut() {
+            let render_slice = &mut scratch[..frames];
+            render_slice.fill([0.0, 0.0]);
+            audio.render_stereo(render_slice);
+            for (i, frame) in render_slice.iter().enumerate() {
+                if i * 2 + 1 < out.len() {
+                    out[i * 2] = frame[0];
+                    out[i * 2 + 1] = frame[1];
+                }
             }
         }
-    } else {
-        out.fill(0.0);
+        lock.stereo_scratch = scratch;
+    } else if lock.paused {
+        let music_vol = lock.music_volume;
+        if let Some(track) = lock.menu_music.as_mut() {
+            track.mix_into(out, frames, sample_rate, music_vol);
+        }
     }
-    lock.stereo_scratch = scratch;
 }
 
 // -----------------------------------------------------------------------------
