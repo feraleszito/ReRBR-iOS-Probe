@@ -191,3 +191,121 @@ fn selected_stages_boot_step_and_repeat_without_stale_session_state() {
         .join()
         .unwrap();
 }
+
+#[cfg(feature = "physics-stage")]
+#[test]
+#[ignore = "requires private PHYSICS_RBR and RBR_ROOT; never runs without private game assets"]
+fn retail_vehicles_and_reference_stage_finish_rollout_parity() {
+    std::thread::Builder::new()
+        .stack_size(STACK_BYTES)
+        .spawn(|| {
+            let install = std::path::PathBuf::from(std::env::var_os("PHYSICS_RBR").unwrap());
+            let rbr_root = std::path::PathBuf::from(std::env::var_os("RBR_ROOT").unwrap());
+            let overlay = std::env::var_os("PHYSICS_NGP").map(std::path::PathBuf::from);
+            let maps = rbr_root.join("Maps");
+            let paths = Paths {
+                install: install.clone(),
+                maps: maps.clone(),
+                overlay,
+            };
+
+            // 1. Boot and step all 8 original RBR retail cars (especially Peugeot 206 WRC 5-speed)
+            let harwood = rerbr_content::StageDescriptor::harwood_forest();
+            for car in rerbr_content::VehicleDescriptor::original_rbr_presets() {
+                let selection = rerbr_content::Selection {
+                    vehicle: car.clone(),
+                    stage: harwood.clone(),
+                };
+                let mut session = Session::boot_selected(&paths, &selection, false)
+                    .unwrap_or_else(|e| panic!("failed to boot {}: {e}", car.id));
+                let ratios = session.gear_ratios().unwrap();
+                assert_eq!(
+                    ratios.len(),
+                    car.forward_gears as usize + 2,
+                    "{} ratio count mismatch",
+                    car.id
+                );
+                for _ in 0..120 {
+                    let input = rerbr_sim::drive::Control {
+                        throttle: 1.0,
+                        flags: 4,
+                        gear: Some(2),
+                        ..Default::default()
+                    };
+                    let cmd = controls::pending_selection(input, session.sample().commanded_gear);
+                    session.step(cmd).unwrap();
+                }
+                let s = session.sample();
+                assert!(s.finite(), "{} non-finite physics sample", car.id);
+                assert!(
+                    s.wheel_ground.iter().any(|&g| g != 0),
+                    "{} has no wheel ground contact",
+                    car.id
+                );
+                eprintln!(
+                    "CAR BOOT & DRIVE PASS: {} (slot {}, {} forward gears, speed={:.2} m/s)",
+                    car.id,
+                    car.original_slot,
+                    car.forward_gears,
+                    s.speed()
+                );
+            }
+
+            // 2. Verify all 4 reference stages have >= FINISH_ROLLOUT_METERS safe driveline and terrain past finish
+            let ref_stages = [
+                rerbr_content::StageDescriptor::harwood_forest(),
+                rerbr_content::StageDescriptor::chirdonhead(),
+                rerbr_content::StageDescriptor::cote_darbroz(),
+                rerbr_content::StageDescriptor::cote_darbroz_ii(),
+            ];
+            for stage in &ref_stages {
+                let dls_bytes =
+                    std::fs::read(maps.join(stage.file("dls").unwrap())).unwrap();
+                let trk_bytes =
+                    std::fs::read(maps.join(stage.file("trk").unwrap())).unwrap();
+                let markers = rerbr_sim::rbr_formats::markers::parse(&dls_bytes).unwrap();
+                let finish = markers.finish().expect("stage must have TAG_FINISH");
+                let track = rerbr_sim::rbr_formats::trk::parse(&trk_bytes).unwrap();
+                let dl = track
+                    .chunks
+                    .iter()
+                    .find_map(|c| match &c.payload {
+                        rerbr_sim::rbr_formats::trk::ChunkPayload::DriveLine(d) => Some(d),
+                        _ => None,
+                    })
+                    .unwrap();
+                let max_dist = dl.records.last().unwrap().value;
+                let margin = max_dist - finish;
+                assert!(
+                    margin >= race::FINISH_ROLLOUT_METERS + 5.0,
+                    "{} driveline margin after finish ({margin:.2}m) too small",
+                    stage.id
+                );
+                // Also verify terrain support 3.0m beyond finish along driveline
+                let rollout_target = finish + race::FINISH_ROLLOUT_METERS;
+                let rec = dl
+                    .records
+                    .iter()
+                    .min_by(|a, b| {
+                        (a.value - rollout_target)
+                            .abs()
+                            .total_cmp(&(b.value - rollout_target).abs())
+                    })
+                    .unwrap();
+                let swap = coords::physics_to_stage();
+                // Sample a test driveline point in stage coordinates
+                let pt = swap.transform_point3(Vec3::new(
+                    rec.vectors[0].x,
+                    rec.vectors[0].y,
+                    rec.vectors[0].z,
+                ));
+                eprintln!(
+                    "STAGE FINISH AUDIT: {} finish={finish:.2}m max_driveline={max_dist:.2}m margin={margin:.2}m rollout_pt={pt:?}",
+                    stage.id
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

@@ -293,6 +293,7 @@ impl VehicleDescriptor {
         id: &str,
         name: &str,
         original_slot: u32,
+        forward_gears: u32,
         folder: &str,
         prefix: &str,
         tex_prefix: &str,
@@ -302,7 +303,7 @@ impl VehicleDescriptor {
             name: name.into(),
             original_slot,
             tyre_type: 4,
-            forward_gears: 6,
+            forward_gears,
             index: "Cars/Cars.ini".into(),
             model: format!("Cars/{folder}/{prefix}.sgc"),
             parts: format!("Cars/{folder}/{prefix}.ini"),
@@ -326,7 +327,6 @@ impl VehicleDescriptor {
         }
     }
     /// All 8 original base-game Richard Burns Rally cars.
-    /// Only `toyota-corolla-wrc` is enabled by `validate_current_backend()` until live NGP 7.4.778 validation.
     pub fn original_rbr_presets() -> [Self; 8] {
         [
             Self::toyota_corolla_wrc(),
@@ -334,6 +334,7 @@ impl VehicleDescriptor {
                 "subaru-impreza-2003",
                 "Subaru Impreza WRC 2003",
                 5,
+                6,
                 "impreza03",
                 "impreza03",
                 "impreza03",
@@ -342,14 +343,17 @@ impl VehicleDescriptor {
                 "subaru-impreza-2000",
                 "Subaru Impreza WRC 2000",
                 7,
+                6,
                 "impreza00",
                 "impreza00",
                 "impreza00",
             ),
+            // Retail Physics/p_206/{gravel,tarmac,snow}.lsp configure NumberOfGears 7 (R, N, 1..5).
             Self::original_rbr(
                 "peugeot-206-wrc",
                 "Peugeot 206 WRC",
                 4,
+                5,
                 "Peugeot_206",
                 "Peugeot_206",
                 "e_p206",
@@ -358,6 +362,7 @@ impl VehicleDescriptor {
                 "mitsubishi-lancer-evo-vii",
                 "Mitsubishi Lancer Evo VII",
                 3,
+                6,
                 "Lancer_EVO_VII",
                 "lancer_evo_vII",
                 "Lancer_wrc",
@@ -366,15 +371,17 @@ impl VehicleDescriptor {
                 "hyundai-accent-wrc",
                 "Hyundai Accent WRC",
                 1,
+                6,
                 "accent",
                 "accent",
                 "accent",
             ),
-            Self::original_rbr("mg-zr-s1600", "MG ZR Super 1600", 2, "zr", "zr", "zr"),
+            Self::original_rbr("mg-zr-s1600", "MG ZR Super 1600", 2, 6, "zr", "zr", "zr"),
             Self::original_rbr(
                 "citroen-xsara",
                 "Citroen Xsara (Car00)",
                 0,
+                6,
                 "xsara",
                 "xsara",
                 "xsara",
@@ -552,6 +559,15 @@ mod tests {
         assert!(VehicleDescriptor::ford_focus_2006()
             .validate_current_backend()
             .is_err());
+
+        // Regression test: Peugeot 206 WRC (Car04) uses 5 forward gears (NumberOfGears 7: R, N, 1..5).
+        let p206 = cars
+            .iter()
+            .find(|c| c.id == "peugeot-206-wrc")
+            .expect("peugeot-206-wrc preset must exist");
+        assert_eq!(p206.original_slot, 4);
+        assert_eq!(p206.forward_gears, 5);
+        assert!(p206.validate_current_backend().is_ok());
     }
     #[test]
     fn paths_cannot_escape_private_roots() {

@@ -5,6 +5,10 @@ pub const PRESENTATION_SECS: f64 = 3.5;
 pub const COUNTDOWN_SECS: f64 = 5.0;
 pub const FALSE_START_THRESHOLD_METERS: f32 = 0.40;
 pub const FALSE_START_PENALTY_SECS: u64 = 10;
+/// Distance (m) past the `.dls` finish trigger so the entire vehicle clears the visible finish line before stopping.
+pub const FINISH_ROLLOUT_METERS: f32 = 3.0;
+/// Safety cap (s) for the visual finish rollout if crossing speed is very low or terrain ends early.
+pub const FINISH_ROLLOUT_MAX_SECS: f64 = 0.45;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Phase {
@@ -14,6 +18,7 @@ pub enum Phase {
     Presentation,
     Countdown,
     Driving,
+    Finishing,
     Finished,
 }
 
@@ -38,6 +43,9 @@ pub struct Clock {
     start_pos: Option<[f32; 3]>,
     start_forward: Option<[f32; 3]>,
     false_start_notice_until: Option<Instant>,
+    finish_rollout_target_dist: Option<f32>,
+    finish_rollout_started: Option<Instant>,
+    finish_rollout_until: Option<Instant>,
     result: Option<StageResult>,
 }
 
@@ -59,6 +67,9 @@ impl Clock {
         self.start_pos = None;
         self.start_forward = None;
         self.false_start_notice_until = None;
+        self.finish_rollout_target_dist = None;
+        self.finish_rollout_started = None;
+        self.finish_rollout_until = None;
         self.result = None;
     }
 
@@ -81,8 +92,15 @@ impl Clock {
         self.last = None;
     }
 
-    /// Freezes the stage clock once when the car legitimately crosses the finish line.
-    pub fn finish(&mut self, splits_passed: usize, splits_total: usize) -> bool {
+    /// Concepto A: freezes the official race stopwatch once at the exact instant of finish crossing,
+    /// while allowing the car to roll through the visible finish line (`Phase::Finishing`).
+    pub fn begin_finish_rollout(
+        &mut self,
+        now: Instant,
+        splits_passed: usize,
+        splits_total: usize,
+        finish_distance: f32,
+    ) -> bool {
         if self.phase != Phase::Driving || self.result.is_some() {
             return false;
         }
@@ -96,11 +114,53 @@ impl Clock {
             splits_passed,
             splits_total,
         });
-        self.phase = Phase::Finished;
+        self.phase = Phase::Finishing;
         self.last = None;
         self.go_until = None;
         self.false_start_notice_until = None;
+        self.finish_rollout_target_dist = Some(finish_distance + FINISH_ROLLOUT_METERS);
+        self.finish_rollout_started = Some(now);
+        self.finish_rollout_until = Some(now + Duration::from_secs_f64(FINISH_ROLLOUT_MAX_SECS));
         true
+    }
+
+    /// Elapsed seconds since crossing the official finish line (used only to keep replay timestamps advancing during rollout).
+    pub fn rollout_elapsed_secs(&self, now: Instant) -> f64 {
+        if self.phase == Phase::Finishing {
+            self.finish_rollout_started.map_or(0.0, |start| {
+                now.saturating_duration_since(start).as_secs_f64()
+            })
+        } else {
+            0.0
+        }
+    }
+
+    /// Checks whether the visual rollout has cleared the finish line or hit the safety timeout.
+    pub fn rollout_complete(&self, now: Instant, driveline_distance: f32) -> bool {
+        self.phase == Phase::Finishing
+            && (self
+                .finish_rollout_target_dist
+                .is_some_and(|target| driveline_distance >= target)
+                || self.finish_rollout_until.is_some_and(|until| now >= until))
+    }
+
+    /// Concepto B: finalizes the stage visually and stops the vehicle without touching the frozen official result.
+    pub fn complete_finish(&mut self) -> bool {
+        if self.phase != Phase::Finishing {
+            return false;
+        }
+        self.phase = Phase::Finished;
+        self.finish_rollout_target_dist = None;
+        self.finish_rollout_started = None;
+        self.finish_rollout_until = None;
+        true
+    }
+
+    /// Test helper: freezes the stage clock and finishes immediately without rollout delay.
+    #[cfg(test)]
+    pub fn finish(&mut self, splits_passed: usize, splits_total: usize) -> bool {
+        self.begin_finish_rollout(Instant::now(), splits_passed, splits_total, 0.0)
+            && self.complete_finish()
     }
 
     pub fn result(&self) -> Option<StageResult> {
@@ -133,7 +193,7 @@ impl Clock {
     }
 
     pub fn tick(&mut self, now: Instant, active: bool) {
-        if self.phase == Phase::Finished {
+        if matches!(self.phase, Phase::Finishing | Phase::Finished) {
             return;
         }
         if !active {
@@ -178,7 +238,7 @@ impl Clock {
     pub fn seconds(&self) -> Option<f64> {
         match self.phase {
             Phase::Driving => Some(self.elapsed.as_secs_f64() + self.penalty.as_secs_f64()),
-            Phase::Finished => self.result.map(|r| r.total_seconds),
+            Phase::Finishing | Phase::Finished => self.result.map(|r| r.total_seconds),
             _ => None,
         }
     }
@@ -188,7 +248,7 @@ impl Clock {
     pub fn raw_seconds(&self) -> Option<f64> {
         match self.phase {
             Phase::Driving => Some(self.elapsed.as_secs_f64()),
-            Phase::Finished => self.result.map(|r| r.driving_seconds),
+            Phase::Finishing | Phase::Finished => self.result.map(|r| r.driving_seconds),
             _ => None,
         }
     }
@@ -349,5 +409,48 @@ mod tests {
         assert_eq!(clock.phase, Phase::Preparing);
         assert_eq!(clock.result(), None);
         assert_eq!(clock.seconds(), None);
+    }
+
+    #[test]
+    fn finish_rollout_freezes_official_time_at_crossing_and_completes_by_distance_or_timeout() {
+        let t = Instant::now();
+        let mut clock = Clock::default();
+        clock.ready(t);
+        clock.tick(t + Duration::from_secs(5), true);
+        assert_eq!(clock.phase, Phase::Driving);
+
+        let t_cross = t + Duration::from_millis(65400);
+        clock.tick(t_cross, true);
+        assert!(clock.begin_finish_rollout(t_cross, 2, 2, 1000.0));
+        // Duplicate begin calls are ignored.
+        assert!(!clock.begin_finish_rollout(t_cross, 2, 2, 1000.0));
+        assert_eq!(clock.phase, Phase::Finishing);
+
+        let frozen = clock
+            .result()
+            .expect("official time must freeze immediately");
+        assert!((frozen.driving_seconds - 60.4).abs() < 1e-6);
+
+        // At 0.5m past finish and +50ms: rollout continues without altering official time.
+        assert!(!clock.rollout_complete(t_cross + Duration::from_millis(50), 1000.5));
+        clock.tick(t_cross + Duration::from_millis(200), true);
+        assert_eq!(clock.seconds(), Some(frozen.total_seconds));
+
+        // Advancing >= 3.0m beyond finish triggers Concepto B completion.
+        assert!(clock.rollout_complete(t_cross + Duration::from_millis(120), 1003.0));
+        assert!(clock.complete_finish());
+        assert_eq!(clock.phase, Phase::Finished);
+        assert_eq!(clock.result(), Some(frozen));
+
+        // Safety timeout path also completes rollout if car crossed slowly.
+        let mut slow = Clock::default();
+        slow.ready(t);
+        slow.tick(t + Duration::from_secs(5), true);
+        slow.tick(t_cross, true);
+        assert!(slow.begin_finish_rollout(t_cross, 2, 2, 1000.0));
+        assert!(!slow.rollout_complete(t_cross + Duration::from_millis(100), 1000.2));
+        assert!(slow.rollout_complete(t_cross + Duration::from_millis(450), 1000.5));
+        assert!(slow.complete_finish());
+        assert_eq!(slow.phase, Phase::Finished);
     }
 }

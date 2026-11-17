@@ -317,8 +317,10 @@ impl Runtime {
             }
             Start => {
                 let state = self.worker.state.lock().unwrap();
-                if self.race.phase != race::Phase::Finished
-                    && self.pivots.is_some()
+                if !matches!(
+                    self.race.phase,
+                    race::Phase::Finishing | race::Phase::Finished
+                ) && self.pivots.is_some()
                     && self.tilt.is_finite()
                     && self.scene_error.is_none()
                     && state.error.is_none()
@@ -721,6 +723,14 @@ impl Runtime {
             matches!(t.phase, TouchPhase::Ended | TouchPhase::Cancelled),
         );
     }
+    fn finalize_stage_completion(&mut self) {
+        self.race.complete_finish();
+        self.saved_replay = self.replay_recorder.finish();
+        self.controls.clear();
+        self.menu.show(menu::Page::StageComplete);
+        self.message = None;
+        audio::set_menu_music_active(true);
+    }
     fn sync_race_state(
         &mut self,
         now: Instant,
@@ -743,25 +753,38 @@ impl Runtime {
         if self.race.phase == race::Phase::Driving
             && state.timing.finished
             && state.timing.finish_crossed_forward
-            && self
-                .race
-                .finish(state.timing.splits_passed, state.timing.splits_total)
         {
-            self.saved_replay = self.replay_recorder.finish();
-            self.controls.clear();
-            self.menu.show(menu::Page::StageComplete);
-            self.message = None;
-            audio::set_menu_music_active(true);
+            self.race.begin_finish_rollout(
+                now,
+                state.timing.splits_passed,
+                state.timing.splits_total,
+                state.timing.finish_distance,
+            );
+        }
+        if self
+            .race
+            .rollout_complete(now, state.timing.driveline_distance)
+        {
+            drop(state);
+            self.finalize_stage_completion();
+            state = self.worker.state.lock().unwrap();
         }
         let running = self.menu.page == menu::Page::Driving && steering_ready && healthy;
-        // Physics and engine revving are active during countdown and driving; paused during presentation, menus, and finished state.
+        // Physics and engine revving are active during countdown, driving, and brief finish rollout;
+        // paused during presentation, menus, and final completed state.
         state.paused = !running
-            || (self.race.phase != race::Phase::Driving
-                && self.race.phase != race::Phase::Countdown);
-        if state.paused {
+            || !matches!(
+                self.race.phase,
+                race::Phase::Driving | race::Phase::Countdown | race::Phase::Finishing
+            );
+        if state.paused || self.race.phase == race::Phase::Finishing {
             self.controls.clear();
         }
-        state.input = self.controls.input_in(layout, self.tilt, seconds);
+        state.input = if self.race.phase == race::Phase::Finishing {
+            rerbr_sim::drive::Control::default()
+        } else {
+            self.controls.input_in(layout, self.tilt, seconds)
+        };
         (state.pair.clone(), state.rest.clone(), state.paused)
     }
     pub fn frame(&mut self, path: &ChasePath) -> Option<Frame> {
@@ -855,11 +878,16 @@ impl Runtime {
             (stamp.elapsed().as_secs_f64() * 720.0).clamp(0.0, 1.0) as f32
         };
         let models = models(&a, &b, alpha, pivots, offset);
-        if self.race.phase == race::Phase::Driving {
+        if matches!(
+            self.race.phase,
+            race::Phase::Driving | race::Phase::Finishing
+        ) {
             let car_dist = self.worker.state.lock().unwrap().timing.driveline_distance;
             let speed_mps = Vec3::from(b.velocity).length();
+            let replay_time =
+                self.race.raw_seconds().unwrap_or(0.0) + self.race.rollout_elapsed_secs(now);
             self.replay_recorder.record(
-                self.race.raw_seconds().unwrap_or(0.0) as f32,
+                replay_time as f32,
                 models,
                 car_dist,
                 speed_mps,
@@ -885,13 +913,20 @@ impl Runtime {
         });
         if !path.supports_driving(position) {
             audio::set_paused(true);
-            let mut s = self.worker.state.lock().unwrap();
-            s.paused = true;
-            s.error = Some(if cfg!(feature = "physics-stage") {
-                "OUTSIDE VERIFIED TERRAIN - RESET STAGE".into()
-            } else {
-                "VISIBLE TERRAIN LIMIT - RESET STAGE".into()
-            });
+            {
+                let mut s = self.worker.state.lock().unwrap();
+                s.paused = true;
+                if self.race.phase != race::Phase::Finishing {
+                    s.error = Some(if cfg!(feature = "physics-stage") {
+                        "OUTSIDE VERIFIED TERRAIN - RESET STAGE".into()
+                    } else {
+                        "VISIBLE TERRAIN LIMIT - RESET STAGE".into()
+                    });
+                }
+            }
+            if self.race.phase == race::Phase::Finishing {
+                self.finalize_stage_completion();
+            }
             return None;
         }
         let target = position + Vec3::Y * 0.5;
@@ -1804,13 +1839,36 @@ mod reload_tests {
         assert_eq!(app.menu.page, menu::Page::Driving);
         assert_eq!(app.race.phase, race::Phase::Driving);
 
-        // Now cross the finish forward with all splits validated: freezes timer & shows StageComplete.
+        // Now cross the finish forward with all splits validated: freezes official clock immediately
+        // while keeping the car moving through a 3.0m visual rollout past the finish line.
         {
             let mut st = app.worker.state.lock().unwrap();
+            st.timing.driveline_distance = 7148.5;
             st.timing.finish_crossed_forward = true;
         }
-        let (_, _, paused) = app.sync_race_state(
+        let (_, _, paused_rollout) = app.sync_race_state(
             t_drive + Duration::from_millis(500),
+            1.0 / 60.0,
+            &layout,
+            true,
+        );
+        assert!(!paused_rollout, "car keeps rolling past the finish line");
+        assert_eq!(app.menu.page, menu::Page::Driving);
+        assert_eq!(app.race.phase, race::Phase::Finishing);
+        let result = app
+            .race
+            .result()
+            .expect("official result frozen at crossing");
+        assert!((result.driving_seconds - 120.5).abs() < 1e-6);
+        assert!((result.total_seconds - 120.5).abs() < 1e-6);
+
+        // Once the car advances 3.0m beyond finish_distance (7148.0 + 3.0 = 7151.0), rollout finishes.
+        {
+            let mut st = app.worker.state.lock().unwrap();
+            st.timing.driveline_distance = 7151.0;
+        }
+        let (_, _, paused) = app.sync_race_state(
+            t_drive + Duration::from_millis(620),
             1.0 / 60.0,
             &layout,
             true,
@@ -1818,9 +1876,7 @@ mod reload_tests {
         assert!(paused);
         assert_eq!(app.menu.page, menu::Page::StageComplete);
         assert_eq!(app.race.phase, race::Phase::Finished);
-        let result = app.race.result().expect("stage result must be recorded");
-        assert!((result.driving_seconds - 120.5).abs() < 1e-6);
-        assert!((result.total_seconds - 120.5).abs() < 1e-6);
+        assert_eq!(app.race.result(), Some(result));
         assert_eq!(result.splits_passed, 2);
         assert_eq!(result.splits_total, 2);
 
@@ -1902,7 +1958,7 @@ mod reload_tests {
             st.rest = Some(Sample::default());
             st.timing = rerbr_sim::drive::StageTiming {
                 started: true,
-                driveline_distance: 7150.0,
+                driveline_distance: 7151.5,
                 start_distance: 65.0,
                 finish_distance: 7148.0,
                 splits_passed: 2,
