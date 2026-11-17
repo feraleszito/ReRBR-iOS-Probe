@@ -330,6 +330,7 @@ impl Route {
         Ok(Camera {
             eye,
             target: eye + forward * 12.0,
+            up: Vec3::Y,
         })
     }
 }

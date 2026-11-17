@@ -44,6 +44,7 @@ pub enum Command {
     ToggleFps,
     ToggleDiagnostics,
     ToggleMinimalHud,
+    ToggleInvertPedals,
     InspectContent,
     CheckPhysics,
     SelectVehicle,
@@ -127,6 +128,7 @@ pub struct Context<'a> {
     pub fps: bool,
     pub diagnostics: bool,
     pub minimal_hud: bool,
+    pub invert_pedals: bool,
 }
 
 #[derive(Debug, Default)]
@@ -352,6 +354,10 @@ impl Menu {
                     format!("MINIMAL HUD: {}", on_off(ctx.minimal_hud)),
                     Command::ToggleMinimalHud,
                 ),
+                Row::action(
+                    format!("INVERT PEDALS: {}", on_off(ctx.invert_pedals)),
+                    Command::ToggleInvertPedals,
+                ),
                 Row::action("BACK", Command::Back),
             ],
             Page::Controls => vec![
@@ -491,12 +497,16 @@ impl Menu {
             }
             Page::Settings => vec![
                 "PREFERENCES SAVED IN DOCUMENTS".into(),
-                "AUDIO OUTPUT IS NOT CONNECTED - LEVEL VALUE IS SAVED".into(),
+                "VOLUME CONTROLS ENGINE AUDIO OUTPUT".into(),
                 "CAMERA CHANGES APPLY IMMEDIATELY".into(),
             ],
             Page::Controls => vec![
                 "TILT TO STEER / CALIBRATE AT YOUR HOLDING ANGLE".into(),
-                "PEDALS: SLIDE DOWN FOR MORE PRESSURE".into(),
+                if ctx.invert_pedals {
+                    "PEDALS: SLIDE UP FOR MORE PRESSURE (INVERTED)".into()
+                } else {
+                    "PEDALS: SLIDE DOWN FOR MORE PRESSURE".into()
+                },
                 "CLUTCH AND HANDBRAKE ARE HELD CONTROLS".into(),
                 format!(
                     "GEAR - / + STEPS R N 1-{} / MANUAL ONLY",
@@ -526,7 +536,10 @@ impl Menu {
                 command,
                 enabled: true,
             } => Some(*command),
-            RowKind::Stepper { down, up, .. } => Some(if x < 0.5 { *down } else { *up }),
+            RowKind::Stepper { down, up, value } => {
+                let split_x = stepper_split_x(value);
+                Some(if (x as f32) < split_x { *down } else { *up })
+            }
             RowKind::Action { .. } | RowKind::Info { .. } => None,
         }
     }
@@ -537,7 +550,7 @@ impl Menu {
         ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 0.10), [10, 15, 24, 255]);
         ui::fill(canvas, Rect::new(0.055, 0.045, 0.008, 0.045), ACCENT);
         canvas.text(0.075 * 640.0, 0.034 * height, self.title(), 1.55, TEXT);
-        ui::rule(canvas, 0.055 * 640.0, 0.105 * height, 0.89 * 640.0, LINE);
+        ui::rule(canvas, 0.055, 0.105, 0.89, LINE);
 
         let subtitle = self.subtitle(ctx);
         let mut lines = Vec::new();
@@ -606,14 +619,14 @@ impl Menu {
                     canvas.text(
                         x + w - 22.0,
                         y + (h - 16.0 * value_scale) * 0.5,
-                        ">",
+                        "+",
                         value_scale,
                         TEXT,
                     );
                     canvas.text(
                         x + w - value_width - 48.0,
                         y + (h - 16.0 * value_scale) * 0.5,
-                        "<",
+                        "-",
                         value_scale,
                         TEXT,
                     );
@@ -623,7 +636,7 @@ impl Menu {
         }
 
         let footer = ui::wrap(status, 58);
-        ui::rule(canvas, 0.055 * 640.0, 0.900 * height, 0.89 * 640.0, LINE);
+        ui::rule(canvas, 0.055, 0.900, 0.89, LINE);
         let color =
             if status.contains("ERROR") || status.contains("FAIL") || status.contains("REJECTED") {
                 BAD
@@ -656,6 +669,13 @@ pub const ROW_TOP: f32 = 0.27;
 pub const ROW_BOTTOM: f32 = 0.88;
 pub const ROW_X: f32 = 0.14;
 pub const ROW_WIDTH: f32 = 0.72;
+
+/// Normalized X midpoint between the drawn `-` and `+` stepper buttons in a row.
+fn stepper_split_x(value: &str) -> f32 {
+    let right_px = (ROW_X + ROW_WIDTH) * 640.0;
+    let value_width = ui::texture_width(value, 0.78);
+    (right_px - 34.0 - value_width * 0.5) / 640.0
+}
 
 pub fn row_height(rows: usize) -> f32 {
     if rows == 0 {
@@ -698,6 +718,7 @@ pub struct Settings {
     pub fps: bool,
     pub diagnostics: bool,
     pub minimal_hud: bool,
+    pub invert_pedals: bool,
     pub volume: f64,
     pub camera: u8,
 }
@@ -709,6 +730,7 @@ impl Default for Settings {
             fps: false,
             diagnostics: false,
             minimal_hud: false,
+            invert_pedals: false,
             volume: 0.8,
             camera: 0,
         }
@@ -739,6 +761,7 @@ impl Settings {
                 "fps" => settings.fps = value == "true",
                 "diagnostics" => settings.diagnostics = value == "true",
                 "minimal_hud" => settings.minimal_hud = value == "true",
+                "invert_pedals" => settings.invert_pedals = value == "true",
                 "volume" => {
                     if let Ok(v) = value.parse::<f64>() {
                         if v.is_finite() {
@@ -768,12 +791,13 @@ impl Settings {
     pub fn save(self) {
         if let Some(path) = Self::path() {
             let text = format!(
-                "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\nvolume={}\ncamera={}\n",
+                "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nvolume={}\ncamera={}\n",
                 self.sensitivity,
                 self.dead_zone,
                 self.fps,
                 self.diagnostics,
                 self.minimal_hud,
+                self.invert_pedals,
                 self.volume,
                 self.camera
             );
@@ -803,6 +827,7 @@ mod tests {
             fps: false,
             diagnostics: false,
             minimal_hud: false,
+            invert_pedals: false,
         }
     }
 
@@ -906,20 +931,44 @@ mod tests {
             ..Menu::default()
         };
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 8);
-        let rect = row_rect(0, rows.len());
+        assert_eq!(rows.len(), 9);
+        // Verify tapping the drawn `-` glyph (on the right side, left of the value) decreases,
+        // and tapping the drawn `+` glyph increases, for both Sensitivity (row 0) and Volume (row 3).
+        for (row_idx, value, expected_down, expected_up) in [
+            (0usize, "2.00", Command::SensDown, Command::SensUp),
+            (3usize, "80%", Command::VolumeDown, Command::VolumeUp),
+        ] {
+            let rect = row_rect(row_idx, rows.len());
+            let (rx, _ry, rw, _rh) = (rect.x * 640.0, rect.y, rect.w * 640.0, rect.h);
+            let value_width = ui::texture_width(value, 0.78);
+            let minus_center_x = f64::from((rx + rw - value_width - 42.0) / 640.0);
+            let plus_center_x = f64::from((rx + rw - 16.0) / 640.0);
+            let center_y = f64::from(rect.y + rect.h * 0.5);
+            assert_eq!(
+                menu.press(minus_center_x, center_y, &rows),
+                Some(expected_down)
+            );
+            assert_eq!(
+                menu.press(plus_center_x, center_y, &rows),
+                Some(expected_up)
+            );
+        }
+        let inv_rect = row_rect(7, rows.len());
         assert_eq!(
-            menu.press(rect.x as f64 + 0.01, rect.y as f64 + 0.01, &rows),
-            Some(Command::SensDown)
+            menu.press(
+                inv_rect.center_x() as f64,
+                (inv_rect.y + inv_rect.h * 0.5) as f64,
+                &rows
+            ),
+            Some(Command::ToggleInvertPedals)
         );
-        assert_eq!(
-            menu.press(rect.right() as f64 - 0.01, rect.y as f64 + 0.01, &rows),
-            Some(Command::SensUp)
+        let s = Settings::parse(
+            "sensitivity=NaN\ndead_zone=inf\nvolume=nan\ncamera=9\nfps=true\ninvert_pedals=true",
         );
-        let s = Settings::parse("sensitivity=NaN\ndead_zone=inf\nvolume=nan\ncamera=9\nfps=true");
         assert_eq!((s.sensitivity, s.dead_zone, s.volume), (2.0, 0.03, 0.8));
         assert_eq!(s.camera, 2);
         assert!(s.fps);
+        assert!(s.invert_pedals);
         let s = Settings::parse("sensitivity=100\ndead_zone=-4\nvolume=4");
         assert_eq!((s.sensitivity, s.dead_zone, s.volume), (5.0, 0.0, 1.0));
     }

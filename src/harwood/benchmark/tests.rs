@@ -210,6 +210,7 @@ fn runtime_restarts_cached_route_and_invalidates_interrupted_runs() {
     let mut camera = crate::harwood::Camera {
         eye: Vec3::ZERO,
         target: Vec3::Z,
+        up: Vec3::Y,
     };
     runtime.before_frame(&mut camera).unwrap();
     runtime.interrupt("TEST INTERRUPTION");

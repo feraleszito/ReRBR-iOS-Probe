@@ -47,6 +47,7 @@ pub struct Runtime {
     scene_error: Option<String>,
     pub steering_angle: f32,
     pub cockpit_ready: bool,
+    pub cockpit_node: Option<Mat4>,
     pub cockpit_error: Option<String>,
     pivots: Option<[Vec3; 4]>,
     offset: Option<Vec3>,
@@ -70,6 +71,7 @@ impl Runtime {
         let mut controls = Controls::new();
         controls.sensitivity = settings.sensitivity;
         controls.dead_zone = settings.dead_zone;
+        controls.invert_pedals = settings.invert_pedals;
         audio::set_master_volume(settings.volume as f32);
         Self {
             #[cfg(feature = "physics-stage")]
@@ -89,6 +91,7 @@ impl Runtime {
             scene_error: None,
             steering_angle: 0.0,
             cockpit_ready: false,
+            cockpit_node: None,
             cockpit_error: None,
             pivots: None,
             offset: None,
@@ -160,6 +163,7 @@ impl Runtime {
             fps: self.fps_visible,
             diagnostics: self.diagnostics,
             minimal_hud: self.minimal_hud,
+            invert_pedals: self.controls.invert_pedals,
             volume: self.volume,
             camera: self.camera_index(),
         }
@@ -284,6 +288,17 @@ impl Runtime {
                 self.message = Some(format!(
                     "MINIMAL HUD {}",
                     if self.minimal_hud { "ON" } else { "OFF" }
+                ));
+            }
+            ToggleInvertPedals => {
+                self.controls.invert_pedals = !self.controls.invert_pedals;
+                self.message = Some(format!(
+                    "INVERT PEDALS {}",
+                    if self.controls.invert_pedals {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
                 ));
             }
             InspectContent => {
@@ -429,7 +444,10 @@ impl Runtime {
             self.view == cameras::View::CockpitFallback && self.cockpit_ready,
         );
         #[cfg(feature = "physics-stage")]
-        if let Some(camera) = self.mounts.and_then(|m| m.camera(self.view, models[0])) {
+        if let Some(camera) = self
+            .mounts
+            .and_then(|m| m.camera_with_cockpit(self.view, models[0], self.cockpit_node))
+        {
             if path.camera_supported(camera.eye) {
                 return Some(Frame {
                     models,
@@ -480,6 +498,7 @@ impl Runtime {
             fps: self.fps_visible,
             diagnostics: self.diagnostics,
             minimal_hud: self.minimal_hud,
+            invert_pedals: self.controls.invert_pedals,
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
@@ -737,13 +756,28 @@ pub fn models(a: &Sample, b: &Sample, t: f32, pivots: [Vec3; 4], offset: Vec3) -
                     .rem_euclid(std::f32::consts::TAU)
                     - std::f32::consts::PI)
                     * t;
+            let steer =
+                wheel_heading(Vec3::from(a.wheel_axle[k]).lerp(Vec3::from(b.wheel_axle[k]), t));
             car * Mat4::from_translation(
                 Vec3::from(a.wheel_centre[k]).lerp(Vec3::from(b.wheel_centre[k]), t),
             ) * swap
+                * Mat4::from_rotation_y(steer)
                 * Mat4::from_axis_angle(Vec3::NEG_X, roll)
                 * Mat4::from_translation(-pivots[k])
         }
     })
+}
+/// Project the original outward hub axle onto the car's horizontal XY plane.
+/// The y/z mirror maps physics axle (x,y,z) to model (x,z,y), so model Y yaw
+/// is -atan2(y,x). Opposite outward axle signs describe the same wheel plane.
+/// This follows measured wheel heading (including toe), not a guessed rack ratio.
+/// Camber remains outside this yaw-only presentation; unavailable axles stay neutral.
+pub fn wheel_heading(axle: Vec3) -> f32 {
+    if !axle.is_finite() || axle.x * axle.x + axle.y * axle.y < 1e-8 {
+        return 0.0;
+    }
+    let axle = if axle.x < 0.0 { -axle } else { axle };
+    -axle.y.atan2(axle.x)
 }
 fn motion(enabled: bool) -> f64 {
     #[cfg(target_os = "ios")]

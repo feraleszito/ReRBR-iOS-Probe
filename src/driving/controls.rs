@@ -26,8 +26,9 @@ enum Pedal {
     Handbrake,
     Clutch,
 }
-fn pressure(y: f64) -> f32 {
-    ((y - 0.72) / 0.20).clamp(0.0, 1.0) as f32
+fn pressure(y: f64, invert_pedals: bool) -> f32 {
+    let raw = if invert_pedals { 0.92 - y } else { y - 0.72 };
+    (raw / 0.20).clamp(0.0, 1.0) as f32
 }
 
 pub struct Controls {
@@ -38,6 +39,7 @@ pub struct Controls {
     filtered: f64,
     pub selected_gear: u32,
     pub automatic: bool,
+    pub invert_pedals: bool,
     forward_gears: u32,
 }
 impl Default for Controls {
@@ -50,6 +52,7 @@ impl Default for Controls {
             filtered: 0.0,
             selected_gear: 2,
             automatic: false,
+            invert_pedals: false,
             forward_gears: rerbr_content::VehicleDescriptor::default().forward_gears,
         }
     }
@@ -128,8 +131,10 @@ impl Controls {
             match pedal {
                 Pedal::Clutch => levels.clutch = 1.0,
                 Pedal::Handbrake => levels.handbrake = 1.0,
-                Pedal::Brake => levels.brake = levels.brake.max(pressure(y)),
-                Pedal::Throttle => levels.throttle = levels.throttle.max(pressure(y)),
+                Pedal::Brake => levels.brake = levels.brake.max(pressure(y, self.invert_pedals)),
+                Pedal::Throttle => {
+                    levels.throttle = levels.throttle.max(pressure(y, self.invert_pedals))
+                }
             }
         }
         levels
@@ -154,8 +159,8 @@ impl Controls {
             match pedal {
                 Pedal::Clutch => c.clutch = 1.0,
                 Pedal::Handbrake => c.handbrake = 1.0,
-                Pedal::Brake => c.brake = c.brake.max(pressure(y)),
-                Pedal::Throttle => c.throttle = c.throttle.max(pressure(y)),
+                Pedal::Brake => c.brake = c.brake.max(pressure(y, self.invert_pedals)),
+                Pedal::Throttle => c.throttle = c.throttle.max(pressure(y, self.invert_pedals)),
             }
         }
         c
@@ -234,5 +239,22 @@ mod tests {
         c.clear();
         c.centre = std::f64::consts::PI - 0.01;
         assert_eq!(c.input(-std::f64::consts::PI + 0.01, 0.02).steering, 0.0);
+    }
+    #[test]
+    fn inverted_pedals_reverse_throttle_and_brake_together() {
+        let mut c = Controls::new();
+        assert!(!c.invert_pedals);
+        // Normal mode: down (y=0.92) is 100%, up (y=0.72) is 0%
+        c.touch(1, 0.1, 0.92, true, false);
+        c.touch(2, 0.9, 0.72, true, false);
+        let normal = c.input(0.0, 0.02);
+        assert_eq!((normal.brake, normal.throttle), (1.0, 0.0));
+
+        // Inverted mode: up (y=0.72) is 100%, down (y=0.92) is 0%
+        c.invert_pedals = true;
+        let inverted = c.input(0.0, 0.02);
+        assert_eq!((inverted.brake, inverted.throttle), (0.0, 1.0));
+        let lv = c.levels();
+        assert_eq!((lv.brake, lv.throttle), (0.0, 1.0));
     }
 }

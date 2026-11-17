@@ -29,7 +29,7 @@ pub(crate) use gpu::Scene;
 use crate::asset_probe::{self, TextureData};
 use mesh::{Bounds, Mesh};
 use rerbr_asset_formats::lbs;
-use rerbr_render_core::{camera::FreeFly, coords, Mat4, Vec3};
+use rerbr_render_core::{coords, Mat4, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -55,6 +55,7 @@ impl LoadedBlock {
 pub struct Camera {
     pub eye: Vec3,
     pub target: Vec3,
+    pub up: Vec3,
 }
 
 impl Camera {
@@ -87,13 +88,45 @@ impl Camera {
         Self {
             eye: target + offset * distance,
             target,
+            up: Vec3::Y,
         }
     }
 
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
-        FreeFly::looking_along(self.eye, self.target - self.eye)
-            .view_projection(coords::FOV_DEGREES.to_radians(), aspect)
+        let forward = (self.target - self.eye).normalize_or(Vec3::Z);
+        let up = self.up.normalize_or(Vec3::Y);
+        coords::projection(coords::FOV_DEGREES.to_radians(), aspect)
+            * look_to_lh(self.eye, forward, up)
     }
+}
+
+/// Left-handed world-to-view matrix with an arbitrary camera up vector.
+pub fn look_to_lh(eye: Vec3, forward: Vec3, up: Vec3) -> Mat4 {
+    let f = forward.normalize_or(Vec3::Z);
+    let fallback_up = if f.y.abs() < 0.9 { Vec3::Y } else { Vec3::Z };
+    let s = up
+        .cross(f)
+        .try_normalize()
+        .unwrap_or_else(|| fallback_up.cross(f).normalize());
+    let u = f.cross(s);
+    Mat4::from_cols_array(&[
+        s.x,
+        u.x,
+        f.x,
+        0.0,
+        s.y,
+        u.y,
+        f.y,
+        0.0,
+        s.z,
+        u.z,
+        f.z,
+        0.0,
+        -s.dot(eye),
+        -u.dot(eye),
+        -f.dot(eye),
+        1.0,
+    ])
 }
 
 /// Closest nonempty near-LOD block by distance to its AABB, then its centre.

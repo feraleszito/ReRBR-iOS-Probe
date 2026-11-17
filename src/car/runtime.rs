@@ -103,6 +103,7 @@ impl Runtime {
         {
             self.driving.mounts = Some(car.cameras);
             self.driving.cockpit_ready = car.cockpit.is_some();
+            self.driving.cockpit_node = car.cockpit;
             self.driving.cockpit_error = car.cockpit_error.clone();
         }
         self.car = Some(Gpu::new(device, queue, format, car)?);

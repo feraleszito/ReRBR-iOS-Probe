@@ -309,6 +309,7 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
             camera: Camera {
                 eye: start + Vec3::new(0.0, 4.0, 6.0),
                 target: start,
+                up: Vec3::Y,
             },
             textures: shared.textures,
         },
@@ -374,6 +375,7 @@ mod tests {
         let c = Camera {
             eye: Vec3::ZERO,
             target: Vec3::Z,
+            up: Vec3::Y,
         };
         let vp = c.view_projection(1.5);
         let b = |p: Vec3| Bounds {

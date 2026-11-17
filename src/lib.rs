@@ -150,10 +150,8 @@ impl ApplicationHandler for Probe {
             }
             #[cfg(feature = "physics-drive")]
             WindowEvent::Touch(touch) => {
-                let size = renderer.window.inner_size();
-                renderer
-                    .harwood
-                    .driving_touch(touch, (size.width, size.height));
+                let size = (renderer.config.width, renderer.config.height);
+                renderer.harwood.driving_touch(touch, size);
             }
             #[cfg(not(feature = "physics-drive"))]
             WindowEvent::Touch(touch) if touch.phase == TouchPhase::Started => {

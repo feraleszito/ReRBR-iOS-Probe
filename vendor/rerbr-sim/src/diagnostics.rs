@@ -72,6 +72,9 @@ pub struct Sample {
     pub wheel_anchor: [[f32; 3]; 4],
     pub wheel_roll: [f32; 4],
     pub wheel_centre: [[f32; 3]; 4],
+    /// Physical hub axle in the car's z-up frame (+0x9e0, original WheelPose layout).
+    /// Read-only presentation input; independent of the steering-wheel angle.
+    pub wheel_axle: [[f32; 3]; 4],
 }
 impl Sample {
     pub fn speed(&self) -> f64 {
@@ -88,6 +91,7 @@ impl Sample {
             .chain(self.wheel_anchor.iter().flatten())
             .chain(&self.wheel_roll)
             .chain(self.wheel_centre.iter().flatten())
+            .chain(self.wheel_axle.iter().flatten())
             .all(|x| x.is_finite())
             && [
                 self.rpm,
@@ -138,6 +142,7 @@ pub fn read(playback: &Playback, control_at: u32, step: u32) -> Sample {
         wheel_travel: wheels.map(|w| mem.f32(w + 0x5bc)),
         wheel_anchor: wheels.map(|w| mem.f32s(w + 0x140)),
         wheel_roll: wheels.map(|w| mem.f32(w + 0x5ac)),
+        wheel_axle: wheels.map(|w| mem.f32s(w + 0x9e0)),
         wheel_centre: wheels.map(|w| {
             let anchor: [f32; 3] = mem.f32s(w + 0x140);
             let axle: [f32; 3] = mem.f32s(w + 0x9e0);

@@ -12,8 +12,10 @@ pub const MAX_WHEEL_TRAVEL: f32 = 0.25;
 /// The original reRBR playback chase FOV; previous modes keep their own FOV.
 pub const CHASE_FOV: f32 = 65.0;
 pub fn view_projection(camera: Camera, aspect: f32) -> Mat4 {
-    rerbr_render_core::camera::FreeFly::looking_along(camera.eye, camera.target - camera.eye)
-        .view_projection(CHASE_FOV.to_radians(), aspect)
+    let forward = (camera.target - camera.eye).normalize_or(Vec3::Z);
+    let up = camera.up.normalize_or(Vec3::Y);
+    coords::projection(CHASE_FOV.to_radians(), aspect)
+        * crate::harwood::look_to_lh(camera.eye, forward, up)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -196,7 +198,14 @@ impl ChasePath {
                     .is_some_and(|h| p.y >= h + 0.05)
                     && self.ground.segment_clear(target, p)
             }) {
-                return Ok((Camera { eye, target }, boom));
+                return Ok((
+                    Camera {
+                        eye,
+                        target,
+                        up: Vec3::Y,
+                    },
+                    boom,
+                ));
             }
         }
         Err(

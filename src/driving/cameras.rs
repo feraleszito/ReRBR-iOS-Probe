@@ -92,14 +92,38 @@ impl Mounts {
         })
     }
     pub fn camera(self, view: View, model: Mat4) -> Option<Camera> {
+        self.camera_with_cockpit(view, model, None)
+    }
+    pub fn camera_with_cockpit(
+        self,
+        view: View,
+        model: Mat4,
+        cockpit_node: Option<Mat4>,
+    ) -> Option<Camera> {
         let mount = match view {
             View::Chase => return None,
             View::Bonnet => self.bonnet,
-            View::CockpitFallback => self.cockpit,
+            View::CockpitFallback => {
+                if let Some(node) = cockpit_node {
+                    let wheel_pos = node.w_axis.truncate();
+                    let forward =
+                        (self.cockpit.target - self.cockpit.eye).normalize_or(Vec3::NEG_Z);
+                    // Pull the interior eye behind the steering wheel pivot so the wheel is visible.
+                    let eye = Vec3::new(wheel_pos.x, wheel_pos.y + 0.16, wheel_pos.z + 0.50);
+                    Mount {
+                        eye,
+                        target: eye + forward * 3.0,
+                    }
+                } else {
+                    self.cockpit
+                }
+            }
         };
+        let up = model.transform_vector3(Vec3::Y).normalize_or(Vec3::Y);
         Some(Camera {
             eye: model.transform_point3(mount.eye),
             target: model.transform_point3(mount.target),
+            up,
         })
     }
 }
@@ -110,11 +134,30 @@ mod tests {
     fn mounts_follow_body_without_changing_it_and_cycle() {
         let text="[Cam_bonnet2]\nPos=0 1 -1\nTarget=0 1 -4\n[Cam_internal]\nPos=0.3 1 -1\nTarget=0.3 1 -4\n";
         let m = Mounts::parse(&rerbr_asset_formats::ini::parse(text).unwrap()).unwrap();
-        let body = Mat4::from_rotation_y(0.5) * Mat4::from_translation(Vec3::splat(10.0));
+        let body = Mat4::from_rotation_y(0.5)
+            * Mat4::from_rotation_z(0.35)
+            * Mat4::from_rotation_x(-0.2)
+            * Mat4::from_translation(Vec3::splat(10.0));
         let saved = body;
         let c = m.camera(View::Bonnet, body).unwrap();
         assert_eq!(c.eye, body.transform_point3(m.bonnet.eye));
+        assert!(c
+            .up
+            .abs_diff_eq(body.transform_vector3(Vec3::Y).normalize(), 1e-5));
+        assert!(!c.up.abs_diff_eq(Vec3::Y, 1e-2));
         assert_eq!(body, saved);
+        let wheel_node = Mat4::from_translation(Vec3::new(0.33, 0.78, -0.75));
+        let cockpit = m
+            .camera_with_cockpit(View::CockpitFallback, Mat4::IDENTITY, Some(wheel_node))
+            .unwrap();
+        assert!(
+            cockpit.eye.z > -0.75,
+            "cockpit eye should sit behind steering wheel"
+        );
+        assert!(
+            cockpit.target.z < -0.75,
+            "cockpit target should look forward past steering wheel"
+        );
         assert_eq!(View::Chase.next().next().next(), View::Chase);
         assert_eq!(View::from_index(2), View::CockpitFallback);
         assert_eq!(View::Bonnet.index(), 1);
