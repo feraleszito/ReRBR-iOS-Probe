@@ -273,6 +273,14 @@ fn run(
                 .iter()
                 .map(|w| w.abs() * 0.315)
                 .fold(0.0f32, f32::max);
+            super::audio::update_fmod_telemetry(
+                sample.rpm,
+                sample.throttle_received,
+                input.brake,
+                speed,
+                sample.gear,
+                max_wheel_speed,
+            );
             let slip = ((max_wheel_speed - speed).abs() / speed.max(3.0)).clamp(0.0, 1.0);
             super::audio::update_surface_state(surface_kind, speed, slip, grounded);
             if cfg!(debug_assertions) && sample.step % 720 == 0 {

@@ -6,6 +6,8 @@ pub mod codriver;
 pub mod content_manager;
 pub mod controls;
 pub mod fmod_audit;
+pub mod fmod_synth;
+pub mod fsb5_vorbis_setup;
 pub mod gamepad;
 pub mod layout;
 pub(crate) mod loading;
@@ -20,6 +22,7 @@ pub mod replay;
 pub mod rsf_catalog;
 pub mod school;
 mod ui;
+pub mod vorbis;
 mod worker;
 use crate::{
     car::{
@@ -726,6 +729,15 @@ impl Runtime {
                 if let Some(replay) = &self.saved_replay {
                     audio::set_codriver_active(false);
                     audio::clear_speech_queue();
+                    if self.selection.vehicle.is_ngp_experimental_car() {
+                        if let Some(doc) = std::env::var_os("RERBR_PROBE_DOCUMENTS") {
+                            audio::init_rsf_fmod(
+                                std::path::Path::new(&doc),
+                                &self.selection.vehicle,
+                                44100,
+                            );
+                        }
+                    }
                     let mut player =
                         replay::ReplayPlayer::new(replay.clone(), self.stage_cameras.clone());
                     player.restart();

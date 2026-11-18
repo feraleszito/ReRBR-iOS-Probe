@@ -340,13 +340,18 @@ impl FocusDiagnosticsReport {
             detail: "PENDIENTE DE SESIÓN DE CONDUCCIÓN".into(),
         });
 
-        // 9. AUDIO (FMOD bank / engine bank status)
-        let bank_present = cars::resolve(&rbr_root, &vehicle.audio_index).is_some();
+        // 9. AUDIO (FMOD bank / engine bank status — never claims OK from file presence alone)
         let is_fmod_bank = vehicle.audio_index.to_ascii_lowercase().ends_with(".bank");
-        let audio_report = if bank_present && is_fmod_bank {
-            let rep = super::fmod_audit::inspect_bank(&rbr_root, &vehicle.audio_index);
-            (DiagnosticStatus::Unsupported, rep.summary())
-        } else if !vehicle.is_ngp_experimental_car() && bank_present {
+        let audio_report = if is_fmod_bank {
+            let rep = super::fmod_audit::inspect_bank_in_documents(doc_root, &vehicle.audio_index);
+            if rep.is_playable() {
+                (DiagnosticStatus::Pending, rep.summary())
+            } else {
+                (DiagnosticStatus::Unsupported, rep.summary())
+            }
+        } else if !vehicle.is_ngp_experimental_car()
+            && cars::resolve(&rbr_root, &vehicle.audio_index).is_some()
+        {
             (
                 DiagnosticStatus::Pending,
                 format!("RETAIL ({}) - PENDIENTE DE BOOT", vehicle.audio_index),
@@ -354,11 +359,10 @@ impl FocusDiagnosticsReport {
         } else {
             (
                 DiagnosticStatus::Unsupported,
-                if bank_present {
-                    "AUDIO: UNSUPPORTED - FMOD BANK (SILENCIO)".into()
-                } else {
-                    "AUDIO: UNSUPPORTED - SIN FMOD BANK (SILENCIO)".into()
-                },
+                format!(
+                    "AUDIO: UNSUPPORTED - SIN BANCO DE MOTOR ({})",
+                    vehicle.audio_index
+                ),
             )
         };
         steps.push(DiagnosticStep {
@@ -537,6 +541,8 @@ impl FocusDiagnosticsReport {
         if !live.audio_status.is_empty() && live.audio_status != "AUDIO UNINITIALIZED" {
             let audio_st = if live.audio_status.contains("AUTHENTIC") {
                 DiagnosticStatus::Ok
+            } else if live.audio_status.contains("PARCIAL") {
+                DiagnosticStatus::Pending
             } else if live.audio_status.contains("FMOD") {
                 DiagnosticStatus::Unsupported
             } else {
@@ -612,6 +618,8 @@ impl FocusDiagnosticsReport {
         if !snap.audio_status.is_empty() && snap.audio_status != "AUDIO UNINITIALIZED" {
             let audio_st = if snap.audio_status.contains("AUTHENTIC") {
                 DiagnosticStatus::Ok
+            } else if snap.audio_status.contains("PARCIAL") {
+                DiagnosticStatus::Pending
             } else if snap.audio_status.contains("FMOD") {
                 DiagnosticStatus::Unsupported
             } else {

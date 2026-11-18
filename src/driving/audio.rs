@@ -296,6 +296,7 @@ impl SurfaceAudio {
 
 struct AudioRuntime {
     car_audio: Option<CarAudio>,
+    fmod_audio: Option<super::fmod_synth::FmodVehicleAudio>,
     surface_audio: SurfaceAudio,
     status: String,
     volume: f32,
@@ -318,6 +319,7 @@ impl AudioRuntime {
     fn new(volume: f32) -> Self {
         Self {
             car_audio: None,
+            fmod_audio: None,
             surface_audio: SurfaceAudio::default(),
             status: "AUDIO UNINITIALIZED".into(),
             volume: volume.clamp(0.0, 1.0),
@@ -386,29 +388,53 @@ pub fn init(documents: &Path, vehicle: &rerbr_content::VehicleDescriptor, sample
         car_audio.set_cockpit(lock.is_cockpit);
         lock.status = "AUTHENTIC ENGINE AUDIO READY".into();
         lock.car_audio = Some(car_audio);
+        lock.fmod_audio = None;
     } else {
         eprintln!("AUDIO INIT: running in silent fallback mode: {last_error}");
         lock.status = format!("AUDIO SILENT: {last_error}");
         lock.car_audio = None;
+        lock.fmod_audio = None;
     }
 }
 
-/// Inspects an RSF/NGP vehicle's FMOD bank without substituting retail `.eng` sounds.
-/// Preserves co-driver voice and modular surface feedback even when FSB5 Vorbis is muted.
+/// Initializes native pure-Rust FMOD Studio playback (FSB5 Vorbis + PCM16) for an RSF/NGP car.
+/// Strictly reports honest partial/unsupported status until decoding and live rendering succeed.
 pub fn init_rsf_fmod(
     documents: &Path,
     vehicle: &rerbr_content::VehicleDescriptor,
     sample_rate: u32,
 ) -> String {
-    let report = super::fmod_audit::inspect_bank(&documents.join("RBR"), &vehicle.audio_index);
-    let summary = report.summary();
+    let sr = sample_rate.max(11025);
+    let result = super::fmod_synth::FmodVehicleAudio::load_from_documents(
+        documents,
+        &vehicle.audio_index,
+        sr,
+    );
     let rt = runtime();
     if let Ok(mut lock) = rt.lock() {
-        lock.sample_rate = sample_rate;
+        lock.sample_rate = sr;
         lock.car_audio = None;
-        lock.status = summary.clone();
+        match result {
+            Ok(synth) => {
+                let st = synth.stats();
+                let summary = format!(
+                    "FMOD PARCIAL ({}/{} MUESTRAS DECODIFICADAS · MOTOR LISTO · PENDIENTE DE EMISION)",
+                    st.decoded_samples, st.total_samples
+                );
+                eprintln!("AUDIO FMOD INIT: {summary}");
+                lock.status = summary.clone();
+                lock.fmod_audio = Some(synth);
+                return summary;
+            }
+            Err(err) => {
+                eprintln!("AUDIO FMOD INIT FAILED: {err}");
+                lock.fmod_audio = None;
+                lock.status = err.clone();
+                return err;
+            }
+        }
     }
-    summary
+    "AUDIO LOCK ERROR".into()
 }
 
 /// Update live surface, speed, slip, and ground contact telemetry for the modular surface channel.
@@ -431,7 +457,48 @@ pub fn update_engine_state(noise: &EngineNoise, gear: i32) {
         if let Some(audio) = lock.car_audio.as_mut() {
             audio.step_physics(noise, gear);
         }
+        if let Some(fmod) = lock.fmod_audio.as_mut() {
+            fmod.update_telemetry(super::fmod_synth::FmodTelemetryInput {
+                rpm: noise.target_rpm as f32,
+                throttle: (noise.load as f32 / 100.0).clamp(0.0, 1.0),
+                brake: 0.0,
+                speed_mps: 0.0,
+                gear,
+                wheel_speed_mps: 0.0,
+            });
+        }
     }
+}
+
+/// Update rich telemetry for FMOD Studio `.bank` layered playback from the 720 Hz simulation loop.
+pub fn update_fmod_telemetry(
+    rpm: f32,
+    throttle: f32,
+    brake: f32,
+    speed_mps: f32,
+    gear: i32,
+    wheel_speed_mps: f32,
+) {
+    if let Ok(mut lock) = runtime().try_lock() {
+        if let Some(fmod) = lock.fmod_audio.as_mut() {
+            fmod.update_telemetry(super::fmod_synth::FmodTelemetryInput {
+                rpm,
+                throttle,
+                brake,
+                speed_mps,
+                gear,
+                wheel_speed_mps,
+            });
+        }
+    }
+}
+
+/// Returns live verification statistics when an FMOD `.bank` engine is active.
+pub fn fmod_runtime_snapshot() -> Option<super::fmod_synth::FmodAudioStats> {
+    runtime()
+        .try_lock()
+        .ok()
+        .and_then(|lock| lock.fmod_audio.as_ref().map(|f| f.stats()))
 }
 
 /// Set whether the camera is inside the cockpit to apply interior acoustics.
@@ -486,8 +553,37 @@ pub fn set_interrupted(interrupted: bool) {
 /// Query human-readable audio system status.
 pub fn status() -> String {
     let rt = runtime();
-    rt.lock()
-        .map_or_else(|_| "AUDIO ERROR".into(), |lock| lock.status.clone())
+    rt.lock().map_or_else(
+        |_| "AUDIO ERROR".into(),
+        |lock| {
+            if let Some(fmod) = lock.fmod_audio.as_ref() {
+                let st = fmod.stats();
+                if st.rendered_frames == 0 {
+                    format!(
+                        "FMOD PARCIAL ({}/{} MUESTRAS · MOTOR LISTO · SIN FRAMES EMITIDOS)",
+                        st.decoded_samples, st.total_samples
+                    )
+                } else if st.telemetry_updates == 0 {
+                    format!(
+                        "FMOD PARCIAL ({}/{} MUESTRAS · {} FRAMES · SIN TELEMETRIA RPM)",
+                        st.decoded_samples, st.total_samples, st.rendered_frames
+                    )
+                } else {
+                    format!(
+                        "FMOD AUTHENTIC ({}/{} MUESTRAS · {} FRAMES · {:.0} RPM · THR {:.0}% · PEAK {:.2})",
+                        st.decoded_samples,
+                        st.total_samples,
+                        st.rendered_frames,
+                        st.last_rpm,
+                        st.last_throttle * 100.0,
+                        st.peak_output
+                    )
+                }
+            } else {
+                lock.status.clone()
+            }
+        },
+    )
 }
 
 /// Query menu music status.
@@ -783,6 +879,12 @@ pub fn render(out: &mut [f32], frames: usize, sample_rate: u32) {
             }
         }
         lock.stereo_scratch = scratch;
+    } else if !lock.paused && lock.volume > 0.0 && lock.fmod_audio.is_some() {
+        let vol = lock.volume;
+        let is_cockpit = lock.is_cockpit;
+        if let Some(fmod) = lock.fmod_audio.as_mut() {
+            fmod.mix_into(out, frames, vol, is_cockpit);
+        }
     } else if lock.paused {
         let music_vol = lock.music_volume;
         if let Some(track) = lock.menu_music.as_mut() {
@@ -856,8 +958,11 @@ pub extern "C" fn rerbr_audio_set_volume(volume: f32) {
 mod tests {
     use super::*;
 
+    static AUDIO_RUNTIME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn contention_and_unsupported_callbacks_are_silent_without_blocking_physics() {
+        let _test_guard = AUDIO_RUNTIME_TEST_LOCK.lock().unwrap();
         rerbr_audio_prepare();
         let guard = runtime().lock().unwrap();
         let noise = EngineNoise::from_rpm_throttle(3000.0, 1.0, 500.0);
@@ -933,5 +1038,62 @@ mod tests {
             skid_energy > 0.05,
             "tarmac skid must produce audible energy"
         );
+    }
+
+    #[test]
+    fn rsf_fmod_runtime_requires_decoded_samples_and_emitted_frames_before_authentic() {
+        let _test_guard = AUDIO_RUNTIME_TEST_LOCK.lock().unwrap();
+        let focus = rerbr_content::VehicleDescriptor::ford_focus_2006();
+
+        let empty_docs = std::env::temp_dir().join("rerbr_empty_fmod_docs");
+        let _ = std::fs::remove_dir_all(&empty_docs);
+        std::fs::create_dir_all(empty_docs.join("RBR/AudioFMOD")).unwrap();
+        let missing_msg = init_rsf_fmod(&empty_docs, &focus, 44100);
+        assert!(
+            missing_msg.contains("Focus_Mk2_WRC.bank"),
+            "unexpected missing msg: {missing_msg}"
+        );
+        assert!(fmod_runtime_snapshot().is_none());
+        let mut out = vec![0.0f32; 512];
+        set_paused(false);
+        set_master_volume(1.0);
+        render(&mut out, 256, 44100);
+        assert!(out.iter().all(|&s| s == 0.0));
+        let _ = std::fs::remove_dir_all(&empty_docs);
+
+        let pc_rbr = Path::new(r"C:\Richard Burns Rally");
+        if !pc_rbr.join("AudioFMOD/Focus_Mk2_WRC.bank").is_file() {
+            return;
+        }
+        let init_msg = init_rsf_fmod(pc_rbr, &focus, 44100);
+        assert!(
+            init_msg.contains("FMOD PARCIAL") && init_msg.contains("44/44"),
+            "init must stay PARCIAL before emission: {init_msg}"
+        );
+        assert!(!status().contains("AUTHENTIC"));
+
+        set_view_is_cockpit(true);
+        set_paused(false);
+        set_interrupted(false);
+        set_master_volume(0.85);
+        update_fmod_telemetry(4500.0, 0.9, 0.0, 30.0, 3, 31.0);
+        let mut pcm = vec![0.0f32; 1024 * 2];
+        render(&mut pcm, 1024, 44100);
+        render(&mut pcm, 1024, 44100);
+        let energy: f32 = pcm.iter().map(|s| s * s).sum();
+        assert!(
+            energy > 0.01,
+            "expected audible Focus FMOD PCM, got {energy}"
+        );
+        let st = status();
+        assert!(
+            st.contains("FMOD AUTHENTIC"),
+            "expected AUTHENTIC status: {st}"
+        );
+
+        set_paused(true);
+        if let Ok(mut lock) = runtime().lock() {
+            lock.fmod_audio = None;
+        }
     }
 }
