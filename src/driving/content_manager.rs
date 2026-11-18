@@ -2,7 +2,9 @@
 //! Nothing here installs, extracts or enables content: only the descriptor-backed
 //! Corolla and the four retail stage presets pass the descriptor gate.
 
-use rerbr_content::{Selection, StageDescriptor, VehicleDescriptor, PHYSICS_STAGE_EXTENSIONS};
+use rerbr_content::{
+    Selection, StageDescriptor, VehicleClassification, VehicleDescriptor, PHYSICS_STAGE_EXTENSIONS,
+};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +68,10 @@ pub struct VehicleEntry {
     pub state: EntryState,
     pub files: FileAudit,
     pub tech_sheet: Option<super::ngp_proto::VehicleTechSheet>,
+    pub classification: VehicleClassification,
+    pub drivetrain: Option<String>,
+    pub fmod_bank: Option<String>,
+    pub notes: Vec<String>,
 }
 #[derive(Debug, Clone)]
 pub struct StageEntry {
@@ -98,11 +104,16 @@ impl Catalog {
                     descriptor.validate_current_backend().is_ok(),
                     &FileAudit::unchecked(),
                 );
+                let classification = descriptor.base_classification();
                 VehicleEntry {
                     descriptor,
                     state,
                     files: FileAudit::unchecked(),
                     tech_sheet: None,
+                    classification,
+                    drivetrain: None,
+                    fmod_bank: None,
+                    notes: Vec::new(),
                 }
             })
             .collect();
@@ -110,17 +121,22 @@ impl Catalog {
             .iter()
             .any(|v| v.descriptor.id == selection.vehicle.id)
         {
+            let classification = selection.vehicle.base_classification();
             vehicles.insert(
                 0,
                 VehicleEntry {
                     descriptor: selection.vehicle.clone(),
-                    state: if selection.vehicle.validate_current_backend().is_ok() {
+                    state: if selection.vehicle.validate_experimental_ngp().is_ok() {
                         EntryState::Selected
                     } else {
                         EntryState::Unsupported
                     },
                     files: FileAudit::unchecked(),
                     tech_sheet: None,
+                    classification,
+                    drivetrain: None,
+                    fmod_bank: None,
+                    notes: Vec::new(),
                 },
             );
         }
@@ -182,12 +198,52 @@ impl Catalog {
             vehicle.files = audit_vehicle(root, &vehicle.descriptor);
             vehicle.tech_sheet =
                 super::ngp_proto::inspect_vehicle_in_documents(root, &vehicle.descriptor);
+            if let Some(sheet) = &vehicle.tech_sheet {
+                vehicle.drivetrain = Some(sheet.drivetrain.label().into());
+            }
             vehicle.state = state_of(
                 &vehicle.descriptor.id,
                 &selection.vehicle.id,
                 vehicle.descriptor.validate_current_backend().is_ok(),
                 &vehicle.files,
             );
+        }
+        // Dynamically merge installed RSF NGP vehicles (cleanroom NGPCarMenu / RBRCIT discovery)
+        let rbr_root = root.join("RBR");
+        for item in super::rsf_catalog::discover(&rbr_root) {
+            let files = audit_vehicle(root, &item.descriptor);
+            let supported = item.descriptor.validate_experimental_ngp().is_ok();
+            let state = state_of(
+                &item.descriptor.id,
+                &selection.vehicle.id,
+                supported,
+                &files,
+            );
+            if let Some(existing) = catalog
+                .vehicles
+                .iter_mut()
+                .find(|v| v.descriptor.id == item.descriptor.id)
+            {
+                existing.descriptor = item.descriptor;
+                existing.files = files;
+                existing.tech_sheet = item.tech_sheet;
+                existing.classification = item.classification;
+                existing.drivetrain = item.drivetrain;
+                existing.fmod_bank = item.fmod_bank;
+                existing.notes = item.notes;
+                existing.state = state;
+            } else {
+                catalog.vehicles.push(VehicleEntry {
+                    descriptor: item.descriptor,
+                    state,
+                    files,
+                    tech_sheet: item.tech_sheet,
+                    classification: item.classification,
+                    drivetrain: item.drivetrain,
+                    fmod_bank: item.fmod_bank,
+                    notes: item.notes,
+                });
+            }
         }
         for stage in &mut catalog.stages {
             if let Some(discovered_maps) = resolve_stage_maps_dir(root, &stage.descriptor) {
@@ -404,7 +460,11 @@ mod tests {
         assert_eq!(catalog.vehicles[0].state, EntryState::Selected);
         for v in &catalog.vehicles[1..8] {
             assert_eq!(v.state, EntryState::Installed);
-            assert!(v.descriptor.is_experimental());
+            assert!(!v.descriptor.is_experimental());
+            assert_eq!(
+                v.classification,
+                VehicleClassification::OriginalRbrFunctional
+            );
         }
         assert_eq!(catalog.vehicles[8].state, EntryState::Unsupported);
         assert!(!catalog.vehicles[8].descriptor.is_original_rbr());

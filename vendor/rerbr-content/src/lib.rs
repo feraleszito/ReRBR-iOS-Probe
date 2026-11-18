@@ -1,6 +1,29 @@
 //! Owned runtime descriptors shared by presentation and physics. No assets, importer or registry.
 //! Current backend accepts the original Corolla and four retail stages; NGP parity is not certified.
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VehicleClassification {
+    /// Original base-game RBR car executed on authentic 720 Hz physics.
+    OriginalRbrFunctional,
+    /// Dynamic RSF / NGP car with plaintext `.lsp` pack, verified 3D model, and runnable NGP 7.4 runtime physics.
+    RsfNgpVerified,
+    /// RSF / NGP car with partial assets or runtime gaps (e.g., fallback model, NGP 7.5 unverified revision, FMOD absent).
+    RsfNgpPartial,
+    /// Model inspection only (encrypted pack or missing physics runtime).
+    VisualInspectionOnly,
+}
+
+impl VehicleClassification {
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::OriginalRbrFunctional => "RBR ORIGINAL",
+            Self::RsfNgpVerified => "RSF NGP",
+            Self::RsfNgpPartial => "NGP PARCIAL",
+            Self::VisualInspectionOnly => "VISUAL",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VehicleDescriptor {
     pub id: String,
@@ -17,6 +40,10 @@ pub struct VehicleDescriptor {
     pub optional_textures: Vec<String>,
     /// The original per-car engine bank is resolved through this mapping, not guessed from the name.
     pub audio_index: String,
+    /// Display group/category (e.g. `WRC 2.0`, `Rally 2`, `Group A7`) from RSF `cargroups.json`.
+    pub category: Option<String>,
+    /// Pack folder/zip name under `rsfdata/cars/` for dynamically discovered RSF NGP vehicles.
+    pub rsf_pack: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,11 +121,27 @@ impl VehicleDescriptor {
         .chain(self.required_textures.iter().map(String::as_str))
     }
     pub fn allows(&self, path: &str) -> bool {
-        validate_relative_path(path).is_ok()
-            && self
-                .required_paths()
-                .chain(self.optional_textures.iter().map(String::as_str))
-                .any(|p| same_path(p, path))
+        if validate_relative_path(path).is_err() {
+            return false;
+        }
+        if self
+            .required_paths()
+            .chain(self.optional_textures.iter().map(String::as_str))
+            .any(|p| same_path(p, path))
+        {
+            return true;
+        }
+        if self.is_ngp_experimental_car() {
+            let norm = path.replace('\\', "/").to_ascii_lowercase();
+            let model_norm = self.model.replace('\\', "/").to_ascii_lowercase();
+            if let Some((folder, _)) = model_norm.rsplit_once('/') {
+                let prefix = format!("{folder}/");
+                if norm.starts_with(&prefix) && norm.ends_with(".dds") {
+                    return true;
+                }
+            }
+        }
+        false
     }
     pub fn validate_schema(&self) -> Result<(), String> {
         validate_identity(&self.id, &self.name)?;
@@ -112,6 +155,16 @@ impl VehicleDescriptor {
         {
             validate_relative_path(path)?;
         }
+        if let Some(pack) = &self.rsf_pack {
+            if pack.is_empty()
+                || pack == "."
+                || pack == ".."
+                || pack.contains(['/', '\\', ':'])
+                || pack.chars().any(char::is_control)
+            {
+                return Err(format!("invalid RSF pack identifier: {pack:?}"));
+            }
+        }
         Ok(())
     }
     pub fn is_original_rbr(&self) -> bool {
@@ -122,16 +175,27 @@ impl VehicleDescriptor {
                 && self.forward_gears == preset.forward_gears
                 && self.model == preset.model
                 && self.parts == preset.parts
+                && self.rsf_pack.is_none()
         })
     }
     pub fn is_validated_reference(&self) -> bool {
         self.id == "toyota-corolla-wrc"
     }
+    /// Only dynamically loaded / non-retail NGP vehicles are experimental; all 8 base RBR cars are functional.
     pub fn is_experimental(&self) -> bool {
-        self.is_original_rbr() && !self.is_validated_reference()
+        self.is_ngp_experimental_car()
     }
     pub fn is_ngp_experimental_car(&self) -> bool {
-        self.id == "ford-focus-rs-wrc-2006"
+        self.rsf_pack.is_some() || self.id == "ford-focus-rs-wrc-2006"
+    }
+    pub fn base_classification(&self) -> VehicleClassification {
+        if self.is_original_rbr() {
+            VehicleClassification::OriginalRbrFunctional
+        } else if self.is_ngp_experimental_car() {
+            VehicleClassification::RsfNgpPartial
+        } else {
+            VehicleClassification::VisualInspectionOnly
+        }
     }
     /// Backend compatibility gate: accepts all 8 retail RBR cars (with non-Corolla in experimental mode)
     /// while blocking Ford Focus 2006 and external unvalidated mods.
@@ -273,6 +337,8 @@ impl Default for VehicleDescriptor {
             .map(|n| format!("Cars/COROLLA/textures/{n}"))
             .into(),
             audio_index: "Audio/Cars/Cars.ini".into(),
+            category: Some("RBR Original".into()),
+            rsf_pack: None,
         }
     }
 }
@@ -315,6 +381,8 @@ impl VehicleDescriptor {
             .map(|n| format!("Cars/FORD_FOCUS_2006/textures/{n}"))
             .into(),
             audio_index: "AudioFMOD/Focus_Mk2_WRC.bank".into(),
+            category: Some("WRC 2.0".into()),
+            rsf_pack: Some("Ford_Focus_Mk_II_RS_WRC_2006_ngp6".into()),
         }
     }
     fn original_rbr(
@@ -352,6 +420,8 @@ impl VehicleDescriptor {
             .map(|n| format!("Cars/{folder}/Textures/{n}"))
             .into(),
             audio_index: "Audio/Cars/Cars.ini".into(),
+            category: Some("RBR Original".into()),
+            rsf_pack: None,
         }
     }
     /// All 8 original base-game Richard Burns Rally cars.
@@ -577,7 +647,11 @@ mod tests {
             assert!(slots.insert(car.original_slot));
             assert!(car.validate_current_backend().is_ok());
             assert_eq!(car.is_validated_reference(), car.id == "toyota-corolla-wrc");
-            assert_eq!(car.is_experimental(), car.id != "toyota-corolla-wrc");
+            assert!(!car.is_experimental());
+            assert_eq!(
+                car.base_classification(),
+                VehicleClassification::OriginalRbrFunctional
+            );
         }
         assert_eq!(
             slots.into_iter().collect::<Vec<_>>(),

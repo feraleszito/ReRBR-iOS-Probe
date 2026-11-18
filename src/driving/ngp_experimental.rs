@@ -107,8 +107,8 @@ impl FocusDiagnosticsReport {
             false
         };
 
-        // 3. CAR PACK (rsfdata/cars/Ford_Focus_Mk_II_RS_WRC_2006_ngp6)
-        let pack_path = find_focus_pack(&rbr_root);
+        // 3. CAR PACK (rsfdata/cars/<pack> or Ford_Focus_*_ngp6)
+        let pack_path = find_pack_for(&rbr_root, vehicle);
         let mut car_pack_ok = false;
         if let Some(ref p) = pack_path {
             match Pack::open(p).and_then(|pack| {
@@ -118,7 +118,8 @@ impl FocusDiagnosticsReport {
             }) {
                 Ok(()) => {
                     car_pack_ok = true;
-                    let summary = ngp_proto::inspect_vehicle_in_documents(doc_root, vehicle)
+                    let summary = ngp_proto::inspect_pack_path(p)
+                        .or_else(|| ngp_proto::inspect_vehicle_in_documents(doc_root, vehicle))
                         .map(|s| format!("{} | {:.0}KG", s.physics_summary(), s.mass_kg))
                         .unwrap_or_else(|| "PACK NGP LEGIBLE".into());
                     steps.push(DiagnosticStep {
@@ -136,10 +137,11 @@ impl FocusDiagnosticsReport {
                 }
             }
         } else {
+            let expected = vehicle.rsf_pack.as_deref().unwrap_or("Ford_Focus_*_ngp6");
             steps.push(DiagnosticStep {
                 stage: "CAR PACK",
                 status: DiagnosticStatus::Blocked,
-                detail: "NO ENCONTRADO rsfdata/cars/Ford_Focus_*_ngp6".into(),
+                detail: format!("NO ENCONTRADO rsfdata/cars/{expected}"),
             });
         }
 
@@ -389,6 +391,26 @@ impl FocusDiagnosticsReport {
             None
         }
     }
+}
+
+/// Discover NGP physics pack folder or zip for a specific RSF vehicle under `Documents/RBR`.
+pub fn find_pack_for(rbr_root: &Path, vehicle: &VehicleDescriptor) -> Option<PathBuf> {
+    if let Some(pack_name) = vehicle.rsf_pack.as_deref() {
+        for rel in [
+            format!("rsfdata/cars/{pack_name}"),
+            format!("rsfdata/cars/{pack_name}.zip"),
+            format!("cars/{pack_name}"),
+            format!("cars/{pack_name}.zip"),
+        ] {
+            if let Some(resolved) = cars::resolve(rbr_root, &rel) {
+                return Some(resolved);
+            }
+        }
+    }
+    if vehicle.id == "ford-focus-rs-wrc-2006" {
+        return find_focus_pack(rbr_root);
+    }
+    None
 }
 
 /// Discover optional Ford Focus 2006 NGP pack directory or zip in `Documents/RBR`.

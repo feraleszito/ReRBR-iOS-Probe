@@ -25,6 +25,30 @@ pub(crate) fn inspect(path: &std::path::Path, folder: &str, surface: &str) -> Re
     Ok(PhysicsAudit::inspect(&scripts))
 }
 
+/// Audits an NGP car pack's real `.lsp` scripts directly (`common.lsp`, `<surface>.lsp`, etc.).
+pub(crate) fn inspect_pack(
+    archive: &std::path::Path,
+    pack: &rbr_formats::car_pack::Pack,
+    surface: &str,
+) -> Result<PhysicsAudit, String> {
+    let mut zip = rbr_formats::rbz::open(archive).map_err(|e| e.to_string())?;
+    let mut physics_text = String::new();
+    rbr_formats::rbz::by_name(&mut zip, "Physics/physics.lsp")
+        .map_err(|e| format!("physics audit Physics/physics.lsp: {e}"))?
+        .read_to_string(&mut physics_text)
+        .map_err(|e| format!("physics audit Physics/physics.lsp: {e}"))?;
+    let mut scripts =
+        vec![("Physics/physics.lsp".into(), rbr_formats::lsp::parse(&physics_text).map_err(|e| e.to_string())?)];
+    for rel in
+        ["common.lsp".into(), format!("{surface}.lsp"), format!("setups/d_{surface}.lsp"), format!("r_{surface}.lsp")]
+    {
+        let bytes = pack.read(&rel)?;
+        let text = std::str::from_utf8(&bytes).map_err(|e| format!("physics audit {rel}: {e}"))?;
+        scripts.push((rel, rbr_formats::lsp::parse(text).map_err(|e| e.to_string())?));
+    }
+    Ok(PhysicsAudit::inspect(&scripts))
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PhysicsAudit {
     pub scripts: Vec<String>,

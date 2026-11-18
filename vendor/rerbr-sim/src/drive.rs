@@ -149,13 +149,24 @@ impl Session {
             weather,
             physics_archive,
         );
+        let physics_audit = match &car_pack {
+            Some(cp) => crate::physics_audit::inspect_pack(&audit_archive, &cp.pack, race.surface)?,
+            None => {
+                // slot folder name resolved below after build
+                crate::physics_audit::PhysicsAudit::default()
+            }
+        };
         race.car_pack = car_pack;
         race.options.aids.auto_gears = automatic;
         let name = paths.maps.join(&selection.stage.stem).to_string_lossy().into_owned();
         let finish_direction = finish_direction_for(&data, &name);
         let image = boot::build(&data, &name, State::Load.value(), &race)?;
-        let folder = diagnostics::physics_folder(&image.mem, slot)?;
-        let physics_audit = crate::physics_audit::inspect(&audit_archive, &folder, race.surface)?;
+        let physics_audit = if race.car_pack.is_some() {
+            physics_audit
+        } else {
+            let folder = diagnostics::physics_folder(&image.mem, slot)?;
+            crate::physics_audit::inspect(&audit_archive, &folder, race.surface)?
+        };
         eprintln!("physics-drive AUDIT: {}", physics_audit.summary());
         let mut playback = Playback::from_image(image.mem.clone(), image.regs, image.slot, image.control_at, false);
         playback.pure.ngp_base = image.ngp.base;
@@ -328,6 +339,203 @@ mod surface_tests {
         for (map, surface, tyre) in [(20, "gravel", 4), (22, "gravel", 4), (41, "tarmac", 0), (46, "tarmac", 0)] {
             assert_eq!(crate::boot::surface(map), surface);
             assert_eq!(crate::boot::default_tyre(crate::boot::surface(map)), tyre);
+        }
+    }
+
+    #[test]
+    fn real_physics_parity_and_per_car_differentiation_if_pc_assets_present() {
+        use crate::drive::{Control, Session};
+        use crate::inputs::Paths;
+        use rerbr_content::{Selection, StageDescriptor, VehicleDescriptor};
+        use std::path::Path;
+        use std::time::Instant;
+
+        let desktop_rbr = Path::new(r"C:\Users\adria\Desktop\RBR");
+        let main_rbr = Path::new(r"C:\Richard Burns Rally");
+        if !desktop_rbr.join("Plugins/NGP.dll").is_file() || !main_rbr.join("Maps/track-20_O.col").is_file() {
+            return;
+        }
+        let paths_harwood = Paths { install: desktop_rbr.to_path_buf(), overlay: None, maps: main_rbr.join("Maps") };
+        let paths_main = Paths {
+            install: main_rbr.to_path_buf(),
+            overlay: Some(desktop_rbr.to_path_buf()),
+            maps: main_rbr.join("Maps"),
+        };
+
+        // Helper to drive 2.5s throttle, 0.5s steer, 0.5s brake cleanly and collect metrics
+        let probe_drive = |session: &mut Session| {
+            let ratios = session.gear_ratios().unwrap();
+            let t0 = Instant::now();
+            let step_with_gear = |s: &mut Session, mut c: Control| {
+                if s.sample().commanded_gear == 2 {
+                    c.flags &= !4;
+                    c.gear = None;
+                } else {
+                    c.flags |= 4;
+                    c.gear = Some(2);
+                }
+                s.step(c).unwrap();
+            };
+            // Shift into 1st gear + full throttle for 2520 steps (3.5s)
+            for _ in 0..2520 {
+                step_with_gear(session, Control { throttle: 1.0, ..Control::default() });
+            }
+            let accel = session.sample();
+            assert!(accel.finite());
+            // Steer left for 360 steps (0.5s)
+            for _ in 0..360 {
+                step_with_gear(session, Control { throttle: 0.7, steering: -0.6, ..Control::default() });
+            }
+            let steer = session.sample();
+            assert!(steer.finite());
+            // Brake hard for 360 steps (0.5s)
+            for _ in 0..360 {
+                step_with_gear(session, Control { brake: 1.0, ..Control::default() });
+            }
+            let braked = session.sample();
+            assert!(braked.finite());
+            let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            (ratios, accel, steer, braked, elapsed_ms)
+        };
+
+        // 1. Original Toyota Corolla WRC
+        let corolla_sel = Selection::default();
+        let mut corolla = Session::boot_selected(&paths_harwood, &corolla_sel, false).unwrap();
+        let (cor_ratios, cor_acc, cor_str, cor_brk, cor_ms) = probe_drive(&mut corolla);
+        eprintln!(
+            "PHY Corolla WRC: gears={} r={:.3?} speed={:.2}m/s braked={:.2}m/s yaw_z={:.3} spin={:.1?} travel={:.4?} ({:.1}ms)",
+            cor_ratios.len(),
+            &cor_ratios[..cor_ratios.len().min(4)],
+            cor_acc.speed(),
+            cor_brk.speed(),
+            cor_str.angular_velocity[2],
+            cor_acc.wheel_spin,
+            cor_acc.wheel_travel,
+            cor_ms
+        );
+        assert!(cor_acc.speed() > 5.0);
+        assert!(cor_brk.speed() < cor_str.speed());
+
+        // 2. Original Peugeot 206 WRC (5-speed) on paths_main
+        let p206_desc = VehicleDescriptor::presets().into_iter().find(|v| v.id == "peugeot-206-wrc").unwrap();
+        if let Ok(mut p206) =
+            Session::boot_selected(&paths_main, &Selection { vehicle: p206_desc, ..corolla_sel.clone() }, false)
+        {
+            let (p206_ratios, p206_acc, p206_str, p206_brk, p206_ms) = probe_drive(&mut p206);
+            eprintln!(
+                "PHY Peugeot 206 WRC: gears={} r={:.3?} speed={:.2}m/s braked={:.2}m/s yaw_z={:.3} ({:.1}ms)",
+                p206_ratios.len(),
+                &p206_ratios[..p206_ratios.len().min(4)],
+                p206_acc.speed(),
+                p206_brk.speed(),
+                p206_str.angular_velocity[2],
+                p206_ms
+            );
+            assert_eq!(p206_ratios.len(), 7);
+            assert_ne!(cor_ratios, p206_ratios);
+        }
+
+        // 3. Real NGP6 Pack: Ford Focus Mk II RS WRC 2006 (Gravel AND Tarmac!)
+        let focus_pack = main_rbr.join("rsfdata/cars/Ford_Focus_Mk_II_RS_WRC_2006_ngp6");
+        if focus_pack.is_dir() {
+            let focus_sel =
+                Selection { vehicle: VehicleDescriptor::ford_focus_2006(), stage: StageDescriptor::harwood_forest() };
+            let mut focus = Session::boot_experimental_pack(&paths_main, &focus_sel, &focus_pack, false).unwrap();
+            let (foc_ratios, foc_acc, foc_str, foc_brk, foc_ms) = probe_drive(&mut focus);
+            eprintln!(
+                "PHY Focus 2006 NGP6 (Gravel): gears={} r={:.3?} speed={:.2}m/s braked={:.2}m/s yaw_z={:.3} spin={:.1?} travel={:.4?} ({:.1}ms)",
+                foc_ratios.len(),
+                &foc_ratios[..foc_ratios.len().min(4)],
+                foc_acc.speed(),
+                foc_brk.speed(),
+                foc_str.angular_velocity[2],
+                foc_acc.wheel_spin,
+                foc_acc.wheel_travel,
+                foc_ms
+            );
+            assert!(foc_acc.speed() > 5.0);
+            assert!(foc_brk.speed() < foc_str.speed());
+            assert!(foc_str.angular_velocity[2].abs() > 0.05);
+            assert_ne!(foc_ratios, cor_ratios);
+
+            if main_rbr.join("Maps/track-41_O.col").is_file() {
+                let focus_tarmac_sel =
+                    Selection { vehicle: VehicleDescriptor::ford_focus_2006(), stage: StageDescriptor::cote_darbroz() };
+                if let Ok(mut focus_tar) =
+                    Session::boot_experimental_pack(&paths_main, &focus_tarmac_sel, &focus_pack, false)
+                {
+                    let (_, ft_acc, ft_str, ft_brk, _) = probe_drive(&mut focus_tar);
+                    eprintln!(
+                        "PHY Focus 2006 NGP6 (Tarmac): speed={:.2}m/s braked={:.2}m/s yaw_z={:.3} spin={:.1?}",
+                        ft_acc.speed(),
+                        ft_brk.speed(),
+                        ft_str.angular_velocity[2],
+                        ft_acc.wheel_spin
+                    );
+                }
+            }
+        }
+
+        // 4. Real RSF installed cars discovered automatically via rbr_formats::rsf::Install
+        if let Ok(rsf_install) = rbr_formats::rsf::Install::open(main_rbr) {
+            let retail = std::fs::read_to_string(main_rbr.join("Cars/Cars.ini"))
+                .ok()
+                .and_then(|t| rbr_formats::cars::parse(&t).ok())
+                .unwrap_or_default();
+            for car in &rsf_install.cars {
+                let pack_dir = main_rbr.join("rsfdata/cars").join(&car.pack);
+                if !pack_dir.is_dir() {
+                    continue;
+                }
+                let Ok(model) = rsf_install.model_entry(car, &retail) else {
+                    eprintln!("PHY RSF {}: model unavailable or encrypted", car.name);
+                    continue;
+                };
+                // Try actual gearbox gear count 5 vs 6 (or inspect Pack setup) cleanly
+                let mut booted = Err("no matching gear count".to_string());
+                for gears in [6u32, 5u32, 4u32, 7u32] {
+                    let mut vehicle = VehicleDescriptor::ford_focus_2006();
+                    vehicle.name = car.name.clone();
+                    vehicle.forward_gears = gears;
+                    vehicle.model = model.entry.file_name.replace('\\', "/");
+                    let sel = Selection { vehicle, stage: StageDescriptor::harwood_forest() };
+                    match Session::boot_experimental_pack(&paths_main, &sel, &pack_dir, false) {
+                        Ok(s) => {
+                            booted = Ok(s);
+                            break;
+                        }
+                        Err(e) if e.contains("gearbox gear count") => continue,
+                        Err(e) => {
+                            booted = Err(e);
+                            break;
+                        }
+                    }
+                }
+                match booted {
+                    Ok(mut s) => {
+                        let (r, acc, str_s, brk, ms) = probe_drive(&mut s);
+                        eprintln!(
+                            "PHY RSF {} [group={:?} dt={:?} fmod={}]: audit={} gears={} r={:.3?} speed={:.2}m/s steer_spd={:.2}m/s braked={:.2}m/s yaw_z={:.3} spin={:.1?} ({:.1}ms)",
+                            car.name,
+                            car.group,
+                            car.drive_train,
+                            rsf_install.audio_bank(car).is_some(),
+                            s.physics_audit().summary(),
+                            r.len(),
+                            &r[..r.len().min(4)],
+                            acc.speed(),
+                            str_s.speed(),
+                            brk.speed(),
+                            str_s.angular_velocity[2],
+                            acc.wheel_spin,
+                            ms
+                        );
+                        assert!(acc.speed() > 4.0, "{} failed acceleration", car.name);
+                        assert!(brk.speed() < str_s.speed(), "{} failed braking", car.name);
+                    }
+                    Err(e) => eprintln!("PHY RSF {}: BOOT ERR: {e}", car.name),
+                }
+            }
         }
     }
 }

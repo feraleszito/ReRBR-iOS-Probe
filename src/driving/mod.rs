@@ -13,6 +13,7 @@ pub mod ngp_proto;
 mod private_tests;
 mod race;
 pub mod replay;
+pub mod rsf_catalog;
 mod ui;
 mod worker;
 use crate::{
@@ -199,10 +200,22 @@ impl Runtime {
     }
     fn refresh_focus_diagnostics(&mut self) {
         let doc = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from);
-        let focus = rerbr_content::VehicleDescriptor::ford_focus_2006();
+        let inspected = self
+            .content
+            .vehicles
+            .get(self.menu.inspected_vehicle)
+            .map(|e| &e.descriptor)
+            .filter(|v| v.is_ngp_experimental_car());
+        let target = if self.selection.vehicle.is_ngp_experimental_car() {
+            self.selection.vehicle.clone()
+        } else if let Some(v) = inspected {
+            v.clone()
+        } else {
+            rerbr_content::VehicleDescriptor::ford_focus_2006()
+        };
         self.focus_diagnostics = Some(ngp_experimental::FocusDiagnosticsReport::inspect(
             doc.as_deref(),
-            &focus,
+            &target,
         ));
     }
     pub fn selection(&self) -> &rerbr_content::Selection {
@@ -517,6 +530,18 @@ impl Runtime {
                 audio::set_menu_music_active(true);
                 self.menu.show(menu::Page::StageComplete);
             }
+            NextGaragePage => {
+                let total = self.content.vehicles.len().div_ceil(9);
+                if total > 0 {
+                    self.menu.garage_page = (self.menu.garage_page + 1) % total;
+                }
+            }
+            PrevGaragePage => {
+                let total = self.content.vehicles.len().div_ceil(9);
+                if total > 0 {
+                    self.menu.garage_page = (self.menu.garage_page + total - 1) % total;
+                }
+            }
             NextStagePage => {
                 let total = self.content.stages.len().div_ceil(8);
                 if total > 0 {
@@ -697,7 +722,15 @@ impl Runtime {
                     self.message = Some("VUELVE AL MENÚ PRINCIPAL ANTES DE PROBAR".into());
                 } else {
                     self.ngp_experimental = true;
-                    self.selection.vehicle = rerbr_content::VehicleDescriptor::ford_focus_2006();
+                    let inspected = self
+                        .content
+                        .vehicles
+                        .get(self.menu.inspected_vehicle)
+                        .map(|e| &e.descriptor)
+                        .filter(|v| v.is_ngp_experimental_car())
+                        .cloned();
+                    self.selection.vehicle =
+                        inspected.unwrap_or_else(rerbr_content::VehicleDescriptor::ford_focus_2006);
                     let _ = self.controls.configure_vehicle(&self.selection.vehicle);
                     self.apply_command(StartRally);
                 }
@@ -1564,7 +1597,7 @@ impl Runtime {
         if self.selection.vehicle.is_experimental() {
             lines.insert(
                 0,
-                format!("VEHICLE: {} (EXPERIMENTAL)", self.selection.vehicle.name),
+                format!("VEHICLE: {} (RSF NGP)", self.selection.vehicle.name),
             );
         }
         if let Some(status) = &state.physics_status {
@@ -1624,12 +1657,10 @@ impl Runtime {
             ));
         } else if self.selection.vehicle.is_ngp_experimental_car() {
             banners.push((
-                "NGP EXPERIMENTAL — AUDIO FMOD NO SOPORTADO (SILENCIO)".into(),
-                WARN,
-            ));
-        } else if self.selection.vehicle.is_experimental() {
-            banners.push((
-                format!("EXPERIMENTAL: {}", self.selection.vehicle.name),
+                format!(
+                    "RSF NGP 7.4 ACTIVO: {} (FMOD SILENCIADO)",
+                    self.selection.vehicle.name
+                ),
                 WARN,
             ));
         }

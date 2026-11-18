@@ -177,9 +177,14 @@ pub fn parse_vehicle_tech_sheet(
         .map(|s| lsp::parse(s).map_err(|e| format!("d_gravel.lsp: {e}")))
         .transpose()?;
 
-    let inv_mass = lookup_f32(&[&gravel_nodes, &common_nodes], "InverseMass")
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .ok_or_else(|| "missing or invalid InverseMass".to_string())?;
+    let inv_mass = lookup_f32_matching(&[&gravel_nodes, &common_nodes], "InverseMass", |v| {
+        v.is_finite() && (0.00033..=0.0025).contains(&v)
+    })
+    .or_else(|| {
+        lookup_f32(&[&gravel_nodes, &common_nodes], "InverseMass")
+            .filter(|v| v.is_finite() && *v > 0.0)
+    })
+    .ok_or_else(|| "missing or invalid InverseMass".to_string())?;
     let mass_kg = 1.0 / inv_mass;
     if !(400.0..=3000.0).contains(&mass_kg) {
         return Err(format!("out-of-range vehicle mass: {mass_kg:.1} kg"));
@@ -284,38 +289,54 @@ pub fn parse_vehicle_tech_sheet(
     })
 }
 
-/// Inspects a vehicle's real technical sheet from `Documents/RBR/physics.rbz` (or NGP pack for Focus 2006).
+/// Inspects an NGP pack folder or zip directly and returns detailed parse errors if any.
+pub fn inspect_pack_path_result(path: &Path) -> Result<VehicleTechSheet, String> {
+    let pack = Pack::open(path)?;
+    let common = String::from_utf8_lossy(&pack.read("common.lsp")?).into_owned();
+    let gravel = String::from_utf8_lossy(&pack.read("gravel.lsp")?).into_owned();
+    let r_gravel = pack
+        .read("r_gravel.lsp")
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned());
+    let d_gravel = pack
+        .read("setups/d_gravel.lsp")
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned());
+    parse_vehicle_tech_sheet(
+        &common,
+        &gravel,
+        r_gravel.as_deref(),
+        d_gravel.as_deref(),
+        "NGP TYRE",
+    )
+}
+
+/// Inspects an NGP pack folder or zip directly for authentic technical parameters.
+pub fn inspect_pack_path(path: &Path) -> Option<VehicleTechSheet> {
+    inspect_pack_path_result(path).ok()
+}
+
+/// Inspects a vehicle's real technical sheet from `Documents/RBR/physics.rbz` (or NGP pack for RSF vehicles).
 /// Safe and read-only: returns `None` quietly if private game archives are absent.
 pub fn inspect_vehicle_in_documents(
     documents_root: &Path,
     vehicle: &VehicleDescriptor,
 ) -> Option<VehicleTechSheet> {
     let install = documents_root.join("RBR");
-    if vehicle.id == "ford-focus-rs-wrc-2006" {
+    if let Some(pack_name) = vehicle.rsf_pack.as_deref().or_else(|| {
+        (vehicle.id == "ford-focus-rs-wrc-2006").then_some("Ford_Focus_Mk_II_RS_WRC_2006_ngp6")
+    }) {
         let pack_candidates = [
-            install.join("rsfdata/cars/Ford_Focus_Mk_II_RS_WRC_2006_ngp6"),
-            install.join("rsfdata/cars/Ford_Focus_Mk_II_RS_WRC_2006_ngp6.zip"),
+            install.join("rsfdata/cars").join(pack_name),
+            install
+                .join("rsfdata/cars")
+                .join(format!("{pack_name}.zip")),
+            install.join("cars").join(pack_name),
+            install.join("cars").join(format!("{pack_name}.zip")),
         ];
         for path in pack_candidates {
-            if let Ok(pack) = Pack::open(&path) {
-                let common = String::from_utf8(pack.read("common.lsp").ok()?).ok()?;
-                let gravel = String::from_utf8(pack.read("gravel.lsp").ok()?).ok()?;
-                let r_gravel = pack
-                    .read("r_gravel.lsp")
-                    .ok()
-                    .and_then(|b| String::from_utf8(b).ok());
-                let d_gravel = pack
-                    .read("setups/d_gravel.lsp")
-                    .ok()
-                    .and_then(|b| String::from_utf8(b).ok());
-                return parse_vehicle_tech_sheet(
-                    &common,
-                    &gravel,
-                    r_gravel.as_deref(),
-                    d_gravel.as_deref(),
-                    "NGP TYRE",
-                )
-                .ok();
+            if let Some(sheet) = inspect_pack_path(&path) {
+                return Some(sheet);
             }
         }
         return None;
@@ -355,16 +376,34 @@ fn lookup_f32(layers: &[&[Node]], key: &str) -> Option<f32> {
     layers.iter().find_map(|nodes| find_number(nodes, key))
 }
 
+fn lookup_f32_matching<F: Fn(f32) -> bool + Copy>(
+    layers: &[&[Node]],
+    key: &str,
+    pred: F,
+) -> Option<f32> {
+    layers
+        .iter()
+        .find_map(|nodes| find_number_matching(nodes, key, pred))
+}
+
 fn find_number(nodes: &[Node], key: &str) -> Option<f32> {
+    find_number_matching(nodes, key, |_| true)
+}
+
+fn find_number_matching<F: Fn(f32) -> bool + Copy>(
+    nodes: &[Node],
+    key: &str,
+    pred: F,
+) -> Option<f32> {
     nodes
         .windows(2)
         .find_map(|pair| match pair {
-            [Node::Atom(k), Node::Atom(v)] if k == key => v.parse().ok(),
+            [Node::Atom(k), Node::Atom(v)] if k == key => v.parse().ok().filter(|&n| pred(n)),
             _ => None,
         })
         .or_else(|| {
             nodes.iter().find_map(|n| match n {
-                Node::List(children) => find_number(children, key),
+                Node::List(children) => find_number_matching(children, key, pred),
                 _ => None,
             })
         })

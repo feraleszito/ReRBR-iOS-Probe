@@ -53,6 +53,8 @@ pub enum Command {
     ReplayExit,
     NextStagePage,
     PrevStagePage,
+    NextGaragePage,
+    PrevGaragePage,
     Calibrate,
     ResetCalibration,
     SensDown,
@@ -205,6 +207,7 @@ pub struct Menu {
     stack: Vec<Page>,
     pub inspected_vehicle: usize,
     pub inspected_stage: usize,
+    pub garage_page: usize,
     pub stage_page: usize,
 }
 impl Menu {
@@ -311,20 +314,29 @@ impl Menu {
                 Row::action("VOLVER", Command::Back),
             ],
             Page::Garage => {
-                let mut rows: Vec<Row> = ctx
-                    .content
-                    .vehicles
+                const PER_PAGE: usize = 9;
+                let total_vehicles = ctx.content.vehicles.len();
+                let total_pages = total_vehicles.div_ceil(PER_PAGE);
+                let page_idx = self.garage_page.min(total_pages.saturating_sub(1));
+                let start = page_idx * PER_PAGE;
+                let end = (start + PER_PAGE).min(total_vehicles);
+
+                let mut rows: Vec<Row> = ctx.content.vehicles[start..end]
                     .iter()
                     .enumerate()
-                    .map(|(index, entry)| {
-                        let exp_tag = if entry.descriptor.is_experimental() {
-                            " [EXPERIMENTAL]"
-                        } else {
-                            ""
-                        };
+                    .map(|(offset, entry)| {
+                        let index = start + offset;
+                        let class_tag = entry.classification.badge();
+                        let cat_tag = entry
+                            .descriptor
+                            .category
+                            .as_deref()
+                            .filter(|c| *c != "RBR Original")
+                            .map(|c| format!(" · {c}"))
+                            .unwrap_or_default();
                         Row::action(
                             format!(
-                                "{}{exp_tag} - {}",
+                                "{} [{class_tag}{cat_tag}] - {}",
                                 entry.descriptor.name,
                                 entry.state.label()
                             ),
@@ -332,6 +344,13 @@ impl Menu {
                         )
                     })
                     .collect();
+                if total_pages > 1 {
+                    rows.push(Row::action(
+                        format!("SIGUIENTE PÁGINA ({}/{})", page_idx + 1, total_pages),
+                        Command::NextGaragePage,
+                    ));
+                    rows.push(Row::action("PÁGINA ANTERIOR", Command::PrevGaragePage));
+                }
                 rows.push(Row::action("VOLVER", Command::Back));
                 rows
             }
@@ -347,18 +366,28 @@ impl Menu {
                 };
                 let mut rows = Vec::new();
                 if is_ngp_car {
+                    let class_text = entry.map(|e| e.classification.badge()).unwrap_or("RSF NGP");
                     rows.push(Row::info(
-                        "PERFIL",
+                        "CLASIFICACIÓN",
                         if ctx.ngp_experimental {
-                            "NGP EXPERIMENTAL ACTIVADO (NO CERTIFICADO)"
+                            format!("{class_text} — BACKEND NGP 7.4 ACTIVO")
                         } else {
-                            "NGP 7.5 EXPERIMENTAL (BLOQUEADO EN MODO ESTABLE)"
+                            format!("{class_text} — ACTIVA MODO NGP PARA CONDUCIR")
                         },
                     ));
-                } else if inspected.is_experimental() {
-                    rows.push(Row::info("PERFIL", "MODO EXPERIMENTAL (SLOT RBR ORIGINAL)"));
                 } else if inspected.is_validated_reference() {
-                    rows.push(Row::info("PERFIL", "VEHÍCULO DE REFERENCIA VALIDADO"));
+                    rows.push(Row::info(
+                        "CLASIFICACIÓN",
+                        "ORIGINAL RBR VALIDADO (REFERENCIA)",
+                    ));
+                } else {
+                    rows.push(Row::info(
+                        "CLASIFICACIÓN",
+                        "ORIGINAL RBR FUNCIONAL (BACKEND 1.02)",
+                    ));
+                }
+                if let Some(cat) = inspected.category.as_deref() {
+                    rows.push(Row::info("CATEGORÍA", cat));
                 }
                 if state == EntryState::Selected {
                     rows.push(Row::info("SELECCIÓN", "SELECCIONADO"));
@@ -366,12 +395,12 @@ impl Menu {
                     rows.push(Row {
                         label: if supported {
                             if is_ngp_car {
-                                "SELECCIONAR FOCUS (NGP EXPERIMENTAL)".into()
+                                "SELECCIONAR RSF (NGP EXPERIMENTAL)".into()
                             } else {
                                 "SELECCIONAR COCHE".into()
                             }
                         } else {
-                            "NO DISPONIBLE / REQUIERE NGP (BLOQUEADO)".into()
+                            "NO DISPONIBLE / ACTIVA MODO NGP".into()
                         },
                         kind: RowKind::Action {
                             command: Command::SelectVehicle(self.inspected_vehicle),
@@ -385,7 +414,7 @@ impl Menu {
                         Command::ToggleExperimentalMode,
                     ));
                     rows.push(Row::action(
-                        "DIAGNÓSTICO FOCUS NGP (9 ETAPAS)",
+                        "DIAGNÓSTICO NGP (9 ETAPAS)",
                         Command::RunFocusDiagnostics,
                     ));
                 }
@@ -406,6 +435,12 @@ impl Menu {
                         "TRANSMISIÓN",
                         format!("MANUAL {} VEL.", inspected.forward_gears),
                     ));
+                }
+                if let Some(bank) = entry.and_then(|e| e.fmod_bank.as_deref()) {
+                    rows.push(Row::info("AUDIO FMOD", bank));
+                }
+                if let Some(note) = entry.and_then(|e| e.notes.first()) {
+                    rows.push(Row::info("ESTADO", note.clone()));
                 }
                 if let Some(missing) = entry.and_then(|e| e.files.missing_label()) {
                     rows.push(Row::info("FILES", missing));
