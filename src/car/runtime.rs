@@ -339,7 +339,13 @@ impl Runtime {
     ) {
         if self.hud.is_none() && !self.hud_failed {
             match Hud::new(device, queue, format) {
-                Ok(h) => self.hud = Some(h),
+                Ok(mut h) => {
+                    #[cfg(feature = "physics-drive")]
+                    if let Some(atlas) = self.driving.pacenote_atlas.as_ref() {
+                        h.upload_rgba_atlas(device, queue, atlas.width, atlas.height, &atlas.rgba8);
+                    }
+                    self.hud = Some(h);
+                }
                 Err(e) => {
                     self.hud_failed = true;
                     self.fail();

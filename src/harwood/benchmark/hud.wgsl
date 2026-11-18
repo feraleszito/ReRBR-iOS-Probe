@@ -15,3 +15,6 @@ struct Out {
 @fragment fn fs_main(in: Out) -> @location(0) vec4<f32> {
     return vec4<f32>(in.color.rgb, in.color.a * textureSample(font, nearest, in.uv).r);
 }
+@fragment fn fs_rgba(in: Out) -> @location(0) vec4<f32> {
+    return textureSample(font, nearest, in.uv) * in.color;
+}

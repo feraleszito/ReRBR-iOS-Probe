@@ -30,6 +30,7 @@ pub enum Page {
     Replay,
     NgpExperimental,
     GamepadSettings,
+    PacenoteHudSettings,
 }
 
 pub(crate) fn format_stage_time(seconds: f64) -> String {
@@ -124,6 +125,17 @@ pub enum Command {
     GpBindRecover,
     GpSave,
     GpReset,
+    PnToggle,
+    PnScaleDown,
+    PnScaleUp,
+    PnPosXDown,
+    PnPosXUp,
+    PnPosYDown,
+    PnPosYUp,
+    PnAnticipationDown,
+    PnAnticipationUp,
+    PnSave,
+    PnReset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,6 +232,8 @@ pub struct Context<'a> {
     pub gamepad_connected: bool,
     pub gamepad_name: Option<&'a str>,
     pub gamepad_settings: super::gamepad::GamepadSettings,
+    pub pacenote_hud: super::pacenote_icons::PacenoteHudSettings,
+    pub pacenote_atlas_status: Option<&'a str>,
 }
 
 #[derive(Debug, Default)]
@@ -343,6 +357,7 @@ impl Menu {
             Page::Replay => "REPETICIÓN",
             Page::NgpExperimental => "NGP EXPERIMENTAL",
             Page::GamepadSettings => "MANDO / GAMEPAD",
+            Page::PacenoteHudSettings => "NOTAS VISUALES",
         }
     }
     pub fn rows(&self, ctx: &Context) -> Vec<Row> {
@@ -743,8 +758,53 @@ impl Menu {
                     },
                 },
                 Row::action("EDITAR CONTROLES", Command::Open(Page::ControlsEditor)),
+                Row::action(
+                    "NOTAS VISUALES COPILOTO",
+                    Command::Open(Page::PacenoteHudSettings),
+                ),
                 Row::action("VOLVER", Command::Back),
             ],
+            Page::PacenoteHudSettings => {
+                let pn = &ctx.pacenote_hud;
+                vec![
+                    Row::info(
+                        "ICONOS ORIGINALES",
+                        ctx.pacenote_atlas_status
+                            .unwrap_or("LISTO (PC_Generic.bnk)"),
+                    ),
+                    Row::action(
+                        format!("ICONOS EN PANTALLA: {}", on_off(pn.enabled)),
+                        Command::PnToggle,
+                    ),
+                    Row::stepper(
+                        "TAMAÑO ICONOS",
+                        Command::PnScaleDown,
+                        Command::PnScaleUp,
+                        format!("{:.0}%", pn.scale * 100.0),
+                    ),
+                    Row::stepper(
+                        "POSICIÓN X",
+                        Command::PnPosXDown,
+                        Command::PnPosXUp,
+                        format!("{:.0}%", pn.pos_x * 100.0),
+                    ),
+                    Row::stepper(
+                        "POSICIÓN Y",
+                        Command::PnPosYDown,
+                        Command::PnPosYUp,
+                        format!("{:.0}%", pn.pos_y * 100.0),
+                    ),
+                    Row::stepper(
+                        "DURACIÓN VISOR",
+                        Command::PnAnticipationDown,
+                        Command::PnAnticipationUp,
+                        format!("{:.1}S", pn.anticipation_s),
+                    ),
+                    Row::action("GUARDAR NOTAS VISUALES", Command::PnSave),
+                    Row::action("RESTABLECER NOTAS VISUALES", Command::PnReset),
+                    Row::action("VOLVER", Command::Back),
+                ]
+            }
             Page::CameraEditor => vec![
                 Row::action(format!("CÁMARA: {}", ctx.camera), Command::CameraNext),
                 Row::stepper(
@@ -1133,6 +1193,10 @@ impl Menu {
             Page::GamepadSettings => vec![
                 "CONDUCCIÓN: STICK IZQ DIRECCIÓN / RT ACELERAR / LT FRENO".into(),
                 "MENÚS: D-PAD O STICK NAVEGAR / A CONFIRMAR / B VOLVER".into(),
+            ],
+            Page::PacenoteHudSettings => vec![
+                "ICONOS ORIGINALES DE RBR CARGADOS DE GENERIC/PC_GENERIC_*.BNK".into(),
+                "AJUSTA TAMAÑO, POSICIÓN Y DURACIÓN EN PANTALLA".into(),
             ],
         }
     }
@@ -1755,6 +1819,8 @@ mod tests {
             gamepad_connected: false,
             gamepad_name: None,
             gamepad_settings: crate::driving::gamepad::GamepadSettings::default(),
+            pacenote_hud: crate::driving::pacenote_icons::PacenoteHudSettings::default(),
+            pacenote_atlas_status: None,
         }
     }
 
@@ -1850,7 +1916,7 @@ mod tests {
             ..Menu::default()
         };
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 13);
+        assert_eq!(rows.len(), 14);
         for (row_idx, value, expected_down, expected_up) in [
             (0usize, "2.00", Command::SensDown, Command::SensUp),
             (3usize, "80%", Command::VolumeDown, Command::VolumeUp),

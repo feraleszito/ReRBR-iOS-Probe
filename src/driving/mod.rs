@@ -10,6 +10,7 @@ pub(crate) mod loading;
 pub mod menu;
 pub mod ngp_experimental;
 pub mod ngp_proto;
+pub mod pacenote_icons;
 #[cfg(test)]
 mod private_tests;
 mod race;
@@ -101,6 +102,9 @@ pub struct Runtime {
     gamepad_frame: gamepad::GamepadDrivingFrame,
     gamepad_polled_this_frame: bool,
     recover_car_frames: u32,
+    pub pacenote_atlas: Option<pacenote_icons::PacenoteIconAtlas>,
+    pacenote_atlas_status: String,
+    pub pacenote_hud: pacenote_icons::PacenoteHudSettings,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -129,6 +133,19 @@ impl Runtime {
         if let Some(doc) = std::env::var_os("RERBR_PROBE_DOCUMENTS") {
             audio::init_menu_music(std::path::Path::new(&doc));
         }
+        let (pacenote_atlas, pacenote_atlas_status) =
+            match std::env::var_os("RERBR_PROBE_DOCUMENTS") {
+                Some(doc) => match pacenote_icons::PacenoteIconAtlas::load_from_documents(
+                    std::path::Path::new(&doc),
+                ) {
+                    Ok(atlas) => {
+                        let msg = format!("{} OK", atlas.bank_name);
+                        (Some(atlas), msg)
+                    }
+                    Err(err) => (None, err),
+                },
+                None => (None, "DOCUMENTS NO DISPONIBLE".into()),
+            };
         audio::set_menu_music_active(true);
         Self {
             #[cfg(feature = "physics-stage")]
@@ -186,6 +203,9 @@ impl Runtime {
             gamepad_frame: gamepad::GamepadDrivingFrame::default(),
             gamepad_polled_this_frame: false,
             recover_car_frames: 0,
+            pacenote_atlas,
+            pacenote_atlas_status,
+            pacenote_hud: pacenote_icons::PacenoteHudSettings::load(),
         }
     }
     pub fn process_gamepad_snapshot(&mut self, snap: &gamepad::GamepadSnapshot, now_secs: f64) {
@@ -1017,6 +1037,44 @@ impl Runtime {
                 self.gamepad.settings.save();
                 self.message = Some("MANDO RESTABLECIDO".into());
             }
+            PnToggle => {
+                self.pacenote_hud.enabled = !self.pacenote_hud.enabled;
+            }
+            PnScaleDown => {
+                self.pacenote_hud.scale = (self.pacenote_hud.scale - 0.1).max(0.5);
+            }
+            PnScaleUp => {
+                self.pacenote_hud.scale = (self.pacenote_hud.scale + 0.1).min(2.0);
+            }
+            PnPosXDown => {
+                self.pacenote_hud.pos_x = (self.pacenote_hud.pos_x - 0.05).max(0.10);
+            }
+            PnPosXUp => {
+                self.pacenote_hud.pos_x = (self.pacenote_hud.pos_x + 0.05).min(0.90);
+            }
+            PnPosYDown => {
+                self.pacenote_hud.pos_y = (self.pacenote_hud.pos_y - 0.04).max(0.06);
+            }
+            PnPosYUp => {
+                self.pacenote_hud.pos_y = (self.pacenote_hud.pos_y + 0.04).min(0.55);
+            }
+            PnAnticipationDown => {
+                self.pacenote_hud.anticipation_s =
+                    (self.pacenote_hud.anticipation_s - 0.5).max(1.5);
+            }
+            PnAnticipationUp => {
+                self.pacenote_hud.anticipation_s =
+                    (self.pacenote_hud.anticipation_s + 0.5).min(8.0);
+            }
+            PnSave => {
+                self.pacenote_hud.save();
+                self.message = Some("AJUSTES DE NOTAS GUARDADOS".into());
+            }
+            PnReset => {
+                self.pacenote_hud = pacenote_icons::PacenoteHudSettings::default();
+                self.pacenote_hud.save();
+                self.message = Some("NOTAS VISUALES RESTABLECIDAS".into());
+            }
         }
     }
     pub fn touch(&mut self, t: Touch, size: (u32, u32)) {
@@ -1539,6 +1597,8 @@ impl Runtime {
                 .connected
                 .then_some(self.gamepad.controller_name.as_str()),
             gamepad_settings: self.gamepad.settings.clone(),
+            pacenote_hud: self.pacenote_hud.clone(),
+            pacenote_atlas_status: Some(self.pacenote_atlas_status.as_str()),
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
@@ -1611,7 +1671,108 @@ impl Runtime {
             self.draw_telemetry(&mut canvas, &layout, &state);
         }
         self.draw_banners(&mut canvas, &layout, &state);
-        hud.draw_bytes(queue, encoder, target, &canvas.finish());
+        let mut sprite_canvas = Canvas::new(size);
+        self.draw_pacenote_visual_hud(&mut canvas, &mut sprite_canvas);
+        hud.draw_bytes_and_sprites(
+            queue,
+            encoder,
+            target,
+            &canvas.finish(),
+            &sprite_canvas.finish(),
+        );
+    }
+    fn draw_pacenote_visual_hud(&self, canvas: &mut Canvas, sprite_canvas: &mut Canvas) {
+        if !self.pacenote_hud.enabled || self.race.phase != race::Phase::Driving {
+            return;
+        }
+        let Some(visual) = self
+            .codriver
+            .as_ref()
+            .and_then(|c| c.current_visual(Instant::now(), self.pacenote_hud.anticipation_s))
+        else {
+            return;
+        };
+        let icon_sz = 38.0 * self.pacenote_hud.scale;
+        let ch = canvas.height();
+        let cx = self.pacenote_hud.pos_x * 640.0;
+        let cy = self.pacenote_hud.pos_y * ch;
+        let pad = 6.0;
+        let (main_ref, mod_ref) = pacenote_icons::sprite_indices_for_callout(
+            visual.tag,
+            visual.slot_word_id,
+            visual.flag_word_id,
+        );
+        let box_w = icon_sz
+            + if mod_ref.is_some() {
+                icon_sz * 0.58
+            } else {
+                0.0
+            }
+            + pad * 2.0;
+        let box_h = icon_sz + 18.0 + pad * 2.0;
+        let bx = (cx - box_w * 0.5).clamp(8.0, 632.0 - box_w);
+        let by = (cy - box_h * 0.5).clamp(8.0, ch - box_h - 8.0);
+        canvas.rect(bx, by, box_w, box_h, [10, 14, 22, 200]);
+
+        if let Some(atlas) = &self.pacenote_atlas {
+            let mut drew_sprite = false;
+            if let Some(sref) = main_ref.and_then(|r| {
+                atlas.sprite_uv(r.sprite).map(|mut q| {
+                    if r.mirror_x {
+                        q.uv.swap(0, 2);
+                    }
+                    q
+                })
+            }) {
+                sprite_canvas.quad(
+                    bx + pad,
+                    by + pad,
+                    icon_sz,
+                    icon_sz,
+                    sref.uv,
+                    [255, 255, 255, 255],
+                );
+                drew_sprite = true;
+            }
+            if let Some(mref) = mod_ref.and_then(|r| {
+                atlas.sprite_uv(r.sprite).map(|mut q| {
+                    if r.mirror_x {
+                        q.uv.swap(0, 2);
+                    }
+                    q
+                })
+            }) {
+                sprite_canvas.quad(
+                    bx + pad + icon_sz + 3.0,
+                    by + pad + icon_sz * 0.2,
+                    icon_sz * 0.52,
+                    icon_sz * 0.52,
+                    mref.uv,
+                    [255, 255, 255, 255],
+                );
+            }
+            if !drew_sprite {
+                canvas.text(
+                    bx + pad,
+                    by + pad + icon_sz * 0.35,
+                    &visual.label,
+                    0.56,
+                    TEXT,
+                );
+            }
+        } else {
+            // Honest indicator when PC_Generic_*.bnk is absent: never draw fake corner arrows.
+            canvas.text(bx + pad, by + pad + 4.0, "SIN BNK", 0.45, WARN);
+        }
+        ui::text_clipped(
+            canvas,
+            bx + pad,
+            by + pad + icon_sz + 3.0,
+            box_w - pad * 2.0,
+            &visual.label,
+            0.55,
+            TEXT,
+        );
     }
     fn draw_replay_overlay(&self, canvas: &mut Canvas, player: &replay::ReplayPlayer) {
         let layout = layout::ReplayLayout::for_size(self.drawable_size);

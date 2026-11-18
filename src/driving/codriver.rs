@@ -143,6 +143,15 @@ impl ClipBank {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ActiveVisualCallout {
+    pub tag: u32,
+    pub slot_word_id: Option<u32>,
+    pub flag_word_id: Option<u32>,
+    pub label: String,
+    pub at: Instant,
+}
+
 /// Active per-stage RBR co-driver runtime.
 pub struct CoDriverSession {
     markers: StageMarkers,
@@ -151,6 +160,7 @@ pub struct CoDriverSession {
     bank: ClipBank,
     pub status: VoiceBankStatus,
     pub last_callout: Option<(String, Instant)>,
+    pub last_visual: Option<ActiveVisualCallout>,
 }
 
 impl CoDriverSession {
@@ -176,6 +186,7 @@ impl CoDriverSession {
             bank,
             status,
             last_callout: None,
+            last_visual: None,
         }
     }
 
@@ -194,6 +205,7 @@ impl CoDriverSession {
     pub fn reset(&mut self) {
         self.ticker = MarkerTicker::load(&self.markers);
         self.last_callout = None;
+        self.last_visual = None;
         audio::clear_speech_queue();
     }
 
@@ -224,6 +236,13 @@ impl CoDriverSession {
                 continue;
             };
             if let Some(label) = self.dispatch_callout(&callout) {
+                self.last_visual = Some(ActiveVisualCallout {
+                    tag: callout.key.tag,
+                    slot_word_id: u32::try_from(callout.slot_word_id).ok(),
+                    flag_word_id: u32::try_from(callout.flag_word_id).ok(),
+                    label: label.clone(),
+                    at: Instant::now(),
+                });
                 spoken_labels.push(label);
             }
         }
@@ -236,6 +255,15 @@ impl CoDriverSession {
     pub fn current_text(&self, now: Instant) -> Option<&str> {
         let (text, at) = self.last_callout.as_ref()?;
         (now.saturating_duration_since(*at).as_secs_f32() <= 3.5).then_some(text.as_str())
+    }
+
+    pub fn current_visual(
+        &self,
+        now: Instant,
+        anticipation_s: f32,
+    ) -> Option<&ActiveVisualCallout> {
+        let v = self.last_visual.as_ref()?;
+        (now.saturating_duration_since(v.at).as_secs_f32() <= anticipation_s.max(0.5)).then_some(v)
     }
 
     #[cfg(test)]

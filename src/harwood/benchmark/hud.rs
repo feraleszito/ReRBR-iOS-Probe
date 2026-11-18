@@ -42,7 +42,7 @@ impl Canvas {
     pub fn size(&self) -> (u32, u32) {
         self.size
     }
-    fn quad(&mut self, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], color: [u8; 4]) {
+    pub fn quad(&mut self, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], color: [u8; 4]) {
         for (dx, dy) in [
             (0.0, 0.0),
             (1.0, 0.0),
@@ -180,8 +180,11 @@ pub const MAX_CANVAS_VERTICES: usize = MAX_VERTICES;
 
 pub struct Hud {
     pipeline: wgpu::RenderPipeline,
+    rgba_pipeline: wgpu::RenderPipeline,
     group: wgpu::BindGroup,
+    sprite_group: Option<wgpu::BindGroup>,
     vertices: wgpu::Buffer,
+    sprite_vertices: wgpu::Buffer,
 }
 impl Hud {
     pub fn new(
@@ -215,6 +218,35 @@ impl Hud {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let rgba_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("HUD RGBA sprite overlay"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: 20,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &ATTRS,
+                })],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_rgba"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
@@ -285,15 +317,93 @@ impl Hud {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let sprite_vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bounded HUD sprite vertices"),
+            size: 16384,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         if let Some(error) = futures_executor::block_on(scope.pop()) {
             return Err(format!("HUD validation: {error}"));
         }
         Ok(Self {
             pipeline,
+            rgba_pipeline,
             group,
+            sprite_group: None,
             vertices,
+            sprite_vertices,
         })
     }
+
+    #[cfg(feature = "physics-drive")]
+    pub fn upload_rgba_atlas(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        rgba8: &[u8],
+    ) {
+        if width == 0 || height == 0 || rgba8.len() != (width * height * 4) as usize {
+            return;
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("RBR PC_Generic pacenote sprite sheet"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba8,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&Default::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("HUD sprite linear"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        self.sprite_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("HUD RGBA sprites"),
+            layout: &self.rgba_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        }));
+    }
+
     pub fn draw(
         &self,
         queue: &wgpu::Queue,
@@ -312,8 +422,23 @@ impl Hud {
         target: &wgpu::TextureView,
         bytes: &[u8],
     ) -> usize {
+        self.draw_bytes_and_sprites(queue, encoder, target, bytes, &[])
+    }
+    pub fn draw_bytes_and_sprites(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        bytes: &[u8],
+        sprite_bytes: &[u8],
+    ) -> usize {
         assert!(bytes.len() / 20 <= MAX_VERTICES);
         queue.write_buffer(&self.vertices, 0, bytes);
+        let draw_sprites =
+            !sprite_bytes.is_empty() && sprite_bytes.len() <= 16384 && self.sprite_group.is_some();
+        if draw_sprites {
+            queue.write_buffer(&self.sprite_vertices, 0, sprite_bytes);
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("benchmark HUD (included in timing)"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -331,7 +456,15 @@ impl Hud {
         pass.set_bind_group(0, &self.group, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..(bytes.len() / 20) as u32, 0..1);
-        bytes.len() / 20
+        if draw_sprites {
+            if let Some(group) = &self.sprite_group {
+                pass.set_pipeline(&self.rgba_pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.set_vertex_buffer(0, self.sprite_vertices.slice(..));
+                pass.draw(0..(sprite_bytes.len() / 20) as u32, 0..1);
+            }
+        }
+        (bytes.len() + sprite_bytes.len()) / 20
     }
 }
 
