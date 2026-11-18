@@ -31,6 +31,8 @@ pub enum Page {
     NgpExperimental,
     GamepadSettings,
     PacenoteHudSettings,
+    Championship,
+    RallySchool,
 }
 
 pub(crate) fn format_stage_time(seconds: f64) -> String {
@@ -136,6 +138,14 @@ pub enum Command {
     PnAnticipationUp,
     PnSave,
     PnReset,
+    ChampToggleActive,
+    ChampCycleSkill,
+    ChampNextRally,
+    ChampStartStage,
+    ChampReset,
+    SchoolPrevLesson,
+    SchoolNextLesson,
+    SchoolInspectLesson,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,6 +244,8 @@ pub struct Context<'a> {
     pub gamepad_settings: super::gamepad::GamepadSettings,
     pub pacenote_hud: super::pacenote_icons::PacenoteHudSettings,
     pub pacenote_atlas_status: Option<&'a str>,
+    pub championship: Option<&'a super::championship::ChampionshipCalendar>,
+    pub school: Option<&'a super::school::SchoolCatalog>,
 }
 
 #[derive(Debug, Default)]
@@ -358,6 +370,8 @@ impl Menu {
             Page::NgpExperimental => "NGP EXPERIMENTAL",
             Page::GamepadSettings => "MANDO / GAMEPAD",
             Page::PacenoteHudSettings => "NOTAS VISUALES",
+            Page::Championship => "CAMPEONATO RBR",
+            Page::RallySchool => "ESCUELA DE RALLY",
         }
     }
     pub fn rows(&self, ctx: &Context) -> Vec<Row> {
@@ -384,6 +398,8 @@ impl Menu {
                 Row::action("INICIAR RALLY", Command::StartRally),
                 Row::action("CONFIGURACIÓN", Command::Open(Page::Settings)),
                 Row::action("CONTROLES", Command::Open(Page::Controls)),
+                Row::action("CAMPEONATO RBR", Command::Open(Page::Championship)),
+                Row::action("ESCUELA DE RALLY", Command::Open(Page::RallySchool)),
                 Row::action("GESTOR DE CONTENIDO", Command::Open(Page::Content)),
                 Row::action("ACERCA DE", Command::Open(Page::About)),
             ],
@@ -805,6 +821,101 @@ impl Menu {
                     Row::action("VOLVER", Command::Back),
                 ]
             }
+            Page::Championship => {
+                let mut rows = Vec::new();
+                if let Some(cal) = ctx.championship {
+                    let rally_name = cal
+                        .rallies
+                        .get(cal.progress.rally_index)
+                        .map(|r| r.name.to_ascii_uppercase())
+                        .unwrap_or_else(|| "SIN SEASON.DAT".into());
+                    let stage_label = cal
+                        .current_stage_descriptor()
+                        .map(|s| format!("{} (MAP {})", s.name, s.original_map))
+                        .or_else(|| {
+                            cal.current_stage_info()
+                                .map(|i| format!("MAPA {} (NO EN CATÁLOGO)", i.map))
+                        })
+                        .unwrap_or_else(|| "NO DISPONIBLE".into());
+                    rows.push(Row::info("CALENDARIO", cal.status.clone()));
+                    rows.push(Row::action(
+                        format!("CAMPEONATO ACTIVO: {}", on_off(cal.progress.active)),
+                        Command::ChampToggleActive,
+                    ));
+                    rows.push(Row::action(
+                        format!("NIVEL: {}", cal.progress.skill.label()),
+                        Command::ChampCycleSkill,
+                    ));
+                    rows.push(Row::action(
+                        format!(
+                            "RALLY ACTUAL ({}/{}): {rally_name}",
+                            cal.progress.rally_index + 1,
+                            cal.rallies.len().max(1)
+                        ),
+                        Command::ChampNextRally,
+                    ));
+                    rows.push(Row::info(
+                        format!("TRAMO {}", cal.progress.stage_index + 1),
+                        stage_label,
+                    ));
+                    rows.push(Row::info(
+                        "TIEMPO ACUMULADO",
+                        format!(
+                            "{} ({} COMPLETADOS)",
+                            format_stage_time(cal.progress.total_time_seconds()),
+                            cal.progress.completed_stages
+                        ),
+                    ));
+                    rows.push(Row::action(
+                        "INICIAR SIGUIENTE TRAMO",
+                        Command::ChampStartStage,
+                    ));
+                    rows.push(Row::action("REINICIAR CAMPEONATO", Command::ChampReset));
+                } else {
+                    rows.push(Row::info("ESTADO", "CARGANDO SEASON.DAT"));
+                }
+                rows.push(Row::action("VOLVER", Command::Back));
+                rows
+            }
+            Page::RallySchool => {
+                let mut rows = Vec::new();
+                if let Some(sch) = ctx.school {
+                    rows.push(Row::info("ESCUELA", sch.status.clone()));
+                    if let Some(entry) = sch.entries.get(sch.selected) {
+                        rows.push(Row::info(
+                            format!("LECCIÓN {}/17", sch.selected + 1),
+                            format!("{} (MAP {})", entry.key, entry.map),
+                        ));
+                        rows.push(Row::info("SETUP", entry.setup_file));
+                        rows.push(Row::info(
+                            "NOTA / ARCHIVOS",
+                            format!(
+                                "GRADO {}/4 · {}",
+                                entry.grade,
+                                if entry.assets_present {
+                                    "ARCHIVOS OK"
+                                } else {
+                                    "FALTAN MAPS/SCHOOL"
+                                }
+                            ),
+                        ));
+                    }
+                    rows.push(Row::stepper(
+                        "SELECCIONAR LECCIÓN",
+                        Command::SchoolPrevLesson,
+                        Command::SchoolNextLesson,
+                        format!("{}/17", sch.selected + 1),
+                    ));
+                    rows.push(Row::action(
+                        "COMPROBAR LECCIÓN EN DOCUMENTS",
+                        Command::SchoolInspectLesson,
+                    ));
+                } else {
+                    rows.push(Row::info("ESTADO", "SIN CATÁLOGO"));
+                }
+                rows.push(Row::action("VOLVER", Command::Back));
+                rows
+            }
             Page::CameraEditor => vec![
                 Row::action(format!("CÁMARA: {}", ctx.camera), Command::CameraNext),
                 Row::stepper(
@@ -1197,6 +1308,14 @@ impl Menu {
             Page::PacenoteHudSettings => vec![
                 "ICONOS ORIGINALES DE RBR CARGADOS DE GENERIC/PC_GENERIC_*.BNK".into(),
                 "AJUSTA TAMAÑO, POSICIÓN Y DURACIÓN EN PANTALLA".into(),
+            ],
+            Page::Championship => vec![
+                "CAMPEONATO ORIGINAL RBR (SEASON.DAT · 6 RALLIES)".into(),
+                "TIEMPOS, PENALIZACIONES Y PROGRESO GUARDADOS".into(),
+            ],
+            Page::RallySchool => vec![
+                "17 LECCIONES ORIGINALES (MAPS 73..89 / PHYSICS/SCHOOL)".into(),
+                "SIN VOCES SINTÉTICAS: REQUIERE ARCHIVOS PRIVADOS".into(),
             ],
         }
     }
@@ -1821,6 +1940,8 @@ mod tests {
             gamepad_settings: crate::driving::gamepad::GamepadSettings::default(),
             pacenote_hud: crate::driving::pacenote_icons::PacenoteHudSettings::default(),
             pacenote_atlas_status: None,
+            championship: None,
+            school: None,
         }
     }
 
@@ -1831,7 +1952,7 @@ mod tests {
         let ctx = context(&selection, &content);
         let mut menu = Menu::default();
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.len(), 9);
         assert!(rows[0].label.contains("SELECCIONAR COCHE"));
         assert!(rows[1].label.contains("SELECCIONAR TRAMO"));
         assert_eq!(rows[2].label, "INICIAR RALLY");

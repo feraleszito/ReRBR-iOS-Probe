@@ -1,6 +1,7 @@
 //! Original physics-owned driving presentation, menus and session controls.
 pub mod audio;
 pub mod cameras;
+pub mod championship;
 pub mod codriver;
 pub mod content_manager;
 pub mod controls;
@@ -17,6 +18,7 @@ mod private_tests;
 mod race;
 pub mod replay;
 pub mod rsf_catalog;
+pub mod school;
 mod ui;
 mod worker;
 use crate::{
@@ -106,6 +108,8 @@ pub struct Runtime {
     pub pacenote_atlas: Option<pacenote_icons::PacenoteIconAtlas>,
     pacenote_atlas_status: String,
     pub pacenote_hud: pacenote_icons::PacenoteHudSettings,
+    pub championship: championship::ChampionshipCalendar,
+    pub school: school::SchoolCatalog,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -207,6 +211,8 @@ impl Runtime {
             pacenote_atlas,
             pacenote_atlas_status,
             pacenote_hud: pacenote_icons::PacenoteHudSettings::load(),
+            championship: championship::ChampionshipCalendar::load_default(),
+            school: school::SchoolCatalog::load_default(),
         }
     }
     pub fn process_gamepad_snapshot(&mut self, snap: &gamepad::GamepadSnapshot, now_secs: f64) {
@@ -1076,6 +1082,75 @@ impl Runtime {
                 self.pacenote_hud.save();
                 self.message = Some("NOTAS VISUALES RESTABLECIDAS".into());
             }
+            ChampToggleActive => {
+                self.championship.progress.active = !self.championship.progress.active;
+                self.championship.progress.save();
+            }
+            ChampCycleSkill => {
+                self.championship.progress.skill = self.championship.progress.skill.next();
+                self.championship.progress.stage_index = 0;
+                self.championship.progress.save();
+            }
+            ChampNextRally => {
+                let len = self.championship.rallies.len();
+                if len > 0 {
+                    self.championship.progress.rally_index =
+                        (self.championship.progress.rally_index + 1) % len;
+                    self.championship.progress.stage_index = 0;
+                    self.championship.progress.save();
+                }
+            }
+            ChampStartStage => {
+                if let Some(stage_desc) = self.championship.current_stage_descriptor() {
+                    self.championship.progress.active = true;
+                    self.championship.progress.save();
+                    if let Some(entry) = self.content.stage(&stage_desc.id) {
+                        if let Some(missing) = entry.files.missing_label() {
+                            self.message = Some(missing);
+                            return;
+                        }
+                    }
+                    let next_sel = rerbr_content::Selection {
+                        vehicle: self.selection.vehicle.clone(),
+                        stage: stage_desc,
+                    };
+                    match self.configure_selection(next_sel) {
+                        Ok(()) => self.apply_command(StartRally),
+                        Err(e) => self.message = Some(format!("CAMPEONATO BLOQUEADO: {e}")),
+                    }
+                } else {
+                    self.message = Some("TRAMO DEL CAMPEONATO NO INSTALADO EN DOCUMENTS".into());
+                }
+            }
+            ChampReset => {
+                self.championship.progress = championship::ChampionshipProgress::default();
+                self.championship.progress.save();
+                self.message = Some("CAMPEONATO REINICIADO".into());
+            }
+            SchoolPrevLesson => {
+                let len = self.school.entries.len();
+                if len > 0 {
+                    self.school.selected = (self.school.selected + len - 1) % len;
+                }
+            }
+            SchoolNextLesson => {
+                let len = self.school.entries.len();
+                if len > 0 {
+                    self.school.selected = (self.school.selected + 1) % len;
+                }
+            }
+            SchoolInspectLesson => {
+                if let Some(entry) = self.school.entries.get(self.school.selected) {
+                    self.message = Some(if entry.assets_present {
+                        format!("{} (MAP {}) DISPONIBLE", entry.key, entry.map)
+                    } else {
+                        format!(
+                            "{}: FALTA Documents/RBR/Maps/track-{}_*.col",
+                            entry.key, entry.map
+                        )
+                    });
+                }
+            }
         }
     }
     pub fn touch(&mut self, t: Touch, size: (u32, u32)) {
@@ -1181,6 +1256,15 @@ impl Runtime {
     }
     fn finalize_stage_completion(&mut self) {
         self.race.complete_finish();
+        if let Some(res) = self.race.result() {
+            if self.championship.progress.active {
+                self.championship.record_stage_finish(
+                    res.driving_seconds,
+                    res.penalty_seconds,
+                    res.false_start,
+                );
+            }
+        }
         self.saved_replay = self.replay_recorder.finish();
         self.controls.clear();
         self.menu.show(menu::Page::StageComplete);
@@ -1600,6 +1684,8 @@ impl Runtime {
             gamepad_settings: self.gamepad.settings.clone(),
             pacenote_hud: self.pacenote_hud.clone(),
             pacenote_atlas_status: Some(self.pacenote_atlas_status.as_str()),
+            championship: Some(&self.championship),
+            school: Some(&self.school),
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
