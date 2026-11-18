@@ -205,8 +205,8 @@ impl PacenoteIconAtlas {
                     .cloned()
                     .ok_or_else(|| format!("{bnk_rel}: bad page {page_index}"))?;
                 let dds_rel = format!("Generic/{page_name}");
-                let dds_path =
-                    cars::resolve(rbr_root, &dds_rel).ok_or_else(|| format!("missing {dds_rel}"))?;
+                let dds_path = cars::resolve(rbr_root, &dds_rel)
+                    .ok_or_else(|| format!("missing {dds_rel}"))?;
                 let dds_bytes = std::fs::read(&dds_path).map_err(|e| format!("{dds_rel}: {e}"))?;
                 let parsed = dds::parse(&dds_bytes).map_err(|e| format!("{dds_rel}: {e}"))?;
                 let pixels = decode_dds_top_rgba8(&parsed)?;
@@ -223,7 +223,7 @@ impl PacenoteIconAtlas {
             }
 
             let mut rgba8 = vec![0u8; total_w as usize * total_h as usize * 4];
-            for (slice, (pw, ph, pixels)) in slices.iter().zip(decoded_pages.into_iter()) {
+            for (slice, (pw, ph, pixels)) in slices.iter().zip(decoded_pages) {
                 for row in 0..ph as usize {
                     let src_start = row * pw as usize * 4;
                     let src_end = src_start + pw as usize * 4;
@@ -262,8 +262,10 @@ impl PacenoteIconAtlas {
         }
         let u0 = rect[0] * (slice.width as f32 / self.width.max(1) as f32);
         let u1 = rect[2] * (slice.width as f32 / self.width.max(1) as f32);
-        let v0 = (slice.y_offset as f32 + rect[1] * slice.height as f32) / self.height.max(1) as f32;
-        let v1 = (slice.y_offset as f32 + rect[3] * slice.height as f32) / self.height.max(1) as f32;
+        let v0 =
+            (slice.y_offset as f32 + rect[1] * slice.height as f32) / self.height.max(1) as f32;
+        let v1 =
+            (slice.y_offset as f32 + rect[3] * slice.height as f32) / self.height.max(1) as f32;
         let px_w = uw * slice.width as f32;
         let px_h = vh * slice.height as f32;
         let aspect = px_w / px_h.max(1.0);
@@ -328,20 +330,20 @@ pub fn sprite_indices_for_callout(
         19 => Some(S::direct(0x4d4)),      // BUMP / DIP
         20 | 32 => Some(S::direct(0x4df)), // CAUTION (!)
         _ => slot_word_id.and_then(|id| match id {
-            0x1d => Some(S::mirrored(0x508)), // Hairpin Left
-            0x1e => Some(S::direct(0x508)),   // Hairpin Right
-            0x21 => Some(S::mirrored(0x506)), // K Left
-            0x22 => Some(S::direct(0x506)),   // K Right
-            0x25 => Some(S::mirrored(0x505)), // Med Left
-            0x26 => Some(S::direct(0x505)),   // Med Right
-            0x19 => Some(S::mirrored(0x504)), // Fast Left
-            0x1a => Some(S::direct(0x504)),   // Fast Right
-            0x17 => Some(S::mirrored(0x503)), // Easy Left
-            0x18 => Some(S::direct(0x503)),   // Easy Right
+            0x1d => Some(S::mirrored(0x508)),      // Hairpin Left
+            0x1e => Some(S::direct(0x508)),        // Hairpin Right
+            0x21 => Some(S::mirrored(0x506)),      // K Left
+            0x22 => Some(S::direct(0x506)),        // K Right
+            0x25 => Some(S::mirrored(0x505)),      // Med Left
+            0x26 => Some(S::direct(0x505)),        // Med Right
+            0x19 => Some(S::mirrored(0x504)),      // Fast Left
+            0x1a => Some(S::direct(0x504)),        // Fast Right
+            0x17 => Some(S::mirrored(0x503)),      // Easy Left
+            0x18 => Some(S::direct(0x503)),        // Easy Right
             0x0e | 0x0f => Some(S::direct(0x4df)), // Caution
-            0x1c => Some(S::direct(0x4e0)),   // Water / Splash
-            0x20 => Some(S::direct(0x4d5)),   // Jump
-            0x28 => Some(S::direct(0x4cd)),   // Crest
+            0x1c => Some(S::direct(0x4e0)),        // Water / Splash
+            0x20 => Some(S::direct(0x4d5)),        // Jump
+            0x28 => Some(S::direct(0x4cd)),        // Crest
             _ => None,
         }),
     };

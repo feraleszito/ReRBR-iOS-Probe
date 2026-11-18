@@ -45,8 +45,14 @@ pub struct Session {
     control_at: u32,
     dt: f32,
     steps: u32,
+    clutch_help: bool,
     finish_direction: Option<[f32; 3]>,
     finish_crossed_forward: bool,
+}
+#[derive(Clone, Copy)]
+struct BootAids {
+    automatic: bool,
+    clutch_help: bool,
 }
 impl Session {
     /// Call on the dedicated STACK_BYTES worker; callers must catch pure-host panics there.
@@ -65,7 +71,15 @@ impl Session {
         selection.validate_current_backend()?;
         let checked = inputs::check_selection(paths, selection)?;
         let data = paths.data();
-        Self::boot_core(paths, data, checked.physics, selection.vehicle.original_slot, None, selection, automatic)
+        Self::boot_core(
+            paths,
+            data,
+            checked.physics,
+            selection.vehicle.original_slot,
+            None,
+            selection,
+            BootAids { automatic, clutch_help: false },
+        )
     }
 
     /// Experimental NGP car pack boot (for non-retail pack vehicles such as Ford Focus RS WRC 2006).
@@ -75,6 +89,16 @@ impl Session {
         selection: &rerbr_content::Selection,
         pack_path: &std::path::Path,
         automatic: bool,
+    ) -> Result<Self, String> {
+        Self::boot_experimental_pack_with_aids(paths, selection, pack_path, automatic, automatic)
+    }
+
+    pub fn boot_experimental_pack_with_aids(
+        paths: &inputs::Paths,
+        selection: &rerbr_content::Selection,
+        pack_path: &std::path::Path,
+        automatic: bool,
+        clutch_help: bool,
     ) -> Result<Self, String> {
         selection.validate_for_mode(true)?;
         if cfg!(panic = "abort") {
@@ -105,7 +129,35 @@ impl Session {
         let entry = rbr_formats::car_pack::model_entry(folder, stem);
         let data = base_data.with_car(paths.install.clone(), entry);
         let car_pack = Some(boot::CarPack { pack, tyre_brand: "pirelli" });
-        Self::boot_core(paths, data, physics_rbz, rbr_formats::car_pack::SLOT, car_pack, selection, automatic)
+        Self::boot_core(
+            paths,
+            data,
+            physics_rbz,
+            rbr_formats::car_pack::SLOT,
+            car_pack,
+            selection,
+            BootAids { automatic, clutch_help },
+        )
+    }
+
+    pub fn boot_with_aids(
+        paths: &inputs::Paths,
+        selection: &rerbr_content::Selection,
+        automatic: bool,
+        clutch_help: bool,
+    ) -> Result<Self, String> {
+        selection.validate_current_backend()?;
+        let checked = inputs::check_selection(paths, selection)?;
+        let data = paths.data();
+        Self::boot_core(
+            paths,
+            data,
+            checked.physics,
+            selection.vehicle.original_slot,
+            None,
+            selection,
+            BootAids { automatic, clutch_help },
+        )
     }
 
     fn boot_core(
@@ -115,7 +167,7 @@ impl Session {
         slot: u32,
         car_pack: Option<boot::CarPack>,
         selection: &rerbr_content::Selection,
-        automatic: bool,
+        aids: BootAids,
     ) -> Result<Self, String> {
         if cfg!(panic = "abort") {
             return Err("physics-drive requires panic=unwind".into());
@@ -157,7 +209,8 @@ impl Session {
             }
         };
         race.car_pack = car_pack;
-        race.options.aids.auto_gears = automatic;
+        race.options.aids.auto_gears = aids.automatic;
+        race.options.aids.clutch_help = aids.clutch_help;
         let name = paths.maps.join(&selection.stage.stem).to_string_lossy().into_owned();
         let finish_direction = finish_direction_for(&data, &name);
         let image = boot::build(&data, &name, State::Load.value(), &race)?;
@@ -193,7 +246,7 @@ impl Session {
         if ratios.len() != selection.vehicle.forward_gears as usize + 2 {
             return Err("selected vehicle descriptor disagrees with original gearbox gear count".into());
         }
-        if automatic {
+        if aids.automatic {
             let audit = diagnostics::gearbox_audit(&playback);
             if audit.0[2..ratios.len()].iter().all(|rpm| *rpm == 0.0) {
                 return Err("automatic transmission unavailable: original VCU upshift thresholds are empty; manual transmission remains supported".into());
@@ -214,6 +267,7 @@ impl Session {
             control_at: image.control_at,
             dt,
             steps: 0,
+            clutch_help: aids.clutch_help,
             finish_direction,
             finish_crossed_forward: false,
         })
@@ -230,6 +284,14 @@ impl Session {
     pub fn step(&mut self, input: Control) -> Result<(), String> {
         if [input.throttle, input.brake, input.clutch, input.handbrake, input.steering].iter().any(|x| !x.is_finite()) {
             return Err("nonfinite input".into());
+        }
+        if self.clutch_help {
+            let car = self.playback.pure.mem.u32(pure::CAR_PTR);
+            if car != 0 {
+                // Allow manual clutch pedal override (e.g. clutch kick / start-line rev) even when ClutchHelp is active.
+                let scratch = rbr_physics::car_body::layout::scratch_at(car);
+                self.playback.pure.mem.set_u32(scratch + 0x4c, u32::from(input.clutch <= 0.05));
+            }
         }
         let mut payload = [0; 32];
         for (k, word) in input.words().iter().enumerate() {
@@ -536,6 +598,85 @@ mod surface_tests {
                     Err(e) => eprintln!("PHY RSF {}: BOOT ERR: {e}", car.name),
                 }
             }
+        }
+    }
+
+    #[test]
+    fn clutch_disengagement_telemetry_repro() {
+        use super::*;
+        use std::path::Path;
+        let desktop_rbr = Path::new(r"C:\Users\adria\Desktop\RBR");
+        let main_rbr = Path::new(r"C:\Richard Burns Rally");
+        if !desktop_rbr.join("Plugins/NGP.dll").is_file() || !main_rbr.join("Maps/track-20_O.col").is_file() {
+            return;
+        }
+        let paths = inputs::Paths { install: desktop_rbr.to_path_buf(), overlay: None, maps: main_rbr.join("Maps") };
+        for clutch_help in [true, false] {
+            let mut session =
+                Session::boot_with_aids(&paths, &rerbr_content::Selection::default(), false, clutch_help).unwrap();
+            let step_g1 = |s: &mut Session, mut c: Control| {
+                if s.sample().commanded_gear == 2 {
+                    c.flags &= !4;
+                    c.gear = None;
+                } else {
+                    c.flags |= 4;
+                    c.gear = Some(2);
+                }
+                s.step(c).unwrap();
+            };
+            for _ in 0..1500 {
+                session.step(Control::default()).unwrap();
+            }
+            // Phase A: in gear 1 (word 2), clutch held (1.0) + full throttle (1.0) for 1.5s
+            for _ in 0..1080 {
+                step_g1(&mut session, Control { throttle: 1.0, clutch: 1.0, ..Default::default() });
+            }
+            let held = session.sample();
+            eprintln!(
+                "clutch_help={clutch_help} | HELD 1.0 + THROTTLE 1.0 (G1): gear={} speed={:.2}m/s rpm={:.0} payload_clutch={:.2} slip={:.3}",
+                held.gear, held.speed(), held.rpm, held.payload_clutch, held.drive_clutch_slip
+            );
+            assert!(
+                held.speed() < 0.05,
+                "clutch_help={clutch_help} should stay stationary with clutch=1.0: speed={}",
+                held.speed()
+            );
+            assert!(
+                held.rpm > 6500.0,
+                "clutch_help={clutch_help} should rev engine freely with clutch=1.0: rpm={}",
+                held.rpm
+            );
+            // Phase B: half-clutch (0.5) for 1.0s
+            for _ in 0..720 {
+                step_g1(&mut session, Control { throttle: 1.0, clutch: 0.5, ..Default::default() });
+            }
+            let half = session.sample();
+            eprintln!(
+                "clutch_help={clutch_help} | HALF 0.5 + THROTTLE 1.0 (G1): gear={} speed={:.2}m/s rpm={:.0} payload_clutch={:.2} slip={:.3}",
+                half.gear, half.speed(), half.rpm, half.payload_clutch, half.drive_clutch_slip
+            );
+            assert!(half.speed() > 1.0, "half-clutch should transfer partial drive torque");
+            // Phase C: release clutch (0.0) for 1.5s
+            for _ in 0..1080 {
+                step_g1(&mut session, Control { throttle: 1.0, clutch: 0.0, ..Default::default() });
+            }
+            let released = session.sample();
+            eprintln!(
+                "clutch_help={clutch_help} | RELEASED 0.0 (1.5s): gear={} speed={:.2}m/s rpm={:.0} payload_clutch={:.2} slip={:.3}",
+                released.gear, released.speed(), released.rpm, released.payload_clutch, released.drive_clutch_slip
+            );
+            assert!(released.speed() > 10.0, "released clutch should launch vehicle cleanly");
+            // Phase D: re-press clutch (1.0) while moving for 1.0s
+            for _ in 0..720 {
+                step_g1(&mut session, Control { throttle: 1.0, clutch: 1.0, ..Default::default() });
+            }
+            let re_held = session.sample();
+            eprintln!(
+                "clutch_help={clutch_help} | RE-PRESSED 1.0 MOVING (1.0s): gear={} speed={:.2}m/s rpm={:.0} payload_clutch={:.2} slip={:.3}",
+                re_held.gear, re_held.speed(), re_held.rpm, re_held.payload_clutch, re_held.drive_clutch_slip
+            );
+            assert!(re_held.speed() <= released.speed() + 0.05, "declutching while moving must not accelerate");
+            assert!(re_held.rpm > 7000.0, "declutching under throttle must allow engine RPM to rise");
         }
     }
 }

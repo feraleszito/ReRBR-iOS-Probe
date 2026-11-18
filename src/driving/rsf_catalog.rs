@@ -96,7 +96,10 @@ fn collect_shader_textures(rbr_root: &Path, shader_file: &str) -> Vec<String> {
     out
 }
 
-fn try_preset_or_folder_entry(rbr_root: &Path, car: &rsf::Car) -> Option<(CarEntry, Option<String>)> {
+fn try_preset_or_folder_entry(
+    rbr_root: &Path,
+    car: &rsf::Car,
+) -> Option<(CarEntry, Option<String>)> {
     let id = slugify_id(&car.name);
     if id == "ford-focus-rs-wrc-2006" {
         let f = VehicleDescriptor::ford_focus_2006();
@@ -145,7 +148,11 @@ fn try_preset_or_folder_entry(rbr_root: &Path, car: &rsf::Car) -> Option<(CarEnt
                 .collect();
             let matched = pack_lower.contains(&folder_compact)
                 || (!tokens.is_empty()
-                    && tokens.iter().filter(|t| folder_lower.contains(t.as_str())).count() >= 2);
+                    && tokens
+                        .iter()
+                        .filter(|t| folder_lower.contains(t.as_str()))
+                        .count()
+                        >= 2);
             if !matched {
                 continue;
             }
@@ -165,15 +172,19 @@ fn try_preset_or_folder_entry(rbr_root: &Path, car: &rsf::Car) -> Option<(CarEnt
     None
 }
 
-fn descriptor_from_entry(
-    rbr_root: &Path,
+struct DescriptorMeta<'a> {
     id: String,
     name: String,
     category: Option<String>,
     pack_name: String,
     forward_gears: u32,
+    audio_index: &'a str,
+}
+
+fn descriptor_from_entry(
+    rbr_root: &Path,
+    meta: DescriptorMeta<'_>,
     entry: &CarEntry,
-    audio_index: String,
 ) -> VehicleDescriptor {
     let shader_settings = if entry.shader_settings.to_ascii_lowercase().ends_with(".ini") {
         entry.shader_settings.replace('\\', "/")
@@ -200,11 +211,11 @@ fn descriptor_from_entry(
         }
     }
     VehicleDescriptor {
-        id,
-        name,
+        id: meta.id,
+        name: meta.name,
         original_slot: car_pack::SLOT,
         tyre_type: 4,
-        forward_gears: forward_gears.clamp(1, 8),
+        forward_gears: meta.forward_gears.clamp(1, 8),
         index: "Cars/Cars.ini".into(),
         model: entry.file_name.replace('\\', "/"),
         parts: entry.ini_file.replace('\\', "/"),
@@ -212,9 +223,9 @@ fn descriptor_from_entry(
         shader_settings,
         required_textures,
         optional_textures: Vec::new(),
-        audio_index,
-        category,
-        rsf_pack: Some(pack_name),
+        audio_index: meta.audio_index.to_string(),
+        category: meta.category,
+        rsf_pack: Some(meta.pack_name),
     }
 }
 
@@ -440,17 +451,20 @@ fn build_rsf_entry(
         }
     });
 
+    let audio_index = fmod_bank
+        .clone()
+        .unwrap_or_else(|| "Audio/Cars/Cars.ini".into());
     let descriptor = descriptor_from_entry(
         rbr_root,
-        id,
-        display_name,
-        car.group.clone(),
-        car.pack.clone(),
-        forward_gears,
+        DescriptorMeta {
+            id,
+            name: display_name,
+            category: car.group.clone(),
+            pack_name: car.pack.clone(),
+            forward_gears,
+            audio_index: &audio_index,
+        },
         &entry,
-        fmod_bank
-            .clone()
-            .unwrap_or_else(|| "Audio/Cars/Cars.ini".into()),
     );
 
     let drivetrain = car.drive_train.clone().or_else(|| {

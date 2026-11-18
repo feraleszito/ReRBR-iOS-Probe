@@ -76,6 +76,7 @@ pub enum Command {
     ToggleDiagnostics,
     ToggleMinimalHud,
     ToggleInvertPedals,
+    ToggleClutchHelp,
     InspectContent,
     CheckPhysics,
     ToggleExperimentalMode,
@@ -234,6 +235,7 @@ pub struct Context<'a> {
     pub diagnostics: bool,
     pub minimal_hud: bool,
     pub invert_pedals: bool,
+    pub clutch_help: bool,
     pub ctrl_opacity: f32,
     pub global_opacity: f32,
     pub stage_result: Option<super::race::StageResult>,
@@ -755,6 +757,10 @@ impl Menu {
                 Row::action(
                     format!("INVERTIR PEDALES: {}", on_off(ctx.invert_pedals)),
                     Command::ToggleInvertPedals,
+                ),
+                Row::action(
+                    format!("AYUDA EMBRAGUE: {}", on_off(ctx.clutch_help)),
+                    Command::ToggleClutchHelp,
                 ),
                 Row::action(
                     format!("CONTADOR FPS: {}", on_off(ctx.fps)),
@@ -1799,6 +1805,7 @@ pub struct Settings {
     pub diagnostics: bool,
     pub minimal_hud: bool,
     pub invert_pedals: bool,
+    pub clutch_help: bool,
     pub volume: f64,
     pub music_volume: f64,
     pub codriver_volume: f64,
@@ -1815,6 +1822,7 @@ impl Default for Settings {
             diagnostics: false,
             minimal_hud: false,
             invert_pedals: false,
+            clutch_help: false,
             volume: 0.8,
             music_volume: 0.70,
             codriver_volume: 0.85,
@@ -1850,6 +1858,7 @@ impl Settings {
                 "diagnostics" => settings.diagnostics = value == "true",
                 "minimal_hud" => settings.minimal_hud = value == "true",
                 "invert_pedals" => settings.invert_pedals = value == "true",
+                "clutch_help" => settings.clutch_help = value == "true",
                 "volume" => {
                     if let Ok(v) = value.parse::<f64>() {
                         if v.is_finite() {
@@ -1896,9 +1905,9 @@ impl Settings {
     }
     fn encode(&self) -> String {
         format!(
-            "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nvolume={}\nmusic_volume={}\ncodriver_volume={}\ncamera={}\nstage_id={}\nngp_experimental={}\n",
+            "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nclutch_help={}\nvolume={}\nmusic_volume={}\ncodriver_volume={}\ncamera={}\nstage_id={}\nngp_experimental={}\n",
             self.sensitivity, self.dead_zone, self.fps, self.diagnostics,
-            self.minimal_hud, self.invert_pedals, self.volume, self.music_volume, self.codriver_volume, self.camera, self.stage_id, self.ngp_experimental
+            self.minimal_hud, self.invert_pedals, self.clutch_help, self.volume, self.music_volume, self.codriver_volume, self.camera, self.stage_id, self.ngp_experimental
         )
     }
     pub fn save(&self) {
@@ -1939,6 +1948,7 @@ mod tests {
             diagnostics: false,
             minimal_hud: false,
             invert_pedals: false,
+            clutch_help: false,
             ctrl_opacity: 0.5,
             global_opacity: 0.5,
             stage_result: None,
@@ -2047,7 +2057,7 @@ mod tests {
             ..Menu::default()
         };
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 14);
+        assert_eq!(rows.len(), 15);
         for (row_idx, value, expected_down, expected_up) in [
             (0usize, "2.00", Command::SensDown, Command::SensUp),
             (3usize, "80%", Command::VolumeDown, Command::VolumeUp),
@@ -2088,13 +2098,24 @@ mod tests {
             ),
             Some(Command::ToggleInvertPedals)
         );
+        let clutch_rect = menu.row_rect_for(7, rows.len());
+        assert_eq!(
+            menu.press(
+                clutch_rect.center_x() as f64,
+                (clutch_rect.y + clutch_rect.h * 0.5) as f64,
+                &rows
+            ),
+            Some(Command::ToggleClutchHelp)
+        );
         let s = Settings::parse(
-            "sensitivity=NaN\ndead_zone=inf\nvolume=nan\ncamera=9\nfps=true\ninvert_pedals=true",
+            "sensitivity=NaN\ndead_zone=inf\nvolume=nan\ncamera=9\nfps=true\ninvert_pedals=true\nclutch_help=true",
         );
         assert_eq!((s.sensitivity, s.dead_zone, s.volume), (2.0, 0.03, 0.8));
         assert_eq!(s.camera, 2);
         assert!(s.fps);
         assert!(s.invert_pedals);
+        assert!(s.clutch_help);
+        assert!(!Settings::default().clutch_help);
         let s = Settings::parse("sensitivity=100\ndead_zone=-4\nvolume=4");
         assert_eq!((s.sensitivity, s.dead_zone, s.volume), (5.0, 0.0, 1.0));
     }

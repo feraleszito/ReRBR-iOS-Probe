@@ -547,7 +547,11 @@ mod tests {
         std::fs::create_dir_all(&imp).unwrap();
         std::fs::write(imp.join("impreza03.sgc"), b"").unwrap();
         let report = FocusDiagnosticsReport::inspect(Some(&dir), &fake_focus);
-        let car_files = report.steps.iter().find(|s| s.stage == "CAR FILES").unwrap();
+        let car_files = report
+            .steps
+            .iter()
+            .find(|s| s.stage == "CAR FILES")
+            .unwrap();
         assert_ne!(car_files.status, DiagnosticStatus::Ok);
         assert!(car_files.detail.contains("FALLBACK"));
         let _ = std::fs::remove_dir_all(&dir);

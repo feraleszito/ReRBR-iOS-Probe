@@ -68,6 +68,7 @@ pub struct Runtime {
     loading_started: Instant,
 
     pub controls: Controls,
+    clutch_help: bool,
     diagnostics: bool,
     minimal_hud: bool,
     volume: f64,
@@ -172,6 +173,7 @@ impl Runtime {
             loading_started: Instant::now(),
 
             controls,
+            clutch_help: settings.clutch_help,
             diagnostics: settings.diagnostics,
             minimal_hud: settings.minimal_hud,
             volume: settings.volume,
@@ -414,6 +416,7 @@ impl Runtime {
             diagnostics: self.diagnostics,
             minimal_hud: self.minimal_hud,
             invert_pedals: self.controls.invert_pedals,
+            clutch_help: self.clutch_help,
             volume: self.volume,
             music_volume: self.music_volume,
             codriver_volume: self.codriver_volume,
@@ -505,10 +508,11 @@ impl Runtime {
                         self.replay_recorder.clear();
                         if let Some(pack) = pack_path {
                             self.experimental_visual_only = false;
-                            self.worker = worker::Worker::new_experimental_pack(
+                            self.worker = worker::Worker::new_experimental_pack_with_aids(
                                 self.selection.clone(),
                                 pack,
                                 false,
+                                self.clutch_help,
                             );
                         } else {
                             self.experimental_visual_only = true;
@@ -541,7 +545,11 @@ impl Runtime {
                     self.race.prepare();
                     self.replay_player = None;
                     self.replay_recorder.clear();
-                    self.worker = worker::Worker::new_selected(self.selection.clone(), false);
+                    self.worker = worker::Worker::new_selected_with_aids(
+                        self.selection.clone(),
+                        false,
+                        self.clutch_help,
+                    );
                     self.pending_scene_action = Some(SceneAction::Load {
                         selection: Box::new(self.selection.clone()),
                         experimental_ngp: false,
@@ -582,10 +590,11 @@ impl Runtime {
                         .and_then(|r| r.can_boot_ngp_pack().cloned())
                     {
                         self.experimental_visual_only = false;
-                        self.worker = worker::Worker::new_experimental_pack(
+                        self.worker = worker::Worker::new_experimental_pack_with_aids(
                             self.selection.clone(),
                             pack,
                             false,
+                            self.clutch_help,
                         );
                     } else {
                         self.experimental_visual_only = true;
@@ -593,7 +602,11 @@ impl Runtime {
                     }
                 } else {
                     self.experimental_visual_only = false;
-                    self.worker = worker::Worker::new_selected(self.selection.clone(), false);
+                    self.worker = worker::Worker::new_selected_with_aids(
+                        self.selection.clone(),
+                        false,
+                        self.clutch_help,
+                    );
                 }
                 self.offset = None;
                 self.camera = None;
@@ -794,6 +807,13 @@ impl Runtime {
                     } else {
                         "OFF"
                     }
+                ));
+            }
+            ToggleClutchHelp => {
+                self.clutch_help = !self.clutch_help;
+                self.message = Some(format!(
+                    "AYUDA EMBRAGUE {} (APLICA AL INICIAR)",
+                    if self.clutch_help { "ON" } else { "OFF" }
                 ));
             }
             InspectContent => {
@@ -1673,6 +1693,7 @@ impl Runtime {
             diagnostics: self.diagnostics,
             minimal_hud: self.minimal_hud,
             invert_pedals: self.controls.invert_pedals,
+            clutch_help: self.clutch_help,
             ctrl_opacity: self.controls_layout.opacity_for(self.selected_control),
             global_opacity: self.controls_layout.global_opacity,
             stage_result: self.race.result(),
@@ -1799,7 +1820,13 @@ impl Runtime {
                 0.0
             }
             + pad * 2.0;
-        let box_h = icon_sz + if self.pacenote_hud.debug_sprites { 30.0 } else { 18.0 } + pad * 2.0;
+        let box_h = icon_sz
+            + if self.pacenote_hud.debug_sprites {
+                30.0
+            } else {
+                18.0
+            }
+            + pad * 2.0;
         let bx = (cx - box_w * 0.5).clamp(8.0, 632.0 - box_w);
         let by = (cy - box_h * 0.5).clamp(8.0, ch - box_h - 8.0);
         canvas.rect(bx, by, box_w, box_h, [10, 14, 22, 200]);

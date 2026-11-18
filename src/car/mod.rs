@@ -220,7 +220,10 @@ pub fn load_vehicle_for_mode(
         ];
         (entry, clear, files)
     };
-    eprintln!("car-chase MODEL PATH: {} -> {}", vehicle.id, entry.file_name);
+    eprintln!(
+        "car-chase MODEL PATH: {} -> {}",
+        vehicle.id, entry.file_name
+    );
     if vehicle.is_ngp_experimental_car()
         && rerbr_content::VehicleDescriptor::presets()
             .iter()

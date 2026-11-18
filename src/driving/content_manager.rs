@@ -225,11 +225,9 @@ impl Catalog {
                 .iter_mut()
                 .find(|v| v.descriptor.id == item.descriptor.id)
             {
-                let preset_own_model_exists = rerbr_sim::rbr_formats::cars::resolve(
-                    &rbr_root,
-                    &existing.descriptor.model,
-                )
-                .is_some();
+                let preset_own_model_exists =
+                    rerbr_sim::rbr_formats::cars::resolve(&rbr_root, &existing.descriptor.model)
+                        .is_some();
                 if item.using_fallback_model && preset_own_model_exists {
                     existing.using_fallback_model = false;
                 } else {
