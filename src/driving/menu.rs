@@ -149,6 +149,7 @@ pub enum Command {
     SchoolNextLesson,
     SchoolInspectLesson,
     SchoolStartLesson,
+    ExportDiagnostics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -716,7 +717,7 @@ impl Menu {
                         Command::ToggleExperimentalMode,
                     ),
                     Row::action(
-                        "DIAGNÓSTICO FOCUS NGP (9 ETAPAS)",
+                        "DIAGNÓSTICO NGP / RUNTIME (10 ETAPAS)",
                         Command::RunFocusDiagnostics,
                     ),
                     Row::action("RUN DESCRIPTOR CHECK", Command::CheckPhysics),
@@ -1164,6 +1165,7 @@ impl Menu {
                         Command::ToggleExperimentalMode,
                     ),
                     Row::action("ACTUALIZAR DIAGNÓSTICO", Command::RunFocusDiagnostics),
+                    Row::action("EXPORTAR DIAGNÓSTICO (TXT)", Command::ExportDiagnostics),
                     Row {
                         label: if pack_ready {
                             "INICIAR PRUEBA NGP FOCUS (SILENCIO FMOD)".into()
@@ -1445,8 +1447,8 @@ impl Menu {
             ui::panel(canvas, panel, PANEL_DEEP, LINE);
             let (px, py, pw, ph) = ui::px(panel, canvas);
             if let Some(report) = ctx.focus_diagnostics {
-                let row_h = (ph - 10.0) / 9.0f32.max(report.steps.len() as f32);
-                for (idx, step) in report.steps.iter().take(9).enumerate() {
+                let row_h = (ph - 10.0) / 10.0f32.max(report.steps.len() as f32);
+                for (idx, step) in report.steps.iter().take(10).enumerate() {
                     let sy = py + 5.0 + idx as f32 * row_h;
                     let badge_color = match step.status {
                         super::ngp_experimental::DiagnosticStatus::Ok => GOOD,
@@ -1641,8 +1643,8 @@ impl Menu {
                 ui::panel(canvas, panel, PANEL_DEEP, LINE);
                 let (px, py, pw, ph) = ui::px(panel, canvas);
                 if let Some(report) = ctx.focus_diagnostics {
-                    let row_h = (ph - 10.0) / 9.0f32.max(report.steps.len() as f32);
-                    for (idx, step) in report.steps.iter().take(9).enumerate() {
+                    let row_h = (ph - 10.0) / 10.0f32.max(report.steps.len() as f32);
+                    for (idx, step) in report.steps.iter().take(10).enumerate() {
                         let sy = py + 5.0 + idx as f32 * row_h;
                         let badge_color = match step.status {
                             super::ngp_experimental::DiagnosticStatus::Ok => GOOD,
@@ -1719,8 +1721,8 @@ impl Menu {
                 ui::panel(canvas, panel, PANEL_DEEP, LINE);
                 let (px, py, pw, ph) = ui::px(panel, canvas);
                 if let Some(report) = ctx.focus_diagnostics {
-                    let row_h = (ph - 10.0) / 9.0f32.max(report.steps.len() as f32);
-                    for (idx, step) in report.steps.iter().take(9).enumerate() {
+                    let row_h = (ph - 10.0) / 10.0f32.max(report.steps.len() as f32);
+                    for (idx, step) in report.steps.iter().take(10).enumerate() {
                         let sy = py + 5.0 + idx as f32 * row_h;
                         let badge_color = match step.status {
                             super::ngp_experimental::DiagnosticStatus::Ok => GOOD,

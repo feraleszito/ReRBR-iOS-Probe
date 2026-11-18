@@ -45,6 +45,25 @@ pub struct FocusDiagnosticsReport {
     pub steps: Vec<DiagnosticStep>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LiveRuntimeState<'a> {
+    pub worker_error: Option<&'a str>,
+    pub physics_settled: bool,
+    pub physics_status: Option<&'a str>,
+    pub sim_steps: Option<u32>,
+    pub speed_mps: f64,
+    pub rpm: f32,
+    pub gear: i32,
+    pub throttle_rx: f32,
+    pub steering_rx: f32,
+    pub clutch_rx: f32,
+    pub clutch_help: bool,
+    pub session_active: bool,
+    pub stage_id: &'a str,
+    pub model_path: &'a str,
+    pub audio_status: &'a str,
+}
+
 fn detected_fallback_retail_car(vehicle: &VehicleDescriptor) -> Option<&'static str> {
     if !vehicle.is_ngp_experimental_car() {
         return None;
@@ -180,55 +199,27 @@ impl FocusDiagnosticsReport {
             });
         }
 
-        // 4. NGP DATA (Plugins/NGP.dll + physics.rbz)
-        let dll = cars::resolve(&rbr_root, "Plugins/NGP.dll");
+        // 4. NGP DATA (Plugins/NGP.dll + physics.rbz revision)
+        let ngp_rt = rerbr_sim::ngp_candidate::inspect_runtime_dir(&rbr_root);
         let physics_rbz = cars::resolve(&rbr_root, "physics.rbz");
-        let ngp_74_verified = match (&dll, &physics_rbz) {
-            (Some(dll_path), Some(_rbz_path)) => match std::fs::read(dll_path) {
-                Ok(bytes) => match rerbr_sim::ngp_candidate::validate_runtime(&bytes) {
-                    Ok(_) => {
-                        steps.push(DiagnosticStep {
-                            stage: "NGP DATA",
-                            status: DiagnosticStatus::Ok,
-                            detail: "NGP 7.4.778 + physics.rbz".into(),
-                        });
-                        true
-                    }
-                    Err(err) => {
-                        steps.push(DiagnosticStep {
-                            stage: "NGP DATA",
-                            status: DiagnosticStatus::Blocked,
-                            detail: format!("NGP NO PORTADO ({err})"),
-                        });
-                        false
-                    }
-                },
-                Err(err) => {
-                    steps.push(DiagnosticStep {
-                        stage: "NGP DATA",
-                        status: DiagnosticStatus::Blocked,
-                        detail: format!("NGP.DLL LEGIBLE ERROR: {err}"),
-                    });
-                    false
-                }
+        let ngp_74_verified = physics_rbz.is_some()
+            && ngp_rt.kind == rerbr_sim::ngp_candidate::NgpRuntimeKind::Verified74;
+        steps.push(DiagnosticStep {
+            stage: "NGP DATA",
+            status: if ngp_74_verified {
+                DiagnosticStatus::Ok
+            } else if ngp_rt.kind == rerbr_sim::ngp_candidate::NgpRuntimeKind::Detected75Unverified
+            {
+                DiagnosticStatus::Warning
+            } else {
+                DiagnosticStatus::Blocked
             },
-            (None, _) => {
-                steps.push(DiagnosticStep {
-                    stage: "NGP DATA",
-                    status: DiagnosticStatus::Blocked,
-                    detail: "FALTA Plugins/NGP.dll".into(),
-                });
-                false
-            }
-            (_, None) => {
-                steps.push(DiagnosticStep {
-                    stage: "NGP DATA",
-                    status: DiagnosticStatus::Blocked,
-                    detail: "FALTA physics.rbz".into(),
-                });
-                false
-            }
-        };
+            detail: if physics_rbz.is_none() {
+                "FALTA physics.rbz".into()
+            } else {
+                ngp_rt.summary.clone()
+            },
+        });
 
         // 5. NGP BACKEND
         let backend_ok = car_pack_ok && ngp_74_verified;
@@ -242,39 +233,39 @@ impl FocusDiagnosticsReport {
             detail: if backend_ok {
                 "NGP 7.4 EXPERIMENTAL (PACK)".into()
             } else if car_model_ok {
-                "SIN FÍSICA NGP -> MODO VISUAL EXPERIMENTAL".into()
+                format!("SIN BACKEND ACTIVO ({})", ngp_rt.summary)
             } else {
                 "BLOQUEADO (SIN DATOS NGP/MODELO)".into()
             },
         });
 
-        // 6. PHYSICS INITIALIZATION
+        // 6. PHYSICS INITIALIZATION (always Pending until live worker settles)
         steps.push(DiagnosticStep {
             stage: "PHYSICS INITIALIZATION",
-            status: if backend_ok {
+            status: if backend_ok || !vehicle.is_ngp_experimental_car() {
                 DiagnosticStatus::Pending
             } else {
                 DiagnosticStatus::Blocked
             },
-            detail: if backend_ok {
-                "LISTO PARA BOOT EXPERIMENTAL".into()
+            detail: if backend_ok || !vehicle.is_ngp_experimental_car() {
+                "PENDIENTE DE INICIO (SIN SESIÓN ACTIVA)".into()
             } else {
                 "SIN FÍSICA NGP ACTIVA".into()
             },
         });
 
-        // 7. VEHICLE SPAWN
+        // 7. VEHICLE SPAWN (always Pending until live 720 Hz steps run)
         steps.push(DiagnosticStep {
             stage: "VEHICLE SPAWN",
-            status: if backend_ok {
+            status: if backend_ok || !vehicle.is_ngp_experimental_car() {
                 DiagnosticStatus::Pending
             } else if car_model_ok {
                 DiagnosticStatus::Warning
             } else {
                 DiagnosticStatus::Blocked
             },
-            detail: if backend_ok {
-                "ESPERANDO CARGA DE TRAMO".into()
+            detail: if backend_ok || !vehicle.is_ngp_experimental_car() {
+                "PENDIENTE DE SPAWN EN TRAMO".into()
             } else if car_model_ok {
                 "SPAWN VISUAL ESTÁTICO EN SALIDA".into()
             } else {
@@ -282,34 +273,56 @@ impl FocusDiagnosticsReport {
             },
         });
 
-        // 8. AUDIO (FMOD bank status)
-        let bank_present = cars::resolve(&rbr_root, &vehicle.audio_index).is_some();
+        // 8. CONTROLS (always Pending until driving loop delivers inputs)
         steps.push(DiagnosticStep {
-            stage: "AUDIO",
-            status: DiagnosticStatus::Unsupported,
-            detail: if bank_present {
-                "AUDIO: UNSUPPORTED - FMOD BANK (SILENCIO)".into()
-            } else {
-                "AUDIO: UNSUPPORTED - SIN FMOD BANK (SILENCIO)".into()
-            },
+            stage: "CONTROLS",
+            status: DiagnosticStatus::Pending,
+            detail: "PENDIENTE DE SESIÓN DE CONDUCCIÓN".into(),
         });
 
-        // 9. DRIVING
+        // 9. AUDIO (FMOD bank / engine bank status)
+        let bank_present = cars::resolve(&rbr_root, &vehicle.audio_index).is_some();
+        let is_fmod_bank = vehicle.audio_index.to_ascii_lowercase().ends_with(".bank");
+        let audio_report = if bank_present && is_fmod_bank {
+            let rep = super::fmod_audit::inspect_bank(&rbr_root, &vehicle.audio_index);
+            (DiagnosticStatus::Unsupported, rep.summary())
+        } else if !vehicle.is_ngp_experimental_car() && bank_present {
+            (
+                DiagnosticStatus::Pending,
+                format!("RETAIL ({}) - PENDIENTE DE BOOT", vehicle.audio_index),
+            )
+        } else {
+            (
+                DiagnosticStatus::Unsupported,
+                if bank_present {
+                    "AUDIO: UNSUPPORTED - FMOD BANK (SILENCIO)".into()
+                } else {
+                    "AUDIO: UNSUPPORTED - SIN FMOD BANK (SILENCIO)".into()
+                },
+            )
+        };
+        steps.push(DiagnosticStep {
+            stage: "AUDIO",
+            status: audio_report.0,
+            detail: audio_report.1,
+        });
+
+        // 10. DRIVING (live state, never pre-marked OK)
         steps.push(DiagnosticStep {
             stage: "DRIVING",
-            status: if backend_ok {
+            status: if backend_ok || !vehicle.is_ngp_experimental_car() {
                 DiagnosticStatus::Pending
             } else if car_model_ok {
                 DiagnosticStatus::Warning
             } else {
                 DiagnosticStatus::Blocked
             },
-            detail: if backend_ok {
-                "NGP EXPERIMENTAL LISTO PARA PRUEBA".into()
+            detail: if backend_ok || !vehicle.is_ngp_experimental_car() {
+                "PENDIENTE DE INICIO EN TRAMO".into()
             } else if car_model_ok {
                 "SOLO INSPECCIÓN VISUAL (SIN FÍSICA NGP)".into()
             } else {
-                "BLOQUEADO".into()
+                "NO DISPONIBLE".into()
             },
         });
 
@@ -329,6 +342,7 @@ impl FocusDiagnosticsReport {
             "NGP BACKEND",
             "PHYSICS INITIALIZATION",
             "VEHICLE SPAWN",
+            "CONTROLS",
             "AUDIO",
             "DRIVING",
         ];
@@ -374,6 +388,11 @@ impl FocusDiagnosticsReport {
             "VEHÍCULO POSICIONADO EN SALIDA",
         );
         self.set_step(
+            "CONTROLS",
+            DiagnosticStatus::Ok,
+            "CONTROLES ENLAZADOS AL WORKER 720HZ",
+        );
+        self.set_step(
             "DRIVING",
             DiagnosticStatus::Ok,
             "CONDUCCIÓN EXPERIMENTAL ACTIVA",
@@ -392,10 +411,113 @@ impl FocusDiagnosticsReport {
             "SPAWN VISUAL ESTÁTICO SIN FÍSICA NGP",
         );
         self.set_step(
+            "CONTROLS",
+            DiagnosticStatus::Warning,
+            "CONTROLES INACTIVOS (MODO VISUAL)",
+        );
+        self.set_step(
             "DRIVING",
             DiagnosticStatus::Warning,
             "MODO VISUAL - SIN FÍSICA NGP",
         );
+    }
+
+    /// Updates stages 6..=10 (Physics, Spawn, Controls, Audio, Driving) strictly from live runtime state.
+    pub fn apply_live_state(&mut self, live: &LiveRuntimeState<'_>) {
+        if let Some(err) = live.worker_error {
+            self.record_physics_failure(err);
+        } else if live.physics_settled {
+            self.set_step(
+                "PHYSICS INITIALIZATION",
+                DiagnosticStatus::Ok,
+                live.physics_status.unwrap_or("FÍSICA INICIALIZADA (720HZ)"),
+            );
+            if let Some(step_count) = live.sim_steps.filter(|&n| n > 0) {
+                self.set_step(
+                    "VEHICLE SPAWN",
+                    DiagnosticStatus::Ok,
+                    format!(
+                        "SPAWN ACTIVO (STEP {step_count} · {:.1} m/s · G{})",
+                        live.speed_mps, live.gear
+                    ),
+                );
+            } else {
+                self.set_step(
+                    "VEHICLE SPAWN",
+                    DiagnosticStatus::Pending,
+                    "ESPERANDO PRIMER STEP 720HZ",
+                );
+            }
+            if live.session_active {
+                self.set_step(
+                    "CONTROLS",
+                    DiagnosticStatus::Ok,
+                    format!(
+                        "THR {:.2} STR {:.2} CLU {:.2} AYUDA {}",
+                        live.throttle_rx,
+                        live.steering_rx,
+                        live.clutch_rx,
+                        if live.clutch_help { "ON" } else { "OFF" }
+                    ),
+                );
+                self.set_step(
+                    "DRIVING",
+                    DiagnosticStatus::Ok,
+                    format!(
+                        "SESIÓN ACTIVA ({}) · {:.0} RPM · MODELO {}",
+                        live.stage_id, live.rpm, live.model_path
+                    ),
+                );
+            }
+        }
+        if !live.audio_status.is_empty() && live.audio_status != "AUDIO UNINITIALIZED" {
+            let audio_st = if live.audio_status.contains("AUTHENTIC") {
+                DiagnosticStatus::Ok
+            } else if live.audio_status.contains("FMOD") {
+                DiagnosticStatus::Unsupported
+            } else {
+                DiagnosticStatus::Warning
+            };
+            self.set_step("AUDIO", audio_st, live.audio_status);
+        }
+    }
+
+    pub fn export_text(&self, extra_lines: &[String]) -> String {
+        let mut lines = Vec::with_capacity(self.steps.len() + extra_lines.len() + 6);
+        lines.push("=== RERBR iOS DIAGNOSTICO RUNTIME (10 ETAPAS) ===".to_string());
+        lines.push(format!("VEHICULO: {}", self.vehicle_name));
+        lines.push(format!(
+            "PACK NGP: {}",
+            self.pack_path
+                .as_ref()
+                .map_or_else(|| "NINGUNO / RETAIL".into(), |p| p.display().to_string())
+        ));
+        lines.push("--- ETAPAS ---".to_string());
+        for (i, step) in self.steps.iter().enumerate() {
+            lines.push(format!(
+                "{:02}. {:<22} [{}] {}",
+                i + 1,
+                step.stage,
+                step.status.label(),
+                step.detail
+            ));
+        }
+        if !extra_lines.is_empty() {
+            lines.push("--- CONTEXTO RUNTIME ---".to_string());
+            lines.extend(extra_lines.iter().cloned());
+        }
+        lines.join("\n") + "\n"
+    }
+
+    pub fn write_export_file(
+        &self,
+        documents: &Path,
+        extra_lines: &[String],
+    ) -> Result<PathBuf, String> {
+        let out = documents.join("rerbr-diagnostico.txt");
+        let text = self.export_text(extra_lines);
+        std::fs::write(&out, text).map_err(|e| format!("{}: {e}", out.display()))?;
+        Ok(out)
     }
 
     pub fn can_enter_visual_mode(&self) -> bool {
@@ -496,12 +618,13 @@ mod tests {
                 "NGP BACKEND",
                 "PHYSICS INITIALIZATION",
                 "VEHICLE SPAWN",
+                "CONTROLS",
                 "AUDIO",
                 "DRIVING",
             ]
         );
-        assert_eq!(report.steps[7].status, DiagnosticStatus::Unsupported);
-        assert!(report.steps[7].detail.contains("FMOD BANK"));
+        assert_eq!(report.steps[8].status, DiagnosticStatus::Unsupported);
+        assert!(report.steps[8].detail.contains("FMOD BANK"));
         assert!(!report.can_enter_visual_mode());
         assert!(report.can_boot_ngp_pack().is_none());
     }
@@ -554,6 +677,94 @@ mod tests {
             .unwrap();
         assert_ne!(car_files.status, DiagnosticStatus::Ok);
         assert!(car_files.detail.contains("FALLBACK"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_runtime_state_and_diagnostic_export_are_accurate() {
+        let mut report =
+            FocusDiagnosticsReport::inspect(None, &VehicleDescriptor::ford_focus_2006());
+        assert_eq!(report.steps.len(), 10);
+        // Never mark physics/spawn/controls/driving OK before live session state arrives.
+        for name in [
+            "PHYSICS INITIALIZATION",
+            "VEHICLE SPAWN",
+            "CONTROLS",
+            "DRIVING",
+        ] {
+            let st = report
+                .steps
+                .iter()
+                .find(|s| s.stage == name)
+                .unwrap()
+                .status;
+            assert_ne!(st, DiagnosticStatus::Ok, "{name} must not start OK");
+        }
+
+        report.apply_live_state(&LiveRuntimeState {
+            physics_settled: true,
+            physics_status: Some("NGP PARSED / CRC UNVERIFIED"),
+            sim_steps: Some(720),
+            speed_mps: 12.5,
+            rpm: 6200.0,
+            gear: 3,
+            throttle_rx: 1.0,
+            steering_rx: -0.2,
+            clutch_rx: 0.0,
+            clutch_help: true,
+            session_active: true,
+            stage_id: "harwood-forest",
+            model_path: "Cars/FORD_FOCUS_2006/focus06.sgc",
+            audio_status: "FMOD FSB5 VORBIS (44 VORBIS)",
+            ..Default::default()
+        });
+        assert_eq!(
+            report
+                .steps
+                .iter()
+                .find(|s| s.stage == "VEHICLE SPAWN")
+                .unwrap()
+                .status,
+            DiagnosticStatus::Ok
+        );
+        assert_eq!(
+            report
+                .steps
+                .iter()
+                .find(|s| s.stage == "CONTROLS")
+                .unwrap()
+                .status,
+            DiagnosticStatus::Ok
+        );
+        assert_eq!(
+            report
+                .steps
+                .iter()
+                .find(|s| s.stage == "AUDIO")
+                .unwrap()
+                .status,
+            DiagnosticStatus::Unsupported
+        );
+        assert_eq!(
+            report
+                .steps
+                .iter()
+                .find(|s| s.stage == "DRIVING")
+                .unwrap()
+                .status,
+            DiagnosticStatus::Ok
+        );
+
+        let dir = std::env::temp_dir().join("rerbr_diag_export_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = report
+            .write_export_file(&dir, &["ESCUELA: 17/17 DISPONIBLES".into()])
+            .unwrap();
+        let txt = std::fs::read_to_string(&path).unwrap();
+        assert!(txt.contains("10. DRIVING"));
+        assert!(txt.contains("Cars/FORD_FOCUS_2006/focus06.sgc"));
+        assert!(txt.contains("ESCUELA: 17/17 DISPONIBLES"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

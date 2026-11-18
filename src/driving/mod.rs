@@ -333,10 +333,36 @@ impl Runtime {
         } else {
             rerbr_content::VehicleDescriptor::ford_focus_2006()
         };
-        self.focus_diagnostics = Some(ngp_experimental::FocusDiagnosticsReport::inspect(
-            doc.as_deref(),
-            &target,
-        ));
+        let mut report = ngp_experimental::FocusDiagnosticsReport::inspect(doc.as_deref(), &target);
+        let audio_st = audio::status();
+        let active_session =
+            self.race.phase == race::Phase::Driving || self.menu.page == menu::Page::Paused;
+        let worker_snapshot = self.worker.state.try_lock().ok();
+        let latest = worker_snapshot
+            .as_ref()
+            .and_then(|st| st.pair.as_ref().map(|(_, b, _)| b).or(st.rest.as_ref()));
+        let live = ngp_experimental::LiveRuntimeState {
+            worker_error: worker_snapshot.as_ref().and_then(|st| st.error.as_deref()),
+            physics_settled: worker_snapshot.as_ref().is_some_and(|st| st.rest.is_some()),
+            physics_status: worker_snapshot
+                .as_ref()
+                .and_then(|st| st.physics_status.as_deref()),
+            sim_steps: latest.map(|s| s.step),
+            speed_mps: latest.map_or(0.0, Sample::speed),
+            rpm: latest.map_or(0.0, |s| s.rpm),
+            gear: latest.map_or(1, |s| s.gear),
+            throttle_rx: latest.map_or(0.0, |s| s.throttle_received),
+            steering_rx: latest.map_or(0.0, |s| s.steering_received),
+            clutch_rx: latest.map_or(0.0, |s| s.payload_clutch),
+            clutch_help: self.clutch_help,
+            session_active: active_session,
+            stage_id: &self.selection.stage.id,
+            model_path: &self.selection.vehicle.model,
+            audio_status: &audio_st,
+        };
+        report.apply_live_state(&live);
+        drop(worker_snapshot);
+        self.focus_diagnostics = Some(report);
     }
     pub fn selection(&self) -> &rerbr_content::Selection {
         &self.selection
@@ -1258,6 +1284,49 @@ impl Runtime {
                     }
                     Err(err) => {
                         self.message = Some(format!("ESCUELA BLOQUEADA: {err}"));
+                    }
+                }
+            }
+            ExportDiagnostics => {
+                self.refresh_focus_diagnostics();
+                let doc = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from);
+                match (doc.as_deref(), self.focus_diagnostics.as_ref()) {
+                    (Some(dir), Some(report)) => {
+                        let extra = vec![
+                            format!(
+                                "SELECCION: {} / {} ({})",
+                                self.selection.vehicle.id,
+                                self.selection.vehicle.model,
+                                self.selection.stage.id
+                            ),
+                            format!(
+                                "OPCIONES: clutch_help={} ngp_experimental={}",
+                                self.clutch_help, self.ngp_experimental
+                            ),
+                            format!("AUDIO STATUS: {}", audio::status()),
+                            format!("MUSIC STATUS: {}", audio::menu_music_status()),
+                            format!("CODRIVER STATUS: {}", audio::codriver_status()),
+                            format!("ESCUELA RALLY: {}", self.school.status),
+                        ];
+                        match report.write_export_file(dir, &extra) {
+                            Ok(path) => {
+                                let name = path
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("rerbr-diagnostico.txt");
+                                self.message =
+                                    Some(format!("DIAGNÓSTICO GUARDADO: Documents/{name}"));
+                            }
+                            Err(e) => {
+                                self.message = Some(format!("ERROR EXPORTANDO DIAGNÓSTICO: {e}"));
+                            }
+                        }
+                    }
+                    (None, _) => {
+                        self.message = Some("CARPETA DOCUMENTS NO DISPONIBLE".into());
+                    }
+                    (_, None) => {
+                        self.message = Some("SIN REPORTE DE DIAGNÓSTICO".into());
                     }
                 }
             }
@@ -2944,9 +3013,9 @@ mod reload_tests {
         app.apply_command(menu::Command::RunFocusDiagnostics);
         assert_eq!(app.menu.page, menu::Page::NgpExperimental);
         let report = app.focus_diagnostics.as_ref().unwrap();
-        assert_eq!(report.steps.len(), 9);
+        assert_eq!(report.steps.len(), 10);
         assert_eq!(
-            report.steps[7].status,
+            report.steps[8].status,
             ngp_experimental::DiagnosticStatus::Unsupported
         );
 
