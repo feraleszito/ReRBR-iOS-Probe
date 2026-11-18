@@ -220,6 +220,18 @@ pub fn load_vehicle_for_mode(
         ];
         (entry, clear, files)
     };
+    eprintln!("car-chase MODEL PATH: {} -> {}", vehicle.id, entry.file_name);
+    if vehicle.is_ngp_experimental_car()
+        && rerbr_content::VehicleDescriptor::presets()
+            .iter()
+            .filter(|v| !v.is_ngp_experimental_car())
+            .any(|v| rerbr_content::same_path(&v.model, &entry.file_name))
+    {
+        eprintln!(
+            "car-chase WARNING: experimental vehicle {} resolved to fallback retail model '{}'",
+            vehicle.id, entry.file_name
+        );
+    }
     let bytes = read(root, vehicle, &entry.file_name, 32 * 1024 * 1024)?;
     let elements = sgc::parse(&bytes).map_err(|e| format!("CAR SGC: {e}"))?;
     eprintln!(

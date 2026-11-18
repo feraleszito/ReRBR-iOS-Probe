@@ -9,8 +9,9 @@ use super::ngp_proto::{inspect_pack_path_result, VehicleTechSheet};
 use rerbr_content::{VehicleClassification, VehicleDescriptor};
 use rerbr_sim::rbr_formats::{
     car_pack::{self, Pack},
+    car_parts,
     cars::{self, CarEntry},
-    rsf,
+    ini, rsf,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -70,7 +71,102 @@ fn check_ngp_74_runtime(rbr_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn collect_shader_textures(rbr_root: &Path, shader_file: &str) -> Vec<String> {
+    let Some(resolved) = cars::resolve(rbr_root, shader_file) else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read(resolved) else {
+        return Vec::new();
+    };
+    let Ok(sections) = ini::parse(&String::from_utf8_lossy(&bytes)) else {
+        return Vec::new();
+    };
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for section in &sections {
+        if let Some(path) = car_parts::diffuse_path(&sections, &section.name) {
+            let norm = path.replace('\\', "/");
+            if rerbr_content::validate_relative_path(&norm).is_ok()
+                && seen.insert(norm.to_ascii_lowercase())
+            {
+                out.push(norm);
+            }
+        }
+    }
+    out
+}
+
+fn try_preset_or_folder_entry(rbr_root: &Path, car: &rsf::Car) -> Option<(CarEntry, Option<String>)> {
+    let id = slugify_id(&car.name);
+    if id == "ford-focus-rs-wrc-2006" {
+        let f = VehicleDescriptor::ford_focus_2006();
+        if cars::resolve(rbr_root, &f.model).is_some() {
+            return Some((
+                CarEntry {
+                    index: car_pack::SLOT as usize,
+                    file_name: f.model,
+                    ini_file: f.parts,
+                    shader_file: f.shaders,
+                    shader_settings: f
+                        .shader_settings
+                        .strip_suffix("_clear.ini")
+                        .unwrap_or(&f.shader_settings)
+                        .to_string(),
+                    texture_path: "Cars/FORD_FOCUS_2006/textures".into(),
+                },
+                cars::resolve(rbr_root, "AudioFMOD/Focus_Mk2_WRC.bank")
+                    .map(|_| "AudioFMOD/Focus_Mk2_WRC.bank".into()),
+            ));
+        }
+    }
+    // Look for a matching folder directly under `Cars/` when `carmodels.json` is absent.
+    let cars_dir = cars::resolve(rbr_root, "Cars").filter(|p| p.is_dir())?;
+    let pack_lower = car.pack.to_ascii_lowercase();
+    let tokens: Vec<String> = car
+        .name
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| t.len() >= 4)
+        .map(str::to_string)
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(&cars_dir) {
+        for dir_entry in entries.flatten() {
+            let folder_path = dir_entry.path();
+            if !folder_path.is_dir() {
+                continue;
+            }
+            let Some(folder_name) = folder_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let folder_lower = folder_name.to_ascii_lowercase();
+            let folder_compact: String = folder_lower
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect();
+            let matched = pack_lower.contains(&folder_compact)
+                || (!tokens.is_empty()
+                    && tokens.iter().filter(|t| folder_lower.contains(t.as_str())).count() >= 2);
+            if !matched {
+                continue;
+            }
+            if let Ok(files) = std::fs::read_dir(&folder_path) {
+                for f in files.flatten() {
+                    let p = f.path();
+                    if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("sgc")) {
+                        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                            let entry = car_pack::model_entry(folder_name, stem);
+                            return Some((entry, None));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn descriptor_from_entry(
+    rbr_root: &Path,
     id: String,
     name: String,
     category: Option<String>,
@@ -84,20 +180,22 @@ fn descriptor_from_entry(
     } else {
         format!("{}_clear.ini", entry.shader_settings.replace('\\', "/"))
     };
-    let tex_dir = entry.texture_path.replace('\\', "/");
-    let tex_dir = tex_dir.trim_end_matches('/');
-    let mut required_textures = Vec::new();
-    if let Some(stem) = entry
-        .file_name
-        .replace('\\', "/")
-        .rsplit('/')
-        .next()
-        .and_then(|s| s.strip_suffix(".sgc").or_else(|| s.strip_suffix(".SGC")))
-    {
-        for suffix in ["external", "external_dynamic", "external_transparent"] {
-            let candidate = format!("{tex_dir}/{stem}_{suffix}.dds");
-            if rerbr_content::validate_relative_path(&candidate).is_ok() {
-                required_textures.push(candidate);
+    let mut required_textures = collect_shader_textures(rbr_root, &entry.shader_file);
+    if required_textures.is_empty() {
+        let tex_dir = entry.texture_path.replace('\\', "/");
+        let tex_dir = tex_dir.trim_end_matches('/');
+        if let Some(stem) = entry
+            .file_name
+            .replace('\\', "/")
+            .rsplit('/')
+            .next()
+            .and_then(|s| s.strip_suffix(".sgc").or_else(|| s.strip_suffix(".SGC")))
+        {
+            for suffix in ["external", "external_dynamic", "external_transparent"] {
+                let candidate = format!("{tex_dir}/{stem}_{suffix}.dds");
+                if rerbr_content::validate_relative_path(&candidate).is_ok() {
+                    required_textures.push(candidate);
+                }
             }
         }
     }
@@ -260,6 +358,7 @@ fn build_rsf_entry(
     };
 
     let mut using_fallback_model = false;
+    let mut fallback_audio_hint = None;
     let model_entry = if let Some(inst) = install {
         match inst.model_entry(car, retail) {
             Ok(m) => {
@@ -271,6 +370,9 @@ fn build_rsf_entry(
             }
             Err(e) => Err(e),
         }
+    } else if let Some((direct_entry, audio_hint)) = try_preset_or_folder_entry(rbr_root, car) {
+        fallback_audio_hint = audio_hint;
+        Ok(direct_entry)
     } else if let Some(retail_slot1) = retail.iter().find(|c| c.index == car_pack::SLOT as usize) {
         using_fallback_model = true;
         notes.push("MODELO FALLBACK SLOT 5 (SIN carmodels.json)".into());
@@ -283,7 +385,8 @@ fn build_rsf_entry(
         .audio
         .as_deref()
         .map(|a| format!("AudioFMOD/{a}.bank"))
-        .filter(|p| rerbr_content::validate_relative_path(p).is_ok());
+        .filter(|p| rerbr_content::validate_relative_path(p).is_ok())
+        .or(fallback_audio_hint);
     let fmod_present = fmod_bank
         .as_deref()
         .and_then(|p| cars::resolve(rbr_root, p))
@@ -338,6 +441,7 @@ fn build_rsf_entry(
     });
 
     let descriptor = descriptor_from_entry(
+        rbr_root,
         id,
         display_name,
         car.group.clone(),

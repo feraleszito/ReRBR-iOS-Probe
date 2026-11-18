@@ -45,6 +45,23 @@ pub struct FocusDiagnosticsReport {
     pub steps: Vec<DiagnosticStep>,
 }
 
+fn detected_fallback_retail_car(vehicle: &VehicleDescriptor) -> Option<&'static str> {
+    if !vehicle.is_ngp_experimental_car() {
+        return None;
+    }
+    rerbr_content::VehicleDescriptor::presets()
+        .into_iter()
+        .find(|p| {
+            !p.is_ngp_experimental_car() && rerbr_content::same_path(&p.model, &vehicle.model)
+        })
+        .map(|_| match vehicle.model.to_ascii_lowercase().as_str() {
+            m if m.contains("impreza03") => "Subaru Impreza 2003 (SLOT 5)",
+            m if m.contains("impreza00") => "Subaru Impreza 2000",
+            m if m.contains("corolla") => "Toyota Corolla WRC",
+            _ => "COCHE ORIGINAL FALLBACK",
+        })
+}
+
 impl FocusDiagnosticsReport {
     pub fn inspect(documents: Option<&Path>, vehicle: &VehicleDescriptor) -> Self {
         let mut steps = Vec::with_capacity(9);
@@ -52,6 +69,7 @@ impl FocusDiagnosticsReport {
             return Self::with_missing_documents(vehicle);
         };
         let rbr_root = doc_root.join("RBR");
+        let fallback_car = detected_fallback_retail_car(vehicle);
 
         // 1. CAR FILES
         let required_ok = vehicle
@@ -59,15 +77,19 @@ impl FocusDiagnosticsReport {
             .filter(|p| !rerbr_content::same_path(p, &vehicle.index))
             .filter(|p| cars::resolve(&rbr_root, p).is_none())
             .collect::<Vec<_>>();
-        let car_files_ok = required_ok.is_empty();
+        let car_files_ok = required_ok.is_empty() && fallback_car.is_none();
         steps.push(DiagnosticStep {
             stage: "CAR FILES",
             status: if car_files_ok {
                 DiagnosticStatus::Ok
+            } else if fallback_car.is_some() && required_ok.is_empty() {
+                DiagnosticStatus::Warning
             } else {
                 DiagnosticStatus::Blocked
             },
-            detail: if car_files_ok {
+            detail: if let Some(fb) = fallback_car {
+                format!("FALLBACK -> {fb} (FALTA MODELO PROPIO EN Cars/)")
+            } else if car_files_ok {
                 format!("{} OK", vehicle.model)
             } else {
                 format!("FALTA {}", required_ok[0])
@@ -75,19 +97,32 @@ impl FocusDiagnosticsReport {
         });
 
         // 2. CAR MODEL (3D SGC + shaders + DDS textures)
-        let car_model_ok = if car_files_ok {
+        let car_model_ok = if required_ok.is_empty() {
             match crate::car::load_vehicle_for_mode(&rbr_root, vehicle, true) {
                 Ok(car) => {
-                    steps.push(DiagnosticStep {
-                        stage: "CAR MODEL",
-                        status: DiagnosticStatus::Ok,
-                        detail: format!(
-                            "{} DIBUJOS / {} TEXTURAS DDS",
-                            car.geometry.drawn.len(),
-                            car.textures.len()
-                        ),
-                    });
-                    true
+                    if let Some(fb) = fallback_car {
+                        steps.push(DiagnosticStep {
+                            stage: "CAR MODEL",
+                            status: DiagnosticStatus::Warning,
+                            detail: format!(
+                                "MODELO FALLBACK {fb} ({} DIBUJOS / {} DDS)",
+                                car.geometry.drawn.len(),
+                                car.textures.len()
+                            ),
+                        });
+                    } else {
+                        steps.push(DiagnosticStep {
+                            stage: "CAR MODEL",
+                            status: DiagnosticStatus::Ok,
+                            detail: format!(
+                                "{} -> {} DIBUJOS / {} DDS",
+                                vehicle.model,
+                                car.geometry.drawn.len(),
+                                car.textures.len()
+                            ),
+                        });
+                    }
+                    fallback_car.is_none()
                 }
                 Err(err) => {
                     steps.push(DiagnosticStep {
@@ -500,5 +535,21 @@ mod tests {
             let bytes = std::fs::read(ngp74).unwrap();
             assert!(rerbr_sim::ngp_candidate::validate_runtime(&bytes).is_ok());
         }
+    }
+
+    #[test]
+    fn fallback_retail_model_never_reports_ok_for_experimental_car() {
+        let mut fake_focus = VehicleDescriptor::ford_focus_2006();
+        fake_focus.model = "Cars/impreza03/impreza03.sgc".into();
+        let dir = std::env::temp_dir().join("rerbr_test_focus_fallback");
+        let _ = std::fs::remove_dir_all(&dir);
+        let imp = dir.join("RBR/Cars/impreza03");
+        std::fs::create_dir_all(&imp).unwrap();
+        std::fs::write(imp.join("impreza03.sgc"), b"").unwrap();
+        let report = FocusDiagnosticsReport::inspect(Some(&dir), &fake_focus);
+        let car_files = report.steps.iter().find(|s| s.stage == "CAR FILES").unwrap();
+        assert_ne!(car_files.status, DiagnosticStatus::Ok);
+        assert!(car_files.detail.contains("FALLBACK"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

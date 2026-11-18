@@ -136,6 +136,7 @@ pub enum Command {
     PnPosYUp,
     PnAnticipationDown,
     PnAnticipationUp,
+    PnToggleDebug,
     PnSave,
     PnReset,
     ChampToggleActive,
@@ -483,12 +484,17 @@ impl Menu {
                 let mut rows = Vec::new();
                 if is_ngp_car {
                     let class_text = entry.map(|e| e.classification.badge()).unwrap_or("RSF NGP");
+                    let fb_warn = if entry.is_some_and(|e| e.using_fallback_model) {
+                        " [MODELO FALLBACK!]"
+                    } else {
+                        ""
+                    };
                     rows.push(Row::info(
                         "CLASIFICACIÓN",
                         if ctx.ngp_experimental {
-                            format!("{class_text} — BACKEND NGP 7.4 ACTIVO")
+                            format!("{class_text}{fb_warn} — BACKEND NGP ACTIVO")
                         } else {
-                            format!("{class_text} — ACTIVA MODO NGP PARA CONDUCIR")
+                            format!("{class_text}{fb_warn} — ACTIVA MODO NGP PARA CONDUCIR")
                         },
                     ));
                 } else if inspected.is_validated_reference() {
@@ -815,6 +821,10 @@ impl Menu {
                         Command::PnAnticipationDown,
                         Command::PnAnticipationUp,
                         format!("{:.1}S", pn.anticipation_s),
+                    ),
+                    Row::action(
+                        format!("DEBUG SPRITE BNK: {}", on_off(pn.debug_sprites)),
+                        Command::PnToggleDebug,
                     ),
                     Row::action("GUARDAR NOTAS VISUALES", Command::PnSave),
                     Row::action("RESTABLECER NOTAS VISUALES", Command::PnReset),

@@ -1073,6 +1073,9 @@ impl Runtime {
                 self.pacenote_hud.anticipation_s =
                     (self.pacenote_hud.anticipation_s + 0.5).min(8.0);
             }
+            PnToggleDebug => {
+                self.pacenote_hud.debug_sprites = !self.pacenote_hud.debug_sprites;
+            }
             PnSave => {
                 self.pacenote_hud.save();
                 self.message = Some("AJUSTES DE NOTAS GUARDADOS".into());
@@ -1796,7 +1799,7 @@ impl Runtime {
                 0.0
             }
             + pad * 2.0;
-        let box_h = icon_sz + 18.0 + pad * 2.0;
+        let box_h = icon_sz + if self.pacenote_hud.debug_sprites { 30.0 } else { 18.0 } + pad * 2.0;
         let bx = (cx - box_w * 0.5).clamp(8.0, 632.0 - box_w);
         let by = (cy - box_h * 0.5).clamp(8.0, ch - box_h - 8.0);
         canvas.rect(bx, by, box_w, box_h, [10, 14, 22, 200]);
@@ -1811,14 +1814,14 @@ impl Runtime {
                     q
                 })
             }) {
-                sprite_canvas.quad(
-                    bx + pad,
-                    by + pad,
-                    icon_sz,
-                    icon_sz,
-                    sref.uv,
-                    [255, 255, 255, 255],
-                );
+                let (dw, dh) = if sref.aspect < 1.0 {
+                    (icon_sz * sref.aspect.max(0.24), icon_sz)
+                } else {
+                    (icon_sz, icon_sz / sref.aspect.max(1.0))
+                };
+                let ox = bx + pad + (icon_sz - dw) * 0.5;
+                let oy = by + pad + (icon_sz - dh) * 0.5;
+                sprite_canvas.quad(ox, oy, dw, dh, sref.uv, [255, 255, 255, 255]);
                 drew_sprite = true;
             }
             if let Some(mref) = mod_ref.and_then(|r| {
@@ -1829,11 +1832,17 @@ impl Runtime {
                     q
                 })
             }) {
+                let max_m = icon_sz * 0.52;
+                let (dw, dh) = if mref.aspect < 1.0 {
+                    (max_m * mref.aspect.max(0.24), max_m)
+                } else {
+                    (max_m, max_m / mref.aspect.max(1.0))
+                };
                 sprite_canvas.quad(
-                    bx + pad + icon_sz + 3.0,
-                    by + pad + icon_sz * 0.2,
-                    icon_sz * 0.52,
-                    icon_sz * 0.52,
+                    bx + pad + icon_sz + 3.0 + (max_m - dw) * 0.5,
+                    by + pad + (icon_sz - dh) * 0.5,
+                    dw,
+                    dh,
                     mref.uv,
                     [255, 255, 255, 255],
                 );
@@ -1845,6 +1854,33 @@ impl Runtime {
                     &visual.label,
                     0.56,
                     TEXT,
+                );
+            }
+            if self.pacenote_hud.debug_sprites {
+                let dbg = match (main_ref, mod_ref) {
+                    (Some(m), Some(f)) => format!(
+                        "T{} {:#x}{} +{:#x}",
+                        visual.tag,
+                        m.sprite,
+                        if m.mirror_x { "M" } else { "" },
+                        f.sprite
+                    ),
+                    (Some(m), None) => format!(
+                        "T{} {:#x}{}",
+                        visual.tag,
+                        m.sprite,
+                        if m.mirror_x { "M" } else { "" }
+                    ),
+                    _ => format!("T{} NO_SPR", visual.tag),
+                };
+                ui::text_clipped(
+                    canvas,
+                    bx + pad,
+                    by + pad + icon_sz + 14.0,
+                    box_w - pad * 2.0,
+                    &dbg,
+                    0.42,
+                    WARN,
                 );
             }
         } else {

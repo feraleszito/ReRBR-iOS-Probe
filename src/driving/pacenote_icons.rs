@@ -7,9 +7,9 @@
 use rerbr_sim::rbr_formats::{bnk, cars, dds, markers};
 use std::path::{Path, PathBuf};
 
-/// First pacenote icon sprite index in `PC_Generic_*.bnk` (page 4 `PC_*_05.dds`).
-pub const FIRST_PACENOTE_SPRITE: usize = 0x4c3;
-pub const LAST_PACENOTE_SPRITE: usize = 0x4e1;
+/// Primary page-0 curve/straight arrow band (`PC_*_01.dds`) and page-4 hazard/overlay band (`PC_*_05.dds`).
+pub const CURVE_SPRITE_PROBE: usize = 0x503;
+pub const HAZARD_SPRITE_PROBE: usize = 0x4c3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PacenoteHudSettings {
@@ -18,6 +18,7 @@ pub struct PacenoteHudSettings {
     pub pos_x: f32,
     pub pos_y: f32,
     pub anticipation_s: f32,
+    pub debug_sprites: bool,
 }
 
 impl Default for PacenoteHudSettings {
@@ -28,6 +29,7 @@ impl Default for PacenoteHudSettings {
             pos_x: 0.50,
             pos_y: 0.14,
             anticipation_s: 3.5,
+            debug_sprites: false,
         }
     }
 }
@@ -84,8 +86,8 @@ impl PacenoteHudSettings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "enabled={}\nscale={:.2}\npos_x={:.2}\npos_y={:.2}\nanticipation_s={:.1}\n",
-            self.enabled, self.scale, self.pos_x, self.pos_y, self.anticipation_s
+            "enabled={}\nscale={:.2}\npos_x={:.2}\npos_y={:.2}\nanticipation_s={:.1}\ndebug_sprites={}\n",
+            self.enabled, self.scale, self.pos_x, self.pos_y, self.anticipation_s, self.debug_sprites
         )
     }
 
@@ -121,6 +123,11 @@ impl PacenoteHudSettings {
                         s.anticipation_s = n;
                     }
                 }
+                "debug_sprites" => {
+                    if let Ok(b) = v.trim().parse() {
+                        s.debug_sprites = b;
+                    }
+                }
                 _ => {}
             }
         }
@@ -132,6 +139,16 @@ impl PacenoteHudSettings {
 pub struct SpriteQuad {
     pub uv: [f32; 4],
     pub aspect: f32,
+    pub page: u32,
+}
+
+#[derive(Clone, Debug)]
+struct AtlasPageSlice {
+    page_index: u32,
+    page_name: String,
+    width: u32,
+    height: u32,
+    y_offset: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -141,7 +158,7 @@ pub struct PacenoteIconAtlas {
     pub rgba8: Vec<u8>,
     pub bank_name: String,
     pub page_name: String,
-    pub page_index: u32,
+    pages: Vec<AtlasPageSlice>,
     pub sprites: Vec<bnk::Sprite>,
 }
 
@@ -159,28 +176,75 @@ impl PacenoteIconAtlas {
             };
             let bnk_bytes = std::fs::read(&bnk_path).map_err(|e| format!("{bnk_rel}: {e}"))?;
             let bank = bnk::parse(&bnk_bytes).map_err(|e| e.to_string())?;
-            let sprite = bank.sprites.get(FIRST_PACENOTE_SPRITE).ok_or_else(|| {
-                format!("{bnk_rel}: missing pacenote sprite {FIRST_PACENOTE_SPRITE:#x}")
-            })?;
-            let page_index = sprite.page;
-            let page_name = bank
-                .pages
-                .get(page_index as usize)
-                .cloned()
-                .ok_or_else(|| format!("{bnk_rel}: bad page {page_index}"))?;
-            let dds_rel = format!("Generic/{page_name}");
-            let dds_path =
-                cars::resolve(rbr_root, &dds_rel).ok_or_else(|| format!("missing {dds_rel}"))?;
-            let dds_bytes = std::fs::read(&dds_path).map_err(|e| format!("{dds_rel}: {e}"))?;
-            let parsed = dds::parse(&dds_bytes).map_err(|e| format!("{dds_rel}: {e}"))?;
-            let rgba8 = decode_dds_top_rgba8(&parsed)?;
+            let curve_page = bank
+                .sprites
+                .get(CURVE_SPRITE_PROBE)
+                .ok_or_else(|| format!("{bnk_rel}: missing curve sprite {CURVE_SPRITE_PROBE:#x}"))?
+                .page;
+            let hazard_page = bank
+                .sprites
+                .get(HAZARD_SPRITE_PROBE)
+                .ok_or_else(|| {
+                    format!("{bnk_rel}: missing hazard sprite {HAZARD_SPRITE_PROBE:#x}")
+                })?
+                .page;
+
+            let mut target_pages = vec![curve_page];
+            if hazard_page != curve_page {
+                target_pages.push(hazard_page);
+            }
+            let mut slices = Vec::with_capacity(target_pages.len());
+            let mut decoded_pages = Vec::with_capacity(target_pages.len());
+            let mut total_w = 0u32;
+            let mut total_h = 0u32;
+
+            for page_index in target_pages {
+                let page_name = bank
+                    .pages
+                    .get(page_index as usize)
+                    .cloned()
+                    .ok_or_else(|| format!("{bnk_rel}: bad page {page_index}"))?;
+                let dds_rel = format!("Generic/{page_name}");
+                let dds_path =
+                    cars::resolve(rbr_root, &dds_rel).ok_or_else(|| format!("missing {dds_rel}"))?;
+                let dds_bytes = std::fs::read(&dds_path).map_err(|e| format!("{dds_rel}: {e}"))?;
+                let parsed = dds::parse(&dds_bytes).map_err(|e| format!("{dds_rel}: {e}"))?;
+                let pixels = decode_dds_top_rgba8(&parsed)?;
+                slices.push(AtlasPageSlice {
+                    page_index,
+                    page_name,
+                    width: parsed.width,
+                    height: parsed.height,
+                    y_offset: total_h,
+                });
+                total_w = total_w.max(parsed.width);
+                total_h += parsed.height;
+                decoded_pages.push((parsed.width, parsed.height, pixels));
+            }
+
+            let mut rgba8 = vec![0u8; total_w as usize * total_h as usize * 4];
+            for (slice, (pw, ph, pixels)) in slices.iter().zip(decoded_pages.into_iter()) {
+                for row in 0..ph as usize {
+                    let src_start = row * pw as usize * 4;
+                    let src_end = src_start + pw as usize * 4;
+                    let dst_start = ((slice.y_offset as usize + row) * total_w as usize) * 4;
+                    let dst_end = dst_start + pw as usize * 4;
+                    rgba8[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
+                }
+            }
+
+            let page_name = slices
+                .iter()
+                .map(|s| s.page_name.as_str())
+                .collect::<Vec<_>>()
+                .join("+");
             return Ok(Self {
-                width: parsed.width,
-                height: parsed.height,
+                width: total_w,
+                height: total_h,
                 rgba8,
                 bank_name: bnk_rel,
                 page_name,
-                page_index,
+                pages: slices,
                 sprites: bank.sprites,
             });
         }
@@ -189,17 +253,25 @@ impl PacenoteIconAtlas {
 
     pub fn sprite_uv(&self, sprite_index: usize) -> Option<SpriteQuad> {
         let s = self.sprites.get(sprite_index)?;
-        if s.page != self.page_index {
-            return None;
-        }
+        let slice = self.pages.iter().find(|p| p.page_index == s.page)?;
         let rect = s.rect();
         let uw = (rect[2] - rect[0]).abs();
         let vh = (rect[3] - rect[1]).abs();
         if uw <= 0.0 || vh <= 0.0 {
             return None;
         }
-        let aspect = (uw * self.width as f32) / (vh * self.height as f32).max(1.0);
-        Some(SpriteQuad { uv: rect, aspect })
+        let u0 = rect[0] * (slice.width as f32 / self.width.max(1) as f32);
+        let u1 = rect[2] * (slice.width as f32 / self.width.max(1) as f32);
+        let v0 = (slice.y_offset as f32 + rect[1] * slice.height as f32) / self.height.max(1) as f32;
+        let v1 = (slice.y_offset as f32 + rect[3] * slice.height as f32) / self.height.max(1) as f32;
+        let px_w = uw * slice.width as f32;
+        let px_h = vh * slice.height as f32;
+        let aspect = px_w / px_h.max(1.0);
+        Some(SpriteQuad {
+            uv: [u0, v0, u1, v1],
+            aspect,
+            page: s.page,
+        })
     }
 }
 
@@ -225,6 +297,10 @@ impl PacenoteSpriteRef {
 }
 
 /// Maps an authentic RBR pacenote `(tag, slot_word_id, flag_word_id)` to `PC_Generic_*.bnk` sprite indices.
+///
+/// Curve arrows come from page 0 (`0x503..=0x50a`, all natively pointing right -> mirrored for left).
+/// Hazard / modifier overlays come from page 4 (`0x4c6`, `0x4cd`, `0x4d4`, `0x4d5`, `0x4df`) and page 0 (`0x4ff`, `0x502`).
+/// Weather sprites (`0x545..=0x54b`) are explicitly excluded.
 pub fn sprite_indices_for_callout(
     tag: u32,
     slot_word_id: Option<u32>,
@@ -233,47 +309,46 @@ pub fn sprite_indices_for_callout(
     use PacenoteSpriteRef as S;
     let main = match tag {
         markers::TAG_START | markers::TAG_FINISH | markers::TAG_SPLIT | markers::TAG_END => None,
-        0 => Some(S::direct(0x549)),       // HAIRPIN LEFT
-        1 => Some(S::direct(0x547)),       // 90 LEFT
-        2 => Some(S::direct(0x546)),       // K LEFT
-        3 => Some(S::mirrored(0x4e1)),     // MED LEFT
-        4 => Some(S::mirrored(0x4d7)),     // FAST LEFT
-        5 => Some(S::direct(0x548)),       // EASY LEFT
-        6 => Some(S::mirrored(0x548)),     // EASY RIGHT
-        7 => Some(S::direct(0x4d7)),       // FAST RIGHT
-        8 => Some(S::direct(0x4e1)),       // MED RIGHT
-        9 => Some(S::mirrored(0x546)),     // K RIGHT
-        10 => Some(S::mirrored(0x547)),    // 90 RIGHT
-        11 => Some(S::mirrored(0x549)),    // HAIRPIN RIGHT
-        12 => Some(S::direct(0x4c4)),      // TWISTY
-        13..=16 => Some(S::direct(0x4cc)), // FLAT / STRAIGHT
+        0 => Some(S::mirrored(0x508)),     // HAIRPIN LEFT
+        1 => Some(S::mirrored(0x507)),     // 90 LEFT
+        2 => Some(S::mirrored(0x506)),     // K LEFT
+        3 => Some(S::mirrored(0x505)),     // MED LEFT
+        4 => Some(S::mirrored(0x504)),     // FAST LEFT
+        5 => Some(S::mirrored(0x503)),     // EASY LEFT
+        6 => Some(S::direct(0x503)),       // EASY RIGHT
+        7 => Some(S::direct(0x504)),       // FAST RIGHT
+        8 => Some(S::direct(0x505)),       // MED RIGHT
+        9 => Some(S::direct(0x506)),       // K RIGHT
+        10 => Some(S::direct(0x507)),      // 90 RIGHT
+        11 => Some(S::direct(0x508)),      // HAIRPIN RIGHT
+        12 => Some(S::direct(0x50a)),      // TWISTY
+        13..=16 => Some(S::direct(0x509)), // FLAT / STRAIGHT
         17 => Some(S::direct(0x4cd)),      // CREST
-        18 => Some(S::direct(0x54b)),      // JUMP
+        18 => Some(S::direct(0x4d5)),      // JUMP
         19 => Some(S::direct(0x4d4)),      // BUMP / DIP
         20 | 32 => Some(S::direct(0x4df)), // CAUTION (!)
         _ => slot_word_id.and_then(|id| match id {
-            0x1d => Some(S::direct(0x549)),
-            0x1e => Some(S::mirrored(0x549)),
-            0x21 => Some(S::direct(0x546)),
-            0x22 => Some(S::mirrored(0x546)),
-            0x25 => Some(S::mirrored(0x4e1)),
-            0x26 => Some(S::direct(0x4e1)),
-            0x19 => Some(S::mirrored(0x4d7)),
-            0x1a => Some(S::direct(0x4d7)),
-            0x17 => Some(S::direct(0x548)),
-            0x18 => Some(S::mirrored(0x548)),
-            0x0e | 0x0f => Some(S::direct(0x4df)),
-            0x1c => Some(S::direct(0x4e0)),
-            0x20 => Some(S::direct(0x54b)),
-            0x28 => Some(S::direct(0x4cd)),
+            0x1d => Some(S::mirrored(0x508)), // Hairpin Left
+            0x1e => Some(S::direct(0x508)),   // Hairpin Right
+            0x21 => Some(S::mirrored(0x506)), // K Left
+            0x22 => Some(S::direct(0x506)),   // K Right
+            0x25 => Some(S::mirrored(0x505)), // Med Left
+            0x26 => Some(S::direct(0x505)),   // Med Right
+            0x19 => Some(S::mirrored(0x504)), // Fast Left
+            0x1a => Some(S::direct(0x504)),   // Fast Right
+            0x17 => Some(S::mirrored(0x503)), // Easy Left
+            0x18 => Some(S::direct(0x503)),   // Easy Right
+            0x0e | 0x0f => Some(S::direct(0x4df)), // Caution
+            0x1c => Some(S::direct(0x4e0)),   // Water / Splash
+            0x20 => Some(S::direct(0x4d5)),   // Jump
+            0x28 => Some(S::direct(0x4cd)),   // Crest
             _ => None,
         }),
     };
     let modifier = flag_word_id.and_then(|w| match w {
-        0x12 => Some(S::direct(0x4c6)), // DON'T CUT
-        0x11 => Some(S::direct(0x4d0)), // CUT
-        0x27 => Some(S::direct(0x4d6)), // NARROWS
-        0x2f => Some(S::direct(0x4d8)), // WIDEOUT
+        0x12 => Some(S::direct(0x4c6)), // DON'T CUT (red slash)
+        0x27 => Some(S::direct(0x4ff)), // NARROWS
+        0x2f => Some(S::direct(0x502)), // WIDEOUT
         _ => None,
     });
     (main, modifier)
@@ -436,12 +511,58 @@ mod tests {
             pos_x: 0.25,
             pos_y: 0.20,
             anticipation_s: 5.0,
+            debug_sprites: true,
         };
         assert_eq!(PacenoteHudSettings::parse(&cfg.serialize()), cfg);
         let bad = PacenoteHudSettings::parse("scale=99\npos_x=-5\nanticipation_s=NaN");
         assert_eq!(bad.scale, 2.0);
         assert_eq!(bad.pos_x, 0.10);
         assert_eq!(bad.anticipation_s, 3.5);
+        assert!(!bad.debug_sprites);
+    }
+
+    #[test]
+    fn never_emits_weather_sprites_for_any_pacenote_tag_or_word() {
+        let weather_range = 0x545usize..=0x54b;
+        for tag in 0u32..=40 {
+            for wid in [
+                None,
+                Some(0x0e),
+                Some(0x17),
+                Some(0x18),
+                Some(0x19),
+                Some(0x1a),
+                Some(0x1c),
+                Some(0x1d),
+                Some(0x1e),
+                Some(0x20),
+                Some(0x21),
+                Some(0x22),
+                Some(0x25),
+                Some(0x26),
+                Some(0x28),
+            ] {
+                let (m, f) = sprite_indices_for_callout(tag, wid, Some(0x12));
+                if let Some(r) = m {
+                    assert!(
+                        !weather_range.contains(&r.sprite),
+                        "tag={tag} wid={wid:?} mapped to weather sprite {:#x}",
+                        r.sprite
+                    );
+                }
+                if let Some(r) = f {
+                    assert!(!weather_range.contains(&r.sprite));
+                }
+            }
+        }
+        // Left vs right symmetry verification: left curves mirror right curves on X.
+        for (left, right) in [(0, 11), (1, 10), (2, 9), (3, 8), (4, 7), (5, 6)] {
+            let (l, _) = sprite_indices_for_callout(left, None, None);
+            let (r, _) = sprite_indices_for_callout(right, None, None);
+            let (l, r) = (l.unwrap(), r.unwrap());
+            assert_eq!(l.sprite, r.sprite);
+            assert!(l.mirror_x && !r.mirror_x);
+        }
     }
 
     #[test]
@@ -452,13 +573,20 @@ mod tests {
         }
         let atlas = PacenoteIconAtlas::load_from_rbr_root(rbr_root).unwrap();
         assert_eq!(atlas.width, 512);
-        assert_eq!(atlas.height, 512);
-        assert_eq!(atlas.rgba8.len(), 512 * 512 * 4);
-        assert!(atlas.sprite_uv(0x4c3).is_some());
-        assert!(atlas.sprite_uv(0x547).is_some());
-        assert!(atlas.sprite_uv(0x4c6).is_some());
+        assert_eq!(atlas.height, 1024);
+        assert_eq!(atlas.rgba8.len(), 512 * 1024 * 4);
+        // Curve sprites live on page 0 (v in 0..0.5)
+        let q90 = atlas.sprite_uv(0x507).unwrap();
+        assert_eq!(q90.page, 0);
+        assert!(q90.uv[1] < 0.5 && q90.uv[3] <= 0.5);
+        // Hazard / modifier sprites live on page 4 (v in 0.5..1.0)
+        let qdcut = atlas.sprite_uv(0x4c6).unwrap();
+        assert_eq!(qdcut.page, 4);
+        assert!(qdcut.uv[1] >= 0.5 && qdcut.uv[3] <= 1.0);
+        let qjump = atlas.sprite_uv(0x4d5).unwrap();
+        assert_eq!(qjump.page, 4);
         let (main, modif) = sprite_indices_for_callout(1, None, Some(0x12));
-        assert_eq!(main, Some(PacenoteSpriteRef::direct(0x547)));
+        assert_eq!(main, Some(PacenoteSpriteRef::mirrored(0x507)));
         assert_eq!(modif, Some(PacenoteSpriteRef::direct(0x4c6)));
     }
 }

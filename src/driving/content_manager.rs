@@ -71,6 +71,7 @@ pub struct VehicleEntry {
     pub classification: VehicleClassification,
     pub drivetrain: Option<String>,
     pub fmod_bank: Option<String>,
+    pub using_fallback_model: bool,
     pub notes: Vec<String>,
 }
 #[derive(Debug, Clone)]
@@ -113,6 +114,7 @@ impl Catalog {
                     classification,
                     drivetrain: None,
                     fmod_bank: None,
+                    using_fallback_model: false,
                     notes: Vec::new(),
                 }
             })
@@ -136,6 +138,7 @@ impl Catalog {
                     classification,
                     drivetrain: None,
                     fmod_bank: None,
+                    using_fallback_model: false,
                     notes: Vec::new(),
                 },
             );
@@ -211,20 +214,36 @@ impl Catalog {
         // Dynamically merge installed RSF NGP vehicles (cleanroom NGPCarMenu / RBRCIT discovery)
         let rbr_root = root.join("RBR");
         for item in super::rsf_catalog::discover(&rbr_root) {
-            let files = audit_vehicle(root, &item.descriptor);
-            let supported = item.descriptor.validate_experimental_ngp().is_ok();
-            let state = state_of(
-                &item.descriptor.id,
-                &selection.vehicle.id,
-                supported,
-                &files,
-            );
+            if item.using_fallback_model {
+                eprintln!(
+                    "catalog WARNING: {} using fallback 3D model '{}' (notes={:?})",
+                    item.descriptor.id, item.descriptor.model, item.notes
+                );
+            }
             if let Some(existing) = catalog
                 .vehicles
                 .iter_mut()
                 .find(|v| v.descriptor.id == item.descriptor.id)
             {
-                existing.descriptor = item.descriptor;
+                let preset_own_model_exists = rerbr_sim::rbr_formats::cars::resolve(
+                    &rbr_root,
+                    &existing.descriptor.model,
+                )
+                .is_some();
+                if item.using_fallback_model && preset_own_model_exists {
+                    existing.using_fallback_model = false;
+                } else {
+                    existing.descriptor = item.descriptor;
+                    existing.using_fallback_model = item.using_fallback_model;
+                }
+                let files = audit_vehicle(root, &existing.descriptor);
+                let supported = existing.descriptor.validate_experimental_ngp().is_ok();
+                let state = state_of(
+                    &existing.descriptor.id,
+                    &selection.vehicle.id,
+                    supported,
+                    &files,
+                );
                 existing.files = files;
                 existing.tech_sheet = item.tech_sheet;
                 existing.classification = item.classification;
@@ -233,6 +252,14 @@ impl Catalog {
                 existing.notes = item.notes;
                 existing.state = state;
             } else {
+                let files = audit_vehicle(root, &item.descriptor);
+                let supported = item.descriptor.validate_experimental_ngp().is_ok();
+                let state = state_of(
+                    &item.descriptor.id,
+                    &selection.vehicle.id,
+                    supported,
+                    &files,
+                );
                 catalog.vehicles.push(VehicleEntry {
                     descriptor: item.descriptor,
                     state,
@@ -241,6 +268,7 @@ impl Catalog {
                     classification: item.classification,
                     drivetrain: item.drivetrain,
                     fmod_bank: item.fmod_bank,
+                    using_fallback_model: item.using_fallback_model,
                     notes: item.notes,
                 });
             }
