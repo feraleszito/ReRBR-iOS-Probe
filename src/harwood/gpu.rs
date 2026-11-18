@@ -163,7 +163,10 @@ impl Scene {
                 self.first_frame = true;
                 match action {
                     crate::driving::SceneAction::Unload => self.loader.cancel(),
-                    crate::driving::SceneAction::Load(selection) => {
+                    crate::driving::SceneAction::Load {
+                        selection,
+                        experimental_ngp,
+                    } => {
                         let device = device.clone();
                         let queue = queue.clone();
                         self.loader.request(Box::new(move |cancel| {
@@ -173,8 +176,12 @@ impl Scene {
                                 crate::car::private_root(std::path::Path::new(&documents));
                             let maps =
                                 PathBuf::from(&documents).join(&selection.stage.documents_maps);
-                            let prepared =
-                                crate::car::prepare_selected(&car_root, &maps, &selection)?;
+                            let prepared = crate::car::prepare_selected_for_mode(
+                                &car_root,
+                                &maps,
+                                &selection,
+                                experimental_ngp,
+                            )?;
                             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                                 return Err("load cancelled".into());
                             }
@@ -710,7 +717,9 @@ pub(crate) fn upload(
     let format = match plan.format {
         dds::Format::Dxt1 => wgpu::TextureFormat::Bc1RgbaUnorm,
         dds::Format::Dxt3 => wgpu::TextureFormat::Bc2RgbaUnorm,
-        _ => return Err("unsupported BC format".into()),
+        dds::Format::Dxt5 => wgpu::TextureFormat::Bc3RgbaUnorm,
+        dds::Format::Bc7 => wgpu::TextureFormat::Bc7RgbaUnorm,
+        dds::Format::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
     };
     eprintln!(
         "{MODE_NAME} UPLOAD: {} | {format:?} {}x{} mips={}",

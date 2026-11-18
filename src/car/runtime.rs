@@ -60,6 +60,8 @@ pub(crate) struct Uploaded {
     terrain: Stats,
     #[cfg(feature = "physics-drive")]
     pivots: [rerbr_render_core::Vec3; 4],
+    #[cfg(feature = "physics-drive")]
+    start_camera: Camera,
     #[cfg(feature = "physics-stage")]
     mounts: crate::driving::cameras::Mounts,
     #[cfg(feature = "physics-stage")]
@@ -99,12 +101,15 @@ impl Runtime {
             car,
             selection,
             terrain,
+            #[cfg(feature = "physics-stage")]
             stage_cameras,
         } = prepared;
-        selection.validate_current_backend()?;
+        selection.validate_for_mode(selection.vehicle.is_ngp_experimental_car())?;
         if car.vehicle != selection.vehicle {
             return Err("selected vehicle does not match prepared geometry".into());
         }
+        #[cfg(feature = "physics-drive")]
+        let start_camera = terrain.camera;
         let stats = Stats {
             vertices: terrain.mesh.vertices.len(),
             triangles: terrain.mesh.indices.len() / 3,
@@ -125,6 +130,8 @@ impl Runtime {
                 terrain: stats,
                 #[cfg(feature = "physics-drive")]
                 pivots,
+                #[cfg(feature = "physics-drive")]
+                start_camera,
                 #[cfg(feature = "physics-stage")]
                 mounts,
                 #[cfg(feature = "physics-stage")]
@@ -138,6 +145,11 @@ impl Runtime {
         ))
     }
     pub(crate) fn install_uploaded(&mut self, uploaded: Uploaded) -> Result<(), String> {
+        #[cfg(feature = "physics-drive")]
+        uploaded
+            .selection
+            .validate_for_mode(self.driving.ngp_experimental)?;
+        #[cfg(not(feature = "physics-drive"))]
         uploaded.selection.validate_current_backend()?;
         #[cfg(feature = "physics-drive")]
         {
@@ -145,6 +157,7 @@ impl Runtime {
                 return Err("stale scene selection".into());
             }
             self.driving.install_pivots(uploaded.pivots);
+            self.driving.set_visual_start_pose(uploaded.start_camera);
         }
         #[cfg(feature = "physics-stage")]
         {

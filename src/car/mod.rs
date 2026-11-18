@@ -30,6 +30,7 @@ pub struct Prepared {
     pub terrain: crate::harwood::LoadedBlock,
     pub path: placement::ChasePath,
     pub car: Car,
+    #[cfg(feature = "physics-stage")]
     pub stage_cameras: Option<crate::driving::replay::StageCameras>,
 }
 pub fn prepare(install: &Path, maps: &Path) -> Result<Prepared, String> {
@@ -40,17 +41,32 @@ pub fn prepare_selected(
     maps: &Path,
     selection: &rerbr_content::Selection,
 ) -> Result<Prepared, String> {
-    selection.validate_current_backend()?;
+    prepare_selected_for_mode(install, maps, selection, false)
+}
+pub fn prepare_selected_for_mode(
+    install: &Path,
+    maps: &Path,
+    selection: &rerbr_content::Selection,
+    allow_experimental_ngp: bool,
+) -> Result<Prepared, String> {
+    selection.validate_for_mode(allow_experimental_ngp)?;
     #[cfg(not(feature = "physics-stage"))]
     if selection.stage.id != "harwood-forest" {
         return Err("multiple stages require physics-stage mode".into());
     }
     #[cfg(feature = "physics-stage")]
-    match rerbr_sim::audio_audit::inspect_vehicle(install, &selection.vehicle) {
-        Ok(report) => eprintln!("physics-stage AUDIO BANK CPU PASS: {report:?}; output not implemented; silent milestone"),
-        Err(error) => eprintln!("physics-stage AUDIO DISABLED: {error}; silent milestone; geometry can still load"),
+    if selection.vehicle.is_ngp_experimental_car() {
+        eprintln!(
+            "experimental-ngp AUDIO: {} requires unsupported FMOD bank ({}); silent mode",
+            selection.vehicle.id, selection.vehicle.audio_index
+        );
+    } else {
+        match rerbr_sim::audio_audit::inspect_vehicle(install, &selection.vehicle) {
+            Ok(report) => eprintln!("physics-stage AUDIO BANK CPU PASS: {report:?}; output not implemented; silent milestone"),
+            Err(error) => eprintln!("physics-stage AUDIO DISABLED: {error}; silent milestone; geometry can still load"),
+        }
     }
-    let car = load_vehicle(install, &selection.vehicle)?;
+    let car = load_vehicle_for_mode(install, &selection.vehicle, allow_experimental_ngp)?;
     #[cfg(not(feature = "physics-stage"))]
     let (path, render) = {
         let terrain = crate::harwood::benchmark::load(maps)?;
@@ -74,6 +90,7 @@ pub fn prepare_selected(
     };
     #[cfg(not(feature = "physics-stage"))]
     path.validate()?;
+    #[cfg(feature = "physics-stage")]
     let stage_cameras =
         crate::driving::replay::StageCameras::load_for_stage(maps, &selection.stage.stem);
     Ok(Prepared {
@@ -81,6 +98,7 @@ pub fn prepare_selected(
         terrain: render,
         path,
         car,
+        #[cfg(feature = "physics-stage")]
         stage_cameras,
     })
 }
@@ -134,26 +152,74 @@ pub fn load_vehicle(
     root: &Path,
     vehicle: &rerbr_content::VehicleDescriptor,
 ) -> Result<Car, String> {
-    vehicle.validate_current_backend()?;
-    let index = read(root, vehicle, &vehicle.index, 1024 * 1024)?;
-    let entries = cars::parse(&String::from_utf8_lossy(&index)).map_err(|e| e.to_string())?;
-    let entry = entries
-        .iter()
-        .find(|e| e.index == vehicle.original_slot as usize)
-        .ok_or_else(|| format!("CAR: [Car{:02}] missing", vehicle.original_slot))?;
-    if !rerbr_content::same_path(&entry.file_name, &vehicle.model) {
-        return Err(format!("CAR: selected model mismatch for {}", vehicle.id));
+    load_vehicle_for_mode(root, vehicle, false)
+}
+pub fn load_vehicle_for_mode(
+    root: &Path,
+    vehicle: &rerbr_content::VehicleDescriptor,
+    allow_experimental_ngp: bool,
+) -> Result<Car, String> {
+    if allow_experimental_ngp {
+        vehicle.validate_experimental_ngp()?;
+    } else {
+        vehicle.validate_current_backend()?;
     }
-    let clear = format!("{}_clear.ini", entry.shader_settings);
-    if !rerbr_content::same_path(&entry.ini_file, &vehicle.parts)
-        || !rerbr_content::same_path(&entry.shader_file, &vehicle.shaders)
-        || !rerbr_content::same_path(&clear, &vehicle.shader_settings)
-    {
-        return Err(format!(
-            "CAR: configuration dependencies disagree with selected vehicle {}",
-            vehicle.id
-        ));
-    }
+    let (entry, clear, mut files) = if allow_experimental_ngp && vehicle.is_ngp_experimental_car() {
+        let base_settings = vehicle
+            .shader_settings
+            .strip_suffix("_clear.ini")
+            .unwrap_or(&vehicle.shader_settings)
+            .to_string();
+        let folder = vehicle
+            .model
+            .rsplit_once('/')
+            .map(|(dir, _)| format!("{dir}/textures/"))
+            .unwrap_or_else(|| "Cars/FORD_FOCUS_2006/textures/".into());
+        let entry = cars::CarEntry {
+            index: 5,
+            file_name: vehicle.model.clone(),
+            ini_file: vehicle.parts.clone(),
+            shader_file: vehicle.shaders.clone(),
+            shader_settings: base_settings,
+            texture_path: folder,
+        };
+        let files = vec![
+            entry.file_name.clone(),
+            entry.ini_file.clone(),
+            entry.shader_file.clone(),
+            vehicle.shader_settings.clone(),
+        ];
+        (entry, vehicle.shader_settings.clone(), files)
+    } else {
+        let index = read(root, vehicle, &vehicle.index, 1024 * 1024)?;
+        let entries = cars::parse(&String::from_utf8_lossy(&index)).map_err(|e| e.to_string())?;
+        let entry = entries
+            .iter()
+            .find(|e| e.index == vehicle.original_slot as usize)
+            .cloned()
+            .ok_or_else(|| format!("CAR: [Car{:02}] missing", vehicle.original_slot))?;
+        if !rerbr_content::same_path(&entry.file_name, &vehicle.model) {
+            return Err(format!("CAR: selected model mismatch for {}", vehicle.id));
+        }
+        let clear = format!("{}_clear.ini", entry.shader_settings);
+        if !rerbr_content::same_path(&entry.ini_file, &vehicle.parts)
+            || !rerbr_content::same_path(&entry.shader_file, &vehicle.shaders)
+            || !rerbr_content::same_path(&clear, &vehicle.shader_settings)
+        {
+            return Err(format!(
+                "CAR: configuration dependencies disagree with selected vehicle {}",
+                vehicle.id
+            ));
+        }
+        let files = vec![
+            vehicle.index.clone(),
+            entry.file_name.clone(),
+            entry.ini_file.clone(),
+            entry.shader_file.clone(),
+            clear.clone(),
+        ];
+        (entry, clear, files)
+    };
     let bytes = read(root, vehicle, &entry.file_name, 32 * 1024 * 1024)?;
     let elements = sgc::parse(&bytes).map_err(|e| format!("CAR SGC: {e}"))?;
     eprintln!(
@@ -165,14 +231,14 @@ pub fn load_vehicle(
     let parts = sections(root, vehicle, &entry.ini_file)?;
     let shaders = sections(root, vehicle, &entry.shader_file)?;
     let settings = sections(root, vehicle, &clear)?;
-    let geometry = mesh::convert(&elements, &parts, &shaders, &settings)?;
-    let mut files = vec![
-        vehicle.index.clone(),
-        entry.file_name.clone(),
-        entry.ini_file.clone(),
-        entry.shader_file.clone(),
-        clear,
-    ];
+    let geometry = mesh::convert_for_mode(
+        &elements,
+        &parts,
+        &shaders,
+        &settings,
+        allow_experimental_ngp && vehicle.is_ngp_experimental_car(),
+    )?;
+    let _ = &mut files;
     let mut textures = BTreeMap::new();
     for path in geometry
         .materials

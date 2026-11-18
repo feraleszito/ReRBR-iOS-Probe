@@ -130,6 +130,9 @@ impl VehicleDescriptor {
     pub fn is_experimental(&self) -> bool {
         self.is_original_rbr() && !self.is_validated_reference()
     }
+    pub fn is_ngp_experimental_car(&self) -> bool {
+        self.id == "ford-focus-rs-wrc-2006"
+    }
     /// Backend compatibility gate: accepts all 8 retail RBR cars (with non-Corolla in experimental mode)
     /// while blocking Ford Focus 2006 and external unvalidated mods.
     pub fn validate_current_backend(&self) -> Result<(), String> {
@@ -141,6 +144,19 @@ impl VehicleDescriptor {
             ));
         }
         Ok(())
+    }
+    /// Experimental NGP compatibility gate: explicitly opts in `ford-focus-rs-wrc-2006` in addition
+    /// to original retail cars, never confusing it with certified RBR retail physics.
+    pub fn validate_experimental_ngp(&self) -> Result<(), String> {
+        self.validate_schema()?;
+        if self.is_original_rbr() || self.is_ngp_experimental_car() {
+            Ok(())
+        } else {
+            Err(format!(
+                "unsupported experimental vehicle profile '{}'",
+                self.id
+            ))
+        }
     }
 }
 impl StageDescriptor {
@@ -219,6 +235,14 @@ impl Selection {
         self.vehicle.validate_current_backend()?;
         self.stage.validate_current_backend()
     }
+    pub fn validate_for_mode(&self, experimental_ngp: bool) -> Result<(), String> {
+        if experimental_ngp {
+            self.vehicle.validate_experimental_ngp()?;
+            self.stage.validate_current_backend()
+        } else {
+            self.validate_current_backend()
+        }
+    }
 }
 impl Default for VehicleDescriptor {
     fn default() -> Self {
@@ -283,6 +307,10 @@ impl VehicleDescriptor {
                 "focus_wrc06_internal_scrape.dds",
                 "focus_wrc06_internal_kwindscreen.dds",
                 "focus_wrc06_parts.dds",
+                "focus_wrc06_external_dynamic_mud.dds",
+                "focus_wrc06_external_mud.dds",
+                "focus_wrc06_external_scrape.dds",
+                "focus_wrc06_extra_lights.dds",
             ]
             .map(|n| format!("Cars/FORD_FOCUS_2006/textures/{n}"))
             .into(),

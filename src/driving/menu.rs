@@ -28,6 +28,7 @@ pub enum Page {
     Driving,
     StageComplete,
     Replay,
+    NgpExperimental,
 }
 
 pub(crate) fn format_stage_time(seconds: f64) -> String {
@@ -63,12 +64,17 @@ pub enum Command {
     VolumeUp,
     MusicVolumeDown,
     MusicVolumeUp,
+    CodriverVolumeDown,
+    CodriverVolumeUp,
     ToggleFps,
     ToggleDiagnostics,
     ToggleMinimalHud,
     ToggleInvertPedals,
     InspectContent,
     CheckPhysics,
+    ToggleExperimentalMode,
+    RunFocusDiagnostics,
+    StartFocusVisualInspection,
     OpenVehicle(usize),
     SelectVehicle(usize),
     OpenStage(usize),
@@ -180,6 +186,7 @@ pub struct Context<'a> {
     pub dead_zone: f64,
     pub volume: f64,
     pub music_volume: f64,
+    pub codriver_volume: f64,
     pub fps: bool,
     pub diagnostics: bool,
     pub minimal_hud: bool,
@@ -188,6 +195,8 @@ pub struct Context<'a> {
     pub global_opacity: f32,
     pub stage_result: Option<super::race::StageResult>,
     pub has_replay: bool,
+    pub ngp_experimental: bool,
+    pub focus_diagnostics: Option<&'a super::ngp_experimental::FocusDiagnosticsReport>,
 }
 
 #[derive(Debug, Default)]
@@ -245,6 +254,7 @@ impl Menu {
             Page::Driving => "CONDUCCIÓN",
             Page::StageComplete => "STAGE COMPLETE",
             Page::Replay => "REPETICIÓN",
+            Page::NgpExperimental => "NGP EXPERIMENTAL",
         }
     }
     pub fn rows(&self, ctx: &Context) -> Vec<Row> {
@@ -329,9 +339,23 @@ impl Menu {
                 let entry = ctx.content.vehicles.get(self.inspected_vehicle);
                 let inspected = entry.map(|e| &e.descriptor).unwrap_or(vehicle);
                 let state = entry.map_or(vehicle_state, |e| e.state);
-                let supported = inspected.validate_current_backend().is_ok();
+                let is_ngp_car = inspected.is_ngp_experimental_car();
+                let supported = if is_ngp_car {
+                    ctx.ngp_experimental
+                } else {
+                    inspected.validate_current_backend().is_ok()
+                };
                 let mut rows = Vec::new();
-                if inspected.is_experimental() {
+                if is_ngp_car {
+                    rows.push(Row::info(
+                        "PERFIL",
+                        if ctx.ngp_experimental {
+                            "NGP EXPERIMENTAL ACTIVADO (NO CERTIFICADO)"
+                        } else {
+                            "NGP 7.5 EXPERIMENTAL (BLOQUEADO EN MODO ESTABLE)"
+                        },
+                    ));
+                } else if inspected.is_experimental() {
                     rows.push(Row::info("PERFIL", "MODO EXPERIMENTAL (SLOT RBR ORIGINAL)"));
                 } else if inspected.is_validated_reference() {
                     rows.push(Row::info("PERFIL", "VEHÍCULO DE REFERENCIA VALIDADO"));
@@ -341,7 +365,11 @@ impl Menu {
                 } else {
                     rows.push(Row {
                         label: if supported {
-                            "SELECCIONAR COCHE".into()
+                            if is_ngp_car {
+                                "SELECCIONAR FOCUS (NGP EXPERIMENTAL)".into()
+                            } else {
+                                "SELECCIONAR COCHE".into()
+                            }
                         } else {
                             "NO DISPONIBLE / REQUIERE NGP (BLOQUEADO)".into()
                         },
@@ -350,6 +378,16 @@ impl Menu {
                             enabled: supported,
                         },
                     });
+                }
+                if is_ngp_car {
+                    rows.push(Row::action(
+                        format!("MODO NGP EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
+                        Command::ToggleExperimentalMode,
+                    ));
+                    rows.push(Row::action(
+                        "DIAGNÓSTICO FOCUS NGP (9 ETAPAS)",
+                        Command::RunFocusDiagnostics,
+                    ));
                 }
                 if let Some(sheet) = entry.and_then(|e| e.tech_sheet.as_ref()) {
                     rows.push(Row::info("FÍSICA", sheet.physics_summary()));
@@ -492,7 +530,11 @@ impl Menu {
                 rows
             }
             Page::ContentCompatibility => {
-                let vehicle_ok = vehicle.validate_current_backend().is_ok();
+                let vehicle_ok = if ctx.ngp_experimental {
+                    vehicle.validate_experimental_ngp().is_ok()
+                } else {
+                    vehicle.validate_current_backend().is_ok()
+                };
                 let stage_ok = stage.validate_current_backend().is_ok();
                 vec![
                     Row::info(
@@ -503,7 +545,19 @@ impl Menu {
                     Row::info("PHYSICS DATA", "NGP NOT CERTIFIED"),
                     Row::info(
                         "BACKEND ACTIVO",
-                        super::ngp_proto::PhysicsBackend::OriginalRetail.label(),
+                        if ctx.ngp_experimental {
+                            "MODO NGP EXPERIMENTAL (FOCUS 2006)"
+                        } else {
+                            super::ngp_proto::PhysicsBackend::OriginalRetail.label()
+                        },
+                    ),
+                    Row::action(
+                        format!("MODO NGP EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
+                        Command::ToggleExperimentalMode,
+                    ),
+                    Row::action(
+                        "DIAGNÓSTICO FOCUS NGP (9 ETAPAS)",
+                        Command::RunFocusDiagnostics,
                     ),
                     Row::action("RUN DESCRIPTOR CHECK", Command::CheckPhysics),
                     Row::action("BACK", Command::Back),
@@ -534,6 +588,12 @@ impl Menu {
                     Command::MusicVolumeDown,
                     Command::MusicVolumeUp,
                     format!("{:.0}%", ctx.music_volume * 100.0),
+                ),
+                Row::stepper(
+                    "VOLUMEN COPILOTO",
+                    Command::CodriverVolumeDown,
+                    Command::CodriverVolumeUp,
+                    format!("{:.0}%", ctx.codriver_volume * 100.0),
                 ),
                 Row::action(
                     format!("INVERTIR PEDALES: {}", on_off(ctx.invert_pedals)),
@@ -694,6 +754,35 @@ impl Menu {
                 rows
             }
             Page::Replay => Vec::new(),
+            Page::NgpExperimental => {
+                let visual_ready = ctx
+                    .focus_diagnostics
+                    .is_some_and(|r| r.can_enter_visual_mode());
+                let pack_ready = ctx
+                    .focus_diagnostics
+                    .is_some_and(|r| r.can_boot_ngp_pack().is_some());
+                vec![
+                    Row::action(
+                        format!("MODO NGP EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
+                        Command::ToggleExperimentalMode,
+                    ),
+                    Row::action("ACTUALIZAR DIAGNÓSTICO", Command::RunFocusDiagnostics),
+                    Row {
+                        label: if pack_ready {
+                            "INICIAR PRUEBA NGP FOCUS (SILENCIO FMOD)".into()
+                        } else if visual_ready {
+                            "INSPECCIÓN VISUAL FOCUS (SIN FÍSICA NGP)".into()
+                        } else {
+                            "PRUEBA FOCUS BLOQUEADA (REVISAR CAR FILES)".into()
+                        },
+                        kind: RowKind::Action {
+                            command: Command::StartFocusVisualInspection,
+                            enabled: visual_ready,
+                        },
+                    },
+                    Row::action("VOLVER", Command::Back),
+                ]
+            }
         }
     }
     pub fn subtitle(&self, ctx: &Context) -> Vec<String> {
@@ -839,6 +928,10 @@ impl Menu {
                 "REPETICIÓN OFICIAL DE TRAMO".into(),
                 format!("{} — {}", vehicle.name, stage.name),
             ],
+            Page::NgpExperimental => vec![
+                "DIAGNÓSTICO 9 ETAPAS — FORD FOCUS RS WRC 2006 (NO CERTIFICADO)".into(),
+                format!("ESTADO MODO EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
+            ],
         }
     }
     fn row_bounds(&self) -> (f32, f32, f32, f32) {
@@ -846,6 +939,7 @@ impl Menu {
             Page::CameraEditor => (0.03, 0.43, 0.10, 0.94),
             Page::Loading => (0.28, 0.44, 0.76, 0.86),
             Page::ControlsEditor => (0.28, 0.44, 0.04, 0.36),
+            Page::NgpExperimental => (0.055, 0.89, 0.615, 0.89),
             _ => (ROW_X, ROW_WIDTH, ROW_TOP, ROW_BOTTOM),
         }
     }
@@ -931,6 +1025,60 @@ impl Menu {
                 [8, 10, 14, 218],
                 LINE,
             );
+        }
+
+        if self.page == Page::NgpExperimental {
+            let panel = Rect::new(0.055, 0.195, 0.89, 0.405);
+            ui::panel(canvas, panel, PANEL_DEEP, LINE);
+            let (px, py, pw, ph) = ui::px(panel, canvas);
+            if let Some(report) = ctx.focus_diagnostics {
+                let row_h = (ph - 10.0) / 9.0f32.max(report.steps.len() as f32);
+                for (idx, step) in report.steps.iter().take(9).enumerate() {
+                    let sy = py + 5.0 + idx as f32 * row_h;
+                    let badge_color = match step.status {
+                        super::ngp_experimental::DiagnosticStatus::Ok => GOOD,
+                        super::ngp_experimental::DiagnosticStatus::Warning => WARN,
+                        super::ngp_experimental::DiagnosticStatus::Unsupported => ACCENT,
+                        super::ngp_experimental::DiagnosticStatus::Blocked => BAD,
+                        super::ngp_experimental::DiagnosticStatus::Pending => DIM,
+                    };
+                    ui::text_clipped(
+                        canvas,
+                        px + 10.0,
+                        sy + 2.0,
+                        pw * 0.29,
+                        step.stage,
+                        0.66,
+                        TEXT,
+                    );
+                    ui::text_clipped(
+                        canvas,
+                        px + pw * 0.30,
+                        sy + 2.0,
+                        pw * 0.16,
+                        step.status.label(),
+                        0.66,
+                        badge_color,
+                    );
+                    ui::text_clipped(
+                        canvas,
+                        px + pw * 0.46,
+                        sy + 2.0,
+                        pw * 0.52,
+                        &step.detail,
+                        0.62,
+                        DIM,
+                    );
+                }
+            } else {
+                ui::text_center(
+                    canvas,
+                    panel,
+                    "PULSA ACTUALIZAR DIAGNÓSTICO PARA INSPECCIONAR",
+                    0.8,
+                    DIM,
+                );
+            }
         }
 
         let rows = self.rows(ctx);
@@ -1066,6 +1214,60 @@ impl Menu {
                     BAD,
                 );
             }
+            if self.page == Page::NgpExperimental {
+                let panel = Rect::new(0.055, 0.195, 0.89, 0.405);
+                ui::panel(canvas, panel, PANEL_DEEP, LINE);
+                let (px, py, pw, ph) = ui::px(panel, canvas);
+                if let Some(report) = ctx.focus_diagnostics {
+                    let row_h = (ph - 10.0) / 9.0f32.max(report.steps.len() as f32);
+                    for (idx, step) in report.steps.iter().take(9).enumerate() {
+                        let sy = py + 5.0 + idx as f32 * row_h;
+                        let badge_color = match step.status {
+                            super::ngp_experimental::DiagnosticStatus::Ok => GOOD,
+                            super::ngp_experimental::DiagnosticStatus::Warning => WARN,
+                            super::ngp_experimental::DiagnosticStatus::Unsupported => ACCENT,
+                            super::ngp_experimental::DiagnosticStatus::Blocked => BAD,
+                            super::ngp_experimental::DiagnosticStatus::Pending => DIM,
+                        };
+                        ui::text_clipped(
+                            canvas,
+                            px + 10.0,
+                            sy + 2.0,
+                            pw * 0.29,
+                            step.stage,
+                            0.66,
+                            TEXT,
+                        );
+                        ui::text_clipped(
+                            canvas,
+                            px + pw * 0.30,
+                            sy + 2.0,
+                            pw * 0.16,
+                            step.status.label(),
+                            0.66,
+                            badge_color,
+                        );
+                        ui::text_clipped(
+                            canvas,
+                            px + pw * 0.46,
+                            sy + 2.0,
+                            pw * 0.52,
+                            &step.detail,
+                            0.62,
+                            DIM,
+                        );
+                    }
+                } else {
+                    ui::text_center(
+                        canvas,
+                        panel,
+                        "PULSA ACTUALIZAR DIAGNÓSTICO PARA INSPECCIONAR",
+                        0.8,
+                        DIM,
+                    );
+                }
+            }
+
             let rows = self.rows(ctx);
             for (index, row) in rows.iter().enumerate() {
                 let rect = self.row_rect_for(index, rows.len());
@@ -1090,6 +1292,60 @@ impl Menu {
             );
         }
         if ctx.loading_error.is_none() {
+            if self.page == Page::NgpExperimental {
+                let panel = Rect::new(0.055, 0.195, 0.89, 0.405);
+                ui::panel(canvas, panel, PANEL_DEEP, LINE);
+                let (px, py, pw, ph) = ui::px(panel, canvas);
+                if let Some(report) = ctx.focus_diagnostics {
+                    let row_h = (ph - 10.0) / 9.0f32.max(report.steps.len() as f32);
+                    for (idx, step) in report.steps.iter().take(9).enumerate() {
+                        let sy = py + 5.0 + idx as f32 * row_h;
+                        let badge_color = match step.status {
+                            super::ngp_experimental::DiagnosticStatus::Ok => GOOD,
+                            super::ngp_experimental::DiagnosticStatus::Warning => WARN,
+                            super::ngp_experimental::DiagnosticStatus::Unsupported => ACCENT,
+                            super::ngp_experimental::DiagnosticStatus::Blocked => BAD,
+                            super::ngp_experimental::DiagnosticStatus::Pending => DIM,
+                        };
+                        ui::text_clipped(
+                            canvas,
+                            px + 10.0,
+                            sy + 2.0,
+                            pw * 0.29,
+                            step.stage,
+                            0.66,
+                            TEXT,
+                        );
+                        ui::text_clipped(
+                            canvas,
+                            px + pw * 0.30,
+                            sy + 2.0,
+                            pw * 0.16,
+                            step.status.label(),
+                            0.66,
+                            badge_color,
+                        );
+                        ui::text_clipped(
+                            canvas,
+                            px + pw * 0.46,
+                            sy + 2.0,
+                            pw * 0.52,
+                            &step.detail,
+                            0.62,
+                            DIM,
+                        );
+                    }
+                } else {
+                    ui::text_center(
+                        canvas,
+                        panel,
+                        "PULSA ACTUALIZAR DIAGNÓSTICO PARA INSPECCIONAR",
+                        0.8,
+                        DIM,
+                    );
+                }
+            }
+
             let rows = self.rows(ctx);
             for (index, row) in rows.iter().enumerate() {
                 let rect = self.row_rect_for(index, rows.len());
@@ -1141,8 +1397,10 @@ pub struct Settings {
     pub invert_pedals: bool,
     pub volume: f64,
     pub music_volume: f64,
+    pub codriver_volume: f64,
     pub camera: u8,
     pub stage_id: String,
+    pub ngp_experimental: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -1155,8 +1413,10 @@ impl Default for Settings {
             invert_pedals: false,
             volume: 0.8,
             music_volume: 0.70,
+            codriver_volume: 0.85,
             camera: 0,
             stage_id: rerbr_content::StageDescriptor::default().id,
+            ngp_experimental: false,
         }
     }
 }
@@ -1200,6 +1460,13 @@ impl Settings {
                         }
                     }
                 }
+                "codriver_volume" => {
+                    if let Ok(v) = value.parse::<f64>() {
+                        if v.is_finite() {
+                            settings.codriver_volume = v.clamp(0.0, 1.0);
+                        }
+                    }
+                }
                 "camera" => {
                     if let Ok(v) = value.parse::<u8>() {
                         settings.camera = v.min(2);
@@ -1208,6 +1475,7 @@ impl Settings {
                 "stage_id" if !value.trim().is_empty() => {
                     settings.stage_id = value.trim().to_string();
                 }
+                "ngp_experimental" => settings.ngp_experimental = value == "true",
                 _ => (),
             }
         }
@@ -1224,9 +1492,9 @@ impl Settings {
     }
     fn encode(&self) -> String {
         format!(
-            "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nvolume={}\nmusic_volume={}\ncamera={}\nstage_id={}\n",
+            "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nvolume={}\nmusic_volume={}\ncodriver_volume={}\ncamera={}\nstage_id={}\nngp_experimental={}\n",
             self.sensitivity, self.dead_zone, self.fps, self.diagnostics,
-            self.minimal_hud, self.invert_pedals, self.volume, self.music_volume, self.camera, self.stage_id
+            self.minimal_hud, self.invert_pedals, self.volume, self.music_volume, self.codriver_volume, self.camera, self.stage_id, self.ngp_experimental
         )
     }
     pub fn save(&self) {
@@ -1262,6 +1530,7 @@ mod tests {
             dead_zone: 0.03,
             volume: 0.8,
             music_volume: 0.70,
+            codriver_volume: 0.85,
             fps: false,
             diagnostics: false,
             minimal_hud: false,
@@ -1270,6 +1539,8 @@ mod tests {
             global_opacity: 0.5,
             stage_result: None,
             has_replay: false,
+            ngp_experimental: false,
+            focus_diagnostics: None,
         }
     }
 
@@ -1365,7 +1636,7 @@ mod tests {
             ..Menu::default()
         };
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 12);
+        assert_eq!(rows.len(), 13);
         for (row_idx, value, expected_down, expected_up) in [
             (0usize, "2.00", Command::SensDown, Command::SensUp),
             (3usize, "80%", Command::VolumeDown, Command::VolumeUp),
@@ -1374,6 +1645,12 @@ mod tests {
                 "70%",
                 Command::MusicVolumeDown,
                 Command::MusicVolumeUp,
+            ),
+            (
+                5usize,
+                "85%",
+                Command::CodriverVolumeDown,
+                Command::CodriverVolumeUp,
             ),
         ] {
             let rect = menu.row_rect_for(row_idx, rows.len());
@@ -1391,7 +1668,7 @@ mod tests {
                 Some(expected_up)
             );
         }
-        let inv_rect = menu.row_rect_for(5, rows.len());
+        let inv_rect = menu.row_rect_for(6, rows.len());
         assert_eq!(
             menu.press(
                 inv_rect.center_x() as f64,
@@ -1483,7 +1760,17 @@ mod tests {
         let selection = Selection::default();
         let content = Catalog::descriptors(&selection);
         let mut ctx = context(&selection, &content);
-        for page in [Page::Loading, Page::CameraEditor, Page::ControlsEditor] {
+        let report = crate::driving::ngp_experimental::FocusDiagnosticsReport::inspect(
+            None,
+            &rerbr_content::VehicleDescriptor::ford_focus_2006(),
+        );
+        ctx.focus_diagnostics = Some(&report);
+        for page in [
+            Page::Loading,
+            Page::CameraEditor,
+            Page::ControlsEditor,
+            Page::NgpExperimental,
+        ] {
             let menu = Menu {
                 page,
                 ..Menu::default()

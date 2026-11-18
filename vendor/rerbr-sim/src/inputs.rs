@@ -23,7 +23,14 @@ impl Paths {
         Self::for_selection(documents, &rerbr_content::Selection::default()).expect("validated default content profile")
     }
     pub fn for_selection(documents: &Path, selection: &rerbr_content::Selection) -> Result<Self, String> {
-        selection.validate_current_backend()?;
+        Self::for_mode(documents, selection, false)
+    }
+    pub fn for_mode(
+        documents: &Path,
+        selection: &rerbr_content::Selection,
+        experimental_ngp: bool,
+    ) -> Result<Self, String> {
+        selection.validate_for_mode(experimental_ngp)?;
         Ok(Self {
             install: documents.join("RBR"),
             overlay: None,

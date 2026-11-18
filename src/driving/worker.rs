@@ -52,6 +52,20 @@ impl Worker {
         }
     }
     pub fn new_selected(selection: rerbr_content::Selection, automatic: bool) -> Self {
+        Self::spawn_inner(selection, automatic, None)
+    }
+    pub fn new_experimental_pack(
+        selection: rerbr_content::Selection,
+        pack_path: std::path::PathBuf,
+        automatic: bool,
+    ) -> Self {
+        Self::spawn_inner(selection, automatic, Some(pack_path))
+    }
+    fn spawn_inner(
+        selection: rerbr_content::Selection,
+        automatic: bool,
+        experimental_pack: Option<std::path::PathBuf>,
+    ) -> Self {
         let state = Arc::new(Mutex::new(Shared {
             input: Control::default(),
             paused: true,
@@ -71,7 +85,13 @@ impl Worker {
             .stack_size(STACK_BYTES)
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(&s, &stop_thread, automatic, &selection)
+                    run(
+                        &s,
+                        &stop_thread,
+                        automatic,
+                        &selection,
+                        experimental_pack.as_deref(),
+                    )
                 }));
                 let error = match result {
                     Ok(Ok(())) => None,
@@ -117,6 +137,7 @@ fn run(
     stop: &AtomicBool,
     automatic: bool,
     selection: &rerbr_content::Selection,
+    experimental_pack: Option<&std::path::Path>,
 ) -> Result<(), String> {
     static OWNER: Mutex<()> = Mutex::new(());
     let _owner = loop {
@@ -132,12 +153,20 @@ fn run(
         }
     };
     let documents = std::env::var_os("RERBR_PROBE_DOCUMENTS").ok_or("Documents unavailable")?;
-    let paths = Paths::for_selection(std::path::Path::new(&documents), selection)?;
-    let mut session = Session::boot_selected(&paths, selection, automatic)?;
+    let doc_path = std::path::Path::new(&documents);
+    let paths = Paths::for_mode(doc_path, selection, experimental_pack.is_some())?;
+    let mut session = match experimental_pack {
+        Some(pack_path) => {
+            Session::boot_experimental_pack(&paths, selection, pack_path, automatic)?
+        }
+        None => Session::boot_selected(&paths, selection, automatic)?,
+    };
     if stop.load(Ordering::Relaxed) {
         return Ok(());
     }
-    super::audio::init(std::path::Path::new(&documents), &selection.vehicle, 44100);
+    if !selection.vehicle.is_ngp_experimental_car() {
+        super::audio::init(doc_path, &selection.vehicle, 44100);
+    }
     let mut previous = session.sample();
     if !valid(&previous) {
         return Err("invalid settled physics pose".into());

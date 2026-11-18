@@ -4,11 +4,67 @@
 //! and the realtime CoreAudio / RemoteIO audio render callback.
 
 use rerbr_sim::engine_audio::{self, CarAudio, EngineNoise};
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Pre-allocated scratch buffer capacity to prevent allocations in the audio callback.
 const PREALLOC_SCRATCH_FRAMES: usize = 4096;
+const MAX_SPEECH_QUEUE: usize = 16;
+
+/// Sequential stereo PCM voice queue for authentic RBR co-driver pacenotes.
+#[derive(Default)]
+struct SpeechPlayer {
+    queue: VecDeque<Arc<Vec<[i16; 2]>>>,
+    current: Option<(Arc<Vec<[i16; 2]>>, usize)>,
+    active: bool,
+}
+
+impl SpeechPlayer {
+    fn enqueue_batch(&mut self, clips: Vec<Arc<Vec<[i16; 2]>>>) {
+        for clip in clips {
+            if clip.is_empty() {
+                continue;
+            }
+            if self.queue.len() >= MAX_SPEECH_QUEUE {
+                self.queue.pop_front();
+            }
+            self.queue.push_back(clip);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.queue.clear();
+        self.current = None;
+    }
+
+    fn mix_into(&mut self, out: &mut [f32], frames: usize, codriver_volume: f32) {
+        if !self.active || codriver_volume <= 0.0 {
+            return;
+        }
+        let scale = codriver_volume / 32768.0;
+        for i in 0..frames {
+            while self.current.is_none() {
+                let Some(next) = self.queue.pop_front() else {
+                    return;
+                };
+                if !next.is_empty() {
+                    self.current = Some((next, 0));
+                }
+            }
+            let (clip, cursor) = self.current.as_mut().expect("current checked non-empty");
+            let frame = clip[*cursor];
+            *cursor += 1;
+            if *cursor >= clip.len() {
+                self.current = None;
+            }
+            if i * 2 + 1 < out.len() {
+                out[i * 2] = (out[i * 2] + f32::from(frame[0]) * scale).clamp(-1.0, 1.0);
+                out[i * 2 + 1] = (out[i * 2 + 1] + f32::from(frame[1]) * scale).clamp(-1.0, 1.0);
+            }
+        }
+    }
+}
 
 /// Menu and replay music track streaming decoded 16-bit PCM stereo samples.
 struct MenuMusicTrack {
@@ -71,6 +127,9 @@ struct AudioRuntime {
     status: String,
     volume: f32,
     music_volume: f32,
+    codriver_volume: f32,
+    speech: SpeechPlayer,
+    codriver_status: String,
     menu_music: Option<MenuMusicTrack>,
     menu_music_active: bool,
     menu_music_loading: bool,
@@ -89,6 +148,9 @@ impl AudioRuntime {
             status: "AUDIO UNINITIALIZED".into(),
             volume: volume.clamp(0.0, 1.0),
             music_volume: 0.70,
+            codriver_volume: 0.85,
+            speech: SpeechPlayer::default(),
+            codriver_status: "COPILOTO INACTIVO".into(),
             menu_music: None,
             menu_music_active: false,
             menu_music_loading: false,
@@ -322,6 +384,61 @@ pub fn set_music_volume(volume: f32) {
     }
 }
 
+/// Independent co-driver speech volume (`0.0..=1.0`), separate from engine and music volumes.
+pub fn set_codriver_volume(volume: f32) {
+    if let Ok(mut lock) = runtime().lock() {
+        lock.codriver_volume = if volume.is_finite() {
+            volume.clamp(0.0, 1.0)
+        } else {
+            0.85
+        };
+    }
+}
+
+/// Enable or pause co-driver playback without dropping queued notes.
+pub fn set_codriver_active(active: bool) {
+    if let Ok(mut lock) = runtime().lock() {
+        lock.speech.active = active;
+    }
+}
+
+/// Record human-readable co-driver voice bank status.
+pub fn set_codriver_status(status: impl Into<String>) {
+    if let Ok(mut lock) = runtime().lock() {
+        lock.codriver_status = status.into();
+    }
+}
+
+/// Query human-readable co-driver status.
+pub fn codriver_status() -> String {
+    runtime().lock().map_or_else(
+        |_| "COPILOTO ERROR".into(),
+        |lock| lock.codriver_status.clone(),
+    )
+}
+
+/// Enqueue pre-decoded stereo co-driver speech segments to play strictly sequentially.
+pub fn enqueue_speech_batch(clips: Vec<Arc<Vec<[i16; 2]>>>) {
+    if clips.is_empty() {
+        return;
+    }
+    if let Ok(mut lock) = runtime().lock() {
+        lock.speech.enqueue_batch(clips);
+    }
+}
+
+/// Clear active and queued co-driver callouts (stage start, restart, or exit).
+pub fn clear_speech_queue() {
+    if let Ok(mut lock) = runtime().lock() {
+        lock.speech.clear();
+    }
+}
+
+/// Decodes standard RIFF/WAVE PCM or IEEE-float stereo audio files.
+pub fn decode_wav_file(path: &Path) -> Result<Vec<[i16; 2]>, String> {
+    load_menu_music_file(path)
+}
+
 /// Decodes standard RIFF/WAVE PCM or IEEE-float stereo audio files.
 pub fn load_menu_music_file(path: &Path) -> Result<Vec<[i16; 2]>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -467,6 +584,10 @@ pub fn render(out: &mut [f32], frames: usize, sample_rate: u32) {
             track.mix_into(out, frames, sample_rate, music_vol);
         }
     }
+    if !lock.paused && lock.codriver_volume > 0.0 {
+        let codriver_vol = lock.codriver_volume;
+        lock.speech.mix_into(out, frames, codriver_vol);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -540,5 +661,36 @@ mod tests {
             render(&mut out, frames, rate);
             assert_eq!(out, [0.0; 8]);
         }
+    }
+
+    #[test]
+    fn speech_queue_plays_sequentially_with_independent_volume() {
+        let mut player = SpeechPlayer {
+            active: true,
+            ..SpeechPlayer::default()
+        };
+        let clip_a = Arc::new(vec![[16384, -16384], [16384, -16384]]);
+        let clip_b = Arc::new(vec![[8192, -8192], [8192, -8192]]);
+        player.enqueue_batch(vec![clip_a, clip_b]);
+
+        let mut out = [0.0f32; 8];
+        player.mix_into(&mut out, 4, 0.5);
+        // First 2 frames come from clip_a scaled by 0.5 / 32768.0 => +/-0.25
+        assert!((out[0] - 0.25).abs() < 1e-4);
+        assert!((out[1] + 0.25).abs() < 1e-4);
+        // Next 2 frames immediately advance to clip_b => +/-0.125
+        assert!((out[4] - 0.125).abs() < 1e-4);
+        assert!((out[5] + 0.125).abs() < 1e-4);
+
+        // Zero codriver_volume produces silence even with active clips queued.
+        out.fill(0.0);
+        player.enqueue_batch(vec![Arc::new(vec![[16384, 16384]; 4])]);
+        player.mix_into(&mut out, 4, 0.0);
+        assert_eq!(out, [0.0; 8]);
+
+        // Clearing queue leaves silence immediately when active volume resumes.
+        player.clear();
+        player.mix_into(&mut out, 4, 1.0);
+        assert_eq!(out, [0.0; 8]);
     }
 }

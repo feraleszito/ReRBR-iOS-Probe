@@ -26,7 +26,13 @@ pub fn install(
     use rerbr_asset_formats::sgc;
     use std::collections::{BTreeMap, BTreeSet};
     let prepared = (|| {
-        let geometry = super::mesh::convert_interior(elements, parts, shaders, settings)?;
+        let geometry = super::mesh::convert_interior_for_mode(
+            elements,
+            parts,
+            shaders,
+            settings,
+            car.vehicle.is_ngp_experimental_car(),
+        )?;
         let worlds = super::mesh::checked_worlds(elements)?;
         let node = elements
             .iter()

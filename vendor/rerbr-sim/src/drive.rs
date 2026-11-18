@@ -63,11 +63,63 @@ impl Session {
         automatic: bool,
     ) -> Result<Self, String> {
         selection.validate_current_backend()?;
+        let checked = inputs::check_selection(paths, selection)?;
+        let data = paths.data();
+        Self::boot_core(paths, data, checked.physics, selection.vehicle.original_slot, None, selection, automatic)
+    }
+
+    /// Experimental NGP car pack boot (for non-retail pack vehicles such as Ford Focus RS WRC 2006).
+    /// Requires verified NGP 7.4 runtime and plaintext `.lsp` pack; never silently falls back to retail slots.
+    pub fn boot_experimental_pack(
+        paths: &inputs::Paths,
+        selection: &rerbr_content::Selection,
+        pack_path: &std::path::Path,
+        automatic: bool,
+    ) -> Result<Self, String> {
+        selection.validate_for_mode(true)?;
         if cfg!(panic = "abort") {
             return Err("physics-drive requires panic=unwind".into());
         }
-        let checked = inputs::check_selection(paths, selection)?;
-        let data = paths.data();
+        let base_data = paths.data();
+        let dll =
+            base_data.resolve("Plugins/NGP.dll").ok_or_else(|| "missing private RBR/Plugins/NGP.dll".to_string())?;
+        crate::ngp_candidate::validate_runtime(&std::fs::read(&dll).map_err(|e| e.to_string())?)?;
+        let physics_rbz =
+            base_data.resolve("physics.rbz").ok_or_else(|| "missing private RBR/physics.rbz".to_string())?;
+        for ext in rerbr_content::PHYSICS_STAGE_EXTENSIONS {
+            let file = selection.stage.file(ext)?;
+            if rbr_formats::cars::resolve(&paths.maps, &file).is_none() {
+                return Err(format!("missing private {}/{file}", selection.stage.documents_maps));
+            }
+        }
+        let pack = rbr_formats::car_pack::Pack::open(pack_path)?;
+        let _ = pack.read("common.lsp")?;
+        let folder = selection.vehicle.model.split(['\\', '/']).nth(1).unwrap_or("FORD_FOCUS_2006");
+        let stem = selection
+            .vehicle
+            .model
+            .rsplit(['\\', '/'])
+            .next()
+            .and_then(|s| s.strip_suffix(".sgc"))
+            .unwrap_or("focus06");
+        let entry = rbr_formats::car_pack::model_entry(folder, stem);
+        let data = base_data.with_car(paths.install.clone(), entry);
+        let car_pack = Some(boot::CarPack { pack, tyre_brand: "pirelli" });
+        Self::boot_core(paths, data, physics_rbz, rbr_formats::car_pack::SLOT, car_pack, selection, automatic)
+    }
+
+    fn boot_core(
+        paths: &inputs::Paths,
+        data: rbr_formats::data::Data,
+        physics_archive: std::path::PathBuf,
+        slot: u32,
+        car_pack: Option<boot::CarPack>,
+        selection: &rerbr_content::Selection,
+        automatic: bool,
+    ) -> Result<Self, String> {
+        if cfg!(panic = "abort") {
+            return Err("physics-drive requires panic=unwind".into());
+        }
         let season = Season::load(&data)?;
         let row = season
             .rows
@@ -89,19 +141,20 @@ impl Session {
             Preset::Random,
             Draws { row: Some(row), wear: selection.stage.wear },
         )?;
-        let audit_archive = checked.physics.clone();
+        let audit_archive = physics_archive.clone();
         let mut race = boot::Race::quick_race(
             selection.stage.original_map,
-            selection.vehicle.original_slot,
+            slot,
             boot::default_tyre(boot::surface(selection.stage.original_map)),
             weather,
-            checked.physics,
+            physics_archive,
         );
+        race.car_pack = car_pack;
         race.options.aids.auto_gears = automatic;
         let name = paths.maps.join(&selection.stage.stem).to_string_lossy().into_owned();
         let finish_direction = finish_direction_for(&data, &name);
         let image = boot::build(&data, &name, State::Load.value(), &race)?;
-        let folder = diagnostics::physics_folder(&image.mem, selection.vehicle.original_slot)?;
+        let folder = diagnostics::physics_folder(&image.mem, slot)?;
         let physics_audit = crate::physics_audit::inspect(&audit_archive, &folder, race.surface)?;
         eprintln!("physics-drive AUDIT: {}", physics_audit.summary());
         let mut playback = Playback::from_image(image.mem.clone(), image.regs, image.slot, image.control_at, false);
@@ -114,8 +167,7 @@ impl Session {
         if dt.to_bits() != 0x3ab6_0b61 {
             return Err("unexpected physics timestep".into());
         }
-        let mut stage = Stage::quick_race(selection.stage.original_map, selection.vehicle.original_slot)
-            .load_ready_with(NGP_LOAD_SUBSTEPS);
+        let mut stage = Stage::quick_race(selection.stage.original_map, slot).load_ready_with(NGP_LOAD_SUBSTEPS);
         while stage.state() == State::Load {
             pure::set_app_state(&mut playback.pure.mem.clone(), stage.state().value());
             playback.step(None, 40);

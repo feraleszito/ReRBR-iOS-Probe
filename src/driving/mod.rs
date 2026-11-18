@@ -1,11 +1,13 @@
 //! Original physics-owned driving presentation, menus and session controls.
 pub mod audio;
 pub mod cameras;
+pub mod codriver;
 pub mod content_manager;
 pub mod controls;
 pub mod layout;
 pub(crate) mod loading;
 pub mod menu;
+pub mod ngp_experimental;
 pub mod ngp_proto;
 #[cfg(test)]
 mod private_tests;
@@ -34,7 +36,10 @@ use winit::event::{Touch, TouchPhase};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SceneAction {
-    Load(Box<rerbr_content::Selection>),
+    Load {
+        selection: Box<rerbr_content::Selection>,
+        experimental_ngp: bool,
+    },
     Unload,
 }
 
@@ -61,6 +66,8 @@ pub struct Runtime {
     minimal_hud: bool,
     volume: f64,
     music_volume: f64,
+    codriver_volume: f64,
+    codriver: Option<codriver::CoDriverSession>,
     content: Catalog,
     message: Option<String>,
     menu: menu::Menu,
@@ -83,6 +90,10 @@ pub struct Runtime {
     pub replay_recorder: replay::ReplayRecorder,
     pub saved_replay: Option<replay::Replay>,
     pub replay_player: Option<replay::ReplayPlayer>,
+    pub ngp_experimental: bool,
+    pub focus_diagnostics: Option<ngp_experimental::FocusDiagnosticsReport>,
+    pub experimental_visual_only: bool,
+    pub visual_start_pose: Option<(Vec3, Vec3)>,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -105,6 +116,9 @@ impl Runtime {
         controls.invert_pedals = settings.invert_pedals;
         audio::set_master_volume(settings.volume as f32);
         audio::set_music_volume(settings.music_volume as f32);
+        audio::set_codriver_volume(settings.codriver_volume as f32);
+        audio::set_codriver_active(false);
+        audio::clear_speech_queue();
         if let Some(doc) = std::env::var_os("RERBR_PROBE_DOCUMENTS") {
             audio::init_menu_music(std::path::Path::new(&doc));
         }
@@ -133,6 +147,8 @@ impl Runtime {
             minimal_hud: settings.minimal_hud,
             volume: settings.volume,
             music_volume: settings.music_volume,
+            codriver_volume: settings.codriver_volume,
+            codriver: None,
             message: None,
             menu: menu::Menu::default(),
             fps_visible: settings.fps,
@@ -154,6 +170,10 @@ impl Runtime {
             replay_recorder: replay::ReplayRecorder::new(),
             saved_replay: None,
             replay_player: None,
+            ngp_experimental: settings.ngp_experimental,
+            focus_diagnostics: None,
+            experimental_visual_only: false,
+            visual_start_pose: None,
         }
     }
     pub fn take_scene_action(&mut self) -> Option<SceneAction> {
@@ -174,6 +194,17 @@ impl Runtime {
     pub(crate) fn install_pivots(&mut self, pivots: [Vec3; 4]) {
         self.pivots = Some(pivots);
     }
+    pub(crate) fn set_visual_start_pose(&mut self, cam: Camera) {
+        self.visual_start_pose = Some((cam.target, cam.target - cam.eye));
+    }
+    fn refresh_focus_diagnostics(&mut self) {
+        let doc = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from);
+        let focus = rerbr_content::VehicleDescriptor::ford_focus_2006();
+        self.focus_diagnostics = Some(ngp_experimental::FocusDiagnosticsReport::inspect(
+            doc.as_deref(),
+            &focus,
+        ));
+    }
     pub fn selection(&self) -> &rerbr_content::Selection {
         &self.selection
     }
@@ -185,6 +216,8 @@ impl Runtime {
         self.cockpit_node = None;
         self.cockpit_ready = false;
         self.cockpit_error = None;
+        self.experimental_visual_only = false;
+        self.visual_start_pose = None;
         self.steering_angle = 0.0;
         self.controls.clear();
         self.controls.selected_gear = 1;
@@ -198,7 +231,7 @@ impl Runtime {
         &mut self,
         selection: rerbr_content::Selection,
     ) -> Result<(), String> {
-        selection.validate_current_backend()?;
+        selection.validate_for_mode(self.ngp_experimental)?;
         if !stage_supported(&selection.stage) {
             return Err("multiple stages require physics-stage mode".into());
         }
@@ -254,8 +287,10 @@ impl Runtime {
             invert_pedals: self.controls.invert_pedals,
             volume: self.volume,
             music_volume: self.music_volume,
+            codriver_volume: self.codriver_volume,
             camera: self.camera_index(),
             stage_id: self.selection.stage.id.clone(),
+            ngp_experimental: self.ngp_experimental,
         }
         .save();
     }
@@ -274,6 +309,9 @@ impl Runtime {
                 self.worker = worker::Worker::idle();
                 self.clear_scene_pose();
                 self.race = race::Clock::default();
+                self.codriver = None;
+                audio::set_codriver_active(false);
+                audio::clear_speech_queue();
                 self.replay_player = None;
                 self.replay_recorder.clear();
                 self.saved_replay = None;
@@ -284,25 +322,90 @@ impl Runtime {
             }
             StartRally => {
                 self.content = Catalog::scan(&self.selection);
-                let result = self.selection.validate_current_backend().and_then(|()| {
-                    if self.race.phase != race::Phase::Idle {
-                        return Err("RALLY ALREADY LOADING OR ACTIVE".into());
-                    }
-                    if !stage_supported(&self.selection.stage) {
-                        return Err("STAGE UNAVAILABLE IN THIS MODE".into());
-                    }
-                    if let Some(entry) = self.content.stage(&self.selection.stage.id) {
-                        if let Some(missing) = entry.files.missing_label() {
-                            return Err(missing);
+                let result = self
+                    .selection
+                    .validate_for_mode(self.ngp_experimental)
+                    .and_then(|()| {
+                        if self.race.phase != race::Phase::Idle {
+                            return Err("RALLY ALREADY LOADING OR ACTIVE".into());
                         }
-                    }
-                    Ok(())
-                });
+                        if !stage_supported(&self.selection.stage) {
+                            return Err("STAGE UNAVAILABLE IN THIS MODE".into());
+                        }
+                        if let Some(entry) = self.content.stage(&self.selection.stage.id) {
+                            if let Some(missing) = entry.files.missing_label() {
+                                return Err(missing);
+                            }
+                        }
+                        Ok(())
+                    });
                 if let Err(error) = result {
                     self.message = Some(error);
+                } else if self.selection.vehicle.is_ngp_experimental_car() {
+                    self.refresh_focus_diagnostics();
+                    let can_visual = self
+                        .focus_diagnostics
+                        .as_ref()
+                        .is_some_and(|r| r.can_enter_visual_mode());
+                    if !can_visual {
+                        self.message = Some("FOCUS NGP BLOQUEADO - REVISA EL DIAGNÓSTICO".into());
+                        self.menu.open(menu::Page::NgpExperimental);
+                    } else {
+                        let pack_path = self
+                            .focus_diagnostics
+                            .as_ref()
+                            .and_then(|r| r.can_boot_ngp_pack().cloned());
+                        audio::set_menu_music_active(false);
+                        audio::set_paused(true);
+                        audio::set_codriver_active(false);
+                        audio::clear_speech_queue();
+                        self.codriver = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(|doc| {
+                            let doc_path = std::path::PathBuf::from(&doc);
+                            let maps = doc_path.join(&self.selection.stage.documents_maps);
+                            codriver::CoDriverSession::load_for_stage(
+                                &doc_path,
+                                &maps,
+                                &self.selection.stage.stem,
+                            )
+                        });
+                        self.worker.shutdown();
+                        self.clear_scene_pose();
+                        self.loading_started = Instant::now();
+                        self.race.prepare();
+                        self.replay_player = None;
+                        self.replay_recorder.clear();
+                        if let Some(pack) = pack_path {
+                            self.experimental_visual_only = false;
+                            self.worker = worker::Worker::new_experimental_pack(
+                                self.selection.clone(),
+                                pack,
+                                false,
+                            );
+                        } else {
+                            self.experimental_visual_only = true;
+                            self.worker = worker::Worker::idle();
+                        }
+                        self.pending_scene_action = Some(SceneAction::Load {
+                            selection: Box::new(self.selection.clone()),
+                            experimental_ngp: true,
+                        });
+                        self.menu.show(menu::Page::Loading);
+                        self.message = None;
+                    }
                 } else {
                     audio::set_menu_music_active(false);
                     audio::set_paused(true);
+                    audio::set_codriver_active(false);
+                    audio::clear_speech_queue();
+                    self.codriver = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(|doc| {
+                        let doc_path = std::path::PathBuf::from(&doc);
+                        let maps = doc_path.join(&self.selection.stage.documents_maps);
+                        codriver::CoDriverSession::load_for_stage(
+                            &doc_path,
+                            &maps,
+                            &self.selection.stage.stem,
+                        )
+                    });
                     self.worker.shutdown();
                     self.clear_scene_pose();
                     self.loading_started = Instant::now();
@@ -310,22 +413,25 @@ impl Runtime {
                     self.replay_player = None;
                     self.replay_recorder.clear();
                     self.worker = worker::Worker::new_selected(self.selection.clone(), false);
-                    self.pending_scene_action =
-                        Some(SceneAction::Load(Box::new(self.selection.clone())));
+                    self.pending_scene_action = Some(SceneAction::Load {
+                        selection: Box::new(self.selection.clone()),
+                        experimental_ngp: false,
+                    });
                     self.menu.show(menu::Page::Loading);
                     self.message = None;
                 }
             }
             Start => {
                 let state = self.worker.state.lock().unwrap();
+                let worker_ok = self.experimental_visual_only
+                    || (state.error.is_none() && state.rest.is_some());
                 if !matches!(
                     self.race.phase,
                     race::Phase::Finishing | race::Phase::Finished
                 ) && self.pivots.is_some()
-                    && self.tilt.is_finite()
+                    && (self.experimental_visual_only || self.tilt.is_finite())
                     && self.scene_error.is_none()
-                    && state.error.is_none()
-                    && state.rest.is_some()
+                    && worker_ok
                 {
                     self.controls.clear();
                     self.menu.resume();
@@ -337,7 +443,27 @@ impl Runtime {
             Restart => {
                 self.pause();
                 self.worker.shutdown();
-                self.worker = worker::Worker::new_selected(self.selection.clone(), false);
+                if self.selection.vehicle.is_ngp_experimental_car() {
+                    self.refresh_focus_diagnostics();
+                    if let Some(pack) = self
+                        .focus_diagnostics
+                        .as_ref()
+                        .and_then(|r| r.can_boot_ngp_pack().cloned())
+                    {
+                        self.experimental_visual_only = false;
+                        self.worker = worker::Worker::new_experimental_pack(
+                            self.selection.clone(),
+                            pack,
+                            false,
+                        );
+                    } else {
+                        self.experimental_visual_only = true;
+                        self.worker = worker::Worker::idle();
+                    }
+                } else {
+                    self.experimental_visual_only = false;
+                    self.worker = worker::Worker::new_selected(self.selection.clone(), false);
+                }
                 self.offset = None;
                 self.camera = None;
                 self.scene_error = None;
@@ -345,6 +471,12 @@ impl Runtime {
                 self.controls.selected_gear = 1;
                 self.loading_started = Instant::now();
                 self.race.prepare();
+                audio::set_codriver_active(false);
+                if let Some(codriver) = &mut self.codriver {
+                    codriver.reset();
+                } else {
+                    audio::clear_speech_queue();
+                }
                 self.replay_player = None;
                 self.replay_recorder.clear();
                 self.menu.show(menu::Page::Loading);
@@ -352,6 +484,8 @@ impl Runtime {
             }
             StartReplay => {
                 if let Some(replay) = &self.saved_replay {
+                    audio::set_codriver_active(false);
+                    audio::clear_speech_queue();
                     let mut player =
                         replay::ReplayPlayer::new(replay.clone(), self.stage_cameras.clone());
                     player.restart();
@@ -469,6 +603,24 @@ impl Runtime {
                     audio::menu_music_status()
                 ));
             }
+            CodriverVolumeDown => {
+                self.codriver_volume = (self.codriver_volume - 0.1).max(0.0);
+                audio::set_codriver_volume(self.codriver_volume as f32);
+                self.message = Some(format!(
+                    "VOLUMEN COPILOTO {:.0}% ({})",
+                    self.codriver_volume * 100.0,
+                    audio::codriver_status()
+                ));
+            }
+            CodriverVolumeUp => {
+                self.codriver_volume = (self.codriver_volume + 0.1).min(1.0);
+                audio::set_codriver_volume(self.codriver_volume as f32);
+                self.message = Some(format!(
+                    "VOLUMEN COPILOTO {:.0}% ({})",
+                    self.codriver_volume * 100.0,
+                    audio::codriver_status()
+                ));
+            }
             ToggleFps => {
                 self.fps_visible = !self.fps_visible;
                 self.message = Some(format!(
@@ -512,6 +664,43 @@ impl Runtime {
                 } else {
                     format!("FAIL: {report}")
                 });
+            }
+            ToggleExperimentalMode => {
+                if self.ngp_experimental
+                    && self.selection.vehicle.is_ngp_experimental_car()
+                    && self.race.phase != race::Phase::Idle
+                {
+                    self.message = Some("VUELVE AL MENÚ PRINCIPAL PARA DESACTIVAR MODO NGP".into());
+                } else {
+                    self.ngp_experimental = !self.ngp_experimental;
+                    if !self.ngp_experimental && self.selection.vehicle.is_ngp_experimental_car() {
+                        self.selection.vehicle =
+                            rerbr_content::VehicleDescriptor::toyota_corolla_wrc();
+                        let _ = self.controls.configure_vehicle(&self.selection.vehicle);
+                    }
+                    if self.ngp_experimental {
+                        self.refresh_focus_diagnostics();
+                    }
+                    self.message = Some(if self.ngp_experimental {
+                        "MODO NGP EXPERIMENTAL ACTIVADO (NO CERTIFICADO)".into()
+                    } else {
+                        "MODO RBR ORIGINAL ACTIVADO".into()
+                    });
+                }
+            }
+            RunFocusDiagnostics => {
+                self.refresh_focus_diagnostics();
+                self.menu.open(menu::Page::NgpExperimental);
+            }
+            StartFocusVisualInspection => {
+                if self.race.phase != race::Phase::Idle {
+                    self.message = Some("VUELVE AL MENÚ PRINCIPAL ANTES DE PROBAR".into());
+                } else {
+                    self.ngp_experimental = true;
+                    self.selection.vehicle = rerbr_content::VehicleDescriptor::ford_focus_2006();
+                    let _ = self.controls.configure_vehicle(&self.selection.vehicle);
+                    self.apply_command(StartRally);
+                }
             }
             OpenVehicle(index) => {
                 self.menu.inspected_vehicle = index;
@@ -730,6 +919,8 @@ impl Runtime {
         self.controls.clear();
         self.menu.show(menu::Page::StageComplete);
         self.message = None;
+        audio::set_codriver_active(false);
+        audio::clear_speech_queue();
         audio::set_menu_music_active(true);
     }
     fn sync_race_state(
@@ -740,16 +931,31 @@ impl Runtime {
         steering_ready: bool,
     ) -> (Option<(Sample, Sample, Instant)>, Option<Sample>, bool) {
         let mut state = self.worker.state.lock().unwrap();
+        if self.selection.vehicle.is_ngp_experimental_car() && self.pivots.is_some() {
+            if let Some(err) = state.error.take() {
+                if let Some(diag) = &mut self.focus_diagnostics {
+                    diag.record_physics_failure(&err);
+                }
+                self.experimental_visual_only = true;
+                self.message = Some(format!("SIN FÍSICA NGP ({err}) -> MODO VISUAL"));
+            } else if !self.experimental_visual_only && state.rest.is_some() {
+                if let Some(diag) = &mut self.focus_diagnostics {
+                    diag.record_physics_ready();
+                }
+            }
+        }
         let healthy = self.pivots.is_some()
-            && state.rest.is_some()
             && self.scene_error.is_none()
-            && state.error.is_none();
+            && (self.experimental_visual_only || (state.rest.is_some() && state.error.is_none()));
         if self.menu.page == menu::Page::Loading && healthy {
             self.race.start_presentation(now);
             self.menu.resume();
             self.message = None;
         }
-        let active = self.menu.page == menu::Page::Driving && steering_ready && healthy;
+        let active = !self.experimental_visual_only
+            && self.menu.page == menu::Page::Driving
+            && steering_ready
+            && healthy;
         self.race.tick(now, active);
         if self.race.phase == race::Phase::Driving
             && state.timing.finished
@@ -771,6 +977,11 @@ impl Runtime {
             state = self.worker.state.lock().unwrap();
         }
         let running = self.menu.page == menu::Page::Driving && steering_ready && healthy;
+        let driveline_dist = state.timing.driveline_distance;
+        let speed_mps = state
+            .pair
+            .as_ref()
+            .map_or(0.0, |(_, b, _)| Vec3::from(b.velocity).length());
         // Physics and engine revving are active during countdown, driving, and brief finish rollout;
         // paused during presentation, menus, and final completed state.
         state.paused = !running
@@ -786,6 +997,17 @@ impl Runtime {
         } else {
             self.controls.input_in(layout, self.tilt, seconds)
         };
+        let codriver_active = running
+            && matches!(
+                self.race.phase,
+                race::Phase::Driving | race::Phase::Finishing
+            );
+        audio::set_codriver_active(codriver_active);
+        if running && self.race.phase == race::Phase::Driving {
+            if let Some(codriver) = &mut self.codriver {
+                codriver.tick(driveline_dist, speed_mps);
+            }
+        }
         (state.pair.clone(), state.rest.clone(), state.paused)
     }
     pub fn frame(&mut self, path: &ChasePath) -> Option<Frame> {
@@ -865,6 +1087,38 @@ impl Runtime {
         let (pair, rest, paused) =
             self.sync_race_state(now, seconds, &layout, self.tilt.is_finite());
         audio::set_paused(paused);
+        if self.experimental_visual_only {
+            if let Some(pivots) = self.pivots {
+                let frame = if let Ok(f) = path.frame(0.0) {
+                    Some(f)
+                } else if let Some((anchor, heading)) = self.visual_start_pose {
+                    path.parked_frame(anchor, heading).ok()
+                } else {
+                    None
+                };
+                if let Some(f) = frame {
+                    #[cfg(feature = "physics-stage")]
+                    let mut f = f;
+                    #[cfg(feature = "physics-stage")]
+                    if let Some(base) = self.mounts.and_then(|m| {
+                        m.camera_with_cockpit(self.view, f.models[0], self.cockpit_node)
+                    }) {
+                        let ov = self.camera_overrides.for_view(self.view);
+                        let edited = ov.apply(base, f.models[0]);
+                        if path.camera_clear(edited, ov.fov_degrees, self.drawable_size) {
+                            f.camera = edited;
+                            self.effective_fov = ov.fov_degrees;
+                        } else if path.camera_clear(base, 65.0, self.drawable_size) {
+                            f.camera = base;
+                            self.effective_fov = 65.0;
+                        }
+                    }
+                    let _ = pivots;
+                    return Some(f);
+                }
+            }
+            return None;
+        }
         let ((a, b, stamp), rest, pivots) = (pair?, rest?, self.pivots?);
         let swap = coords::physics_to_stage();
         let offset = *self.offset.get_or_insert_with(|| {
@@ -977,19 +1231,21 @@ impl Runtime {
             }
         }
         match path.chase_camera(target, forward) {
-            Ok((mut camera, boom)) => {
+            Ok((camera, boom)) => {
                 self.effective_fov = 65.0;
                 // Cache the unedited chase camera, so target offsets cannot feed back.
                 self.camera = Some(camera);
                 #[cfg(feature = "physics-stage")]
-                {
+                let camera = {
                     let ov = self.camera_overrides.for_view(cameras::View::Chase);
                     let edited = ov.apply(camera, models[0]);
                     if path.camera_clear(edited, ov.fov_degrees, self.drawable_size) {
-                        camera = edited;
                         self.effective_fov = ov.fov_degrees;
+                        edited
+                    } else {
+                        camera
                     }
-                }
+                };
                 if let Some(progress) = self.race.presentation_progress() {
                     let cinematic =
                         cameras::presentation_camera(target, car_forward, progress, camera);
@@ -1045,6 +1301,7 @@ impl Runtime {
             dead_zone: self.controls.dead_zone,
             volume: self.volume,
             music_volume: self.music_volume,
+            codriver_volume: self.codriver_volume,
             fps: self.fps_visible,
             diagnostics: self.diagnostics,
             minimal_hud: self.minimal_hud,
@@ -1053,16 +1310,18 @@ impl Runtime {
             global_opacity: self.controls_layout.global_opacity,
             stage_result: self.race.result(),
             has_replay: self.saved_replay.is_some(),
+            ngp_experimental: self.ngp_experimental,
+            focus_diagnostics: self.focus_diagnostics.as_ref(),
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
         if let Some(error) = self.scene_error.as_ref().or(state.error.as_ref()) {
             return format!("ERROR: {error}");
         }
-        if state.rest.is_none() || self.pivots.is_none() {
+        if (!self.experimental_visual_only && state.rest.is_none()) || self.pivots.is_none() {
             return "LOADING PRIVATE STAGE / CAR / PHYSICS".into();
         }
-        if !self.tilt.is_finite() {
+        if !self.experimental_visual_only && !self.tilt.is_finite() {
             return "STEERING UNAVAILABLE - HOLD IPAD IN LANDSCAPE".into();
         }
         if let Some(message) = &self.message {
@@ -1358,7 +1617,17 @@ impl Runtime {
         if self.race.false_start_visible(Instant::now()) {
             banners.push(("FALSE START +10s".into(), BAD));
         }
-        if self.selection.vehicle.is_experimental() {
+        if self.experimental_visual_only {
+            banners.push((
+                "MODO VISUAL EXPERIMENTAL — SIN FÍSICA NGP (FMOD SILENCIADO)".into(),
+                BAD,
+            ));
+        } else if self.selection.vehicle.is_ngp_experimental_car() {
+            banners.push((
+                "NGP EXPERIMENTAL — AUDIO FMOD NO SOPORTADO (SILENCIO)".into(),
+                WARN,
+            ));
+        } else if self.selection.vehicle.is_experimental() {
             banners.push((
                 format!("EXPERIMENTAL: {}", self.selection.vehicle.name),
                 WARN,
@@ -1366,13 +1635,20 @@ impl Runtime {
         }
         if let Some(error) = state.error.as_ref().or(self.scene_error.as_ref()) {
             banners.push((format!("ERROR: {error}"), BAD));
-        } else if state.rest.is_none() {
+        } else if !self.experimental_visual_only && state.rest.is_none() {
             banners.push(("LOADING PHYSICS".into(), WARN));
-        } else if !self.tilt.is_finite() {
+        } else if !self.experimental_visual_only && !self.tilt.is_finite() {
             banners.push(("HOLD IPAD IN LANDSCAPE TO STEER".into(), WARN));
         }
         if !self.cockpit_ready && self.camera_label() == "COCKPIT" {
             banners.push(("COCKPIT ASSETS MISSING - EXTERIOR VIEW".into(), WARN));
+        }
+        if let Some(note) = self
+            .codriver
+            .as_ref()
+            .and_then(|c| c.current_text(Instant::now()))
+        {
+            banners.push((format!("NOTA: {note}"), INFO));
         }
         for (index, (text, color)) in banners.iter().take(3).enumerate() {
             let rect = Rect::new(
@@ -1638,7 +1914,7 @@ mod reload_tests {
         assert_eq!(app.race.phase, race::Phase::Preparing);
         assert!(matches!(
             app.take_scene_action(),
-            Some(SceneAction::Load(_))
+            Some(SceneAction::Load { .. })
         ));
 
         app.apply_command(menu::Command::ResetToMain);
@@ -1651,7 +1927,7 @@ mod reload_tests {
         assert_eq!(app.menu.page, menu::Page::Loading);
         assert!(matches!(
             app.take_scene_action(),
-            Some(SceneAction::Load(_))
+            Some(SceneAction::Load { .. })
         ));
 
         // Swap to an isolated idle worker so filesystem absence cannot race this state-machine test.
@@ -2008,6 +2284,48 @@ mod reload_tests {
         assert!((app.music_volume - initial_music_vol).abs() < 1e-6);
 
         // ResetToMain from StageComplete
+        app.apply_command(menu::Command::ResetToMain);
+        assert_eq!(app.menu.page, menu::Page::Main);
+    }
+
+    #[test]
+    fn ngp_experimental_toggle_isolates_focus_and_returns_to_main_cleanly() {
+        let mut app = Runtime::new();
+        app.ngp_experimental = false;
+        let focus = rerbr_content::VehicleDescriptor::ford_focus_2006();
+
+        // In default stable mode, Focus is strictly rejected.
+        assert!(app
+            .configure_selection(rerbr_content::Selection {
+                vehicle: focus.clone(),
+                ..app.selection.clone()
+            })
+            .is_err());
+
+        // Enabling experimental NGP allows selecting Focus & populates 9 diagnostics stages.
+        app.apply_command(menu::Command::ToggleExperimentalMode);
+        assert!(app.ngp_experimental);
+        assert!(app
+            .configure_selection(rerbr_content::Selection {
+                vehicle: focus,
+                ..app.selection.clone()
+            })
+            .is_ok());
+
+        app.apply_command(menu::Command::RunFocusDiagnostics);
+        assert_eq!(app.menu.page, menu::Page::NgpExperimental);
+        let report = app.focus_diagnostics.as_ref().unwrap();
+        assert_eq!(report.steps.len(), 9);
+        assert_eq!(
+            report.steps[7].status,
+            ngp_experimental::DiagnosticStatus::Unsupported
+        );
+
+        // Disabling experimental mode while Focus is selected reverts safely to Toyota Corolla WRC.
+        app.apply_command(menu::Command::ToggleExperimentalMode);
+        assert!(!app.ngp_experimental);
+        assert_eq!(app.selection.vehicle.id, "toyota-corolla-wrc");
+
         app.apply_command(menu::Command::ResetToMain);
         assert_eq!(app.menu.page, menu::Page::Main);
     }

@@ -21,12 +21,15 @@ pub struct UploadPlan {
 
 pub fn upload_plan(bytes: &[u8], max_dimension: u32) -> Result<UploadPlan, String> {
     let image = dds::parse(bytes).map_err(|e| e.to_string())?;
-    if !matches!(image.format, dds::Format::Dxt1 | dds::Format::Dxt3) {
-        return Err("stage 2 only uploads DXT1/BC1 and DXT3/BC2".into());
+    let is_bc = matches!(
+        image.format,
+        dds::Format::Dxt1 | dds::Format::Dxt3 | dds::Format::Dxt5 | dds::Format::Bc7
+    );
+    if !is_bc && image.format != dds::Format::Rgba8 {
+        return Err("unsupported DDS format".into());
     }
     if image.width.max(image.height) > max_dimension
-        || !image.width.is_multiple_of(4)
-        || !image.height.is_multiple_of(4)
+        || (is_bc && (!image.width.is_multiple_of(4) || !image.height.is_multiple_of(4)))
     {
         return Err("base DDS size exceeds device limit or is not whole BC blocks".into());
     }
@@ -35,15 +38,25 @@ pub fn upload_plan(bytes: &[u8], max_dimension: u32) -> Result<UploadPlan, Strin
         .levels()
         .iter()
         .map(|level| {
-            let blocks_x = level.width.div_ceil(4);
-            let blocks_y = level.height.div_ceil(4);
+            let (copy_width, copy_height, bytes_per_row, block_rows) = if is_bc {
+                let blocks_x = level.width.div_ceil(4);
+                let blocks_y = level.height.div_ceil(4);
+                (
+                    blocks_x * 4,
+                    blocks_y * 4,
+                    blocks_x * image.format.block_len() as u32,
+                    blocks_y,
+                )
+            } else {
+                (level.width, level.height, level.width * 4, level.height)
+            };
             let mip = Mip {
                 width: level.width,
                 height: level.height,
-                copy_width: blocks_x * 4,
-                copy_height: blocks_y * 4,
-                bytes_per_row: blocks_x * image.format.block_len() as u32,
-                block_rows: blocks_y,
+                copy_width,
+                copy_height,
+                bytes_per_row,
+                block_rows,
                 offset,
                 len: level.data.len(),
             };

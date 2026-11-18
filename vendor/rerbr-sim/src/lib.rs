@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub mod drive;
 pub mod engine_audio;
 pub use rbr_formats;
+pub use rbr_gameplay;
 mod handles;
 pub mod inputs;
 pub mod measure;

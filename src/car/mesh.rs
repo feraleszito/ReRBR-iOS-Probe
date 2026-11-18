@@ -77,15 +77,49 @@ pub fn convert(
     shaders: &[Section],
     settings: &[Section],
 ) -> Result<Geometry, String> {
-    convert_set(elements, parts, shaders, settings, false)
+    convert_set(elements, parts, shaders, settings, false, false)
 }
+pub fn convert_for_mode(
+    elements: &[sgc::Element],
+    parts: &[Section],
+    shaders: &[Section],
+    settings: &[Section],
+    allow_material_override: bool,
+) -> Result<Geometry, String> {
+    convert_set(
+        elements,
+        parts,
+        shaders,
+        settings,
+        false,
+        allow_material_override,
+    )
+}
+#[cfg(any(not(feature = "physics-stage"), test))]
 pub fn convert_interior(
     elements: &[sgc::Element],
     parts: &[Section],
     shaders: &[Section],
     settings: &[Section],
 ) -> Result<Geometry, String> {
-    convert_set(elements, parts, shaders, settings, true)
+    convert_set(elements, parts, shaders, settings, true, false)
+}
+#[cfg(feature = "physics-stage")]
+pub fn convert_interior_for_mode(
+    elements: &[sgc::Element],
+    parts: &[Section],
+    shaders: &[Section],
+    settings: &[Section],
+    allow_material_override: bool,
+) -> Result<Geometry, String> {
+    convert_set(
+        elements,
+        parts,
+        shaders,
+        settings,
+        true,
+        allow_material_override,
+    )
 }
 fn convert_set(
     elements: &[sgc::Element],
@@ -93,6 +127,7 @@ fn convert_set(
     shaders: &[Section],
     settings: &[Section],
     interior: bool,
+    allow_material_override: bool,
 ) -> Result<Geometry, String> {
     let worlds = checked_worlds(elements)?;
     let mut result = Geometry {
@@ -171,16 +206,25 @@ fn convert_set(
             selection::slot(&mesh.node.name)
         };
         for (face, block) in mesh.faces.iter().zip(&blocks) {
-            if face.name != block.material {
+            if !allow_material_override && face.name != block.material {
                 return Err(format!(
-                    "CAR MATERIAL: SGC/INI mismatch on {}",
-                    mesh.node.name
+                    "CAR MATERIAL: SGC/INI mismatch on {} (sgc='{}' ini='{}')",
+                    mesh.node.name, face.name, block.material
                 ));
             }
+            let mat_name = if allow_material_override {
+                if materials::resolve(shaders, settings, &block.shader, &block.material).is_ok() {
+                    block.material.as_str()
+                } else {
+                    face.name.as_str()
+                }
+            } else {
+                block.material.as_str()
+            };
             let material = match result
                 .materials
                 .iter()
-                .position(|m| m.shader == block.shader && m.name == block.material)
+                .position(|m| m.shader == block.shader && m.name == mat_name)
             {
                 Some(i) => i,
                 None => {
@@ -189,7 +233,7 @@ fn convert_set(
                         shaders,
                         settings,
                         &block.shader,
-                        &block.material,
+                        mat_name,
                     )?);
                     i
                 }

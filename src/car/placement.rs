@@ -143,7 +143,16 @@ impl ChasePath {
         let center = Vec3::new(eye.x, self.floor(eye)?, eye.z); // Never use driver-eye height as car origin.
         let path_camera = route.camera(distance)?;
         let direction = path_camera.target - path_camera.eye;
-        let forward = Vec3::new(direction.x, 0.0, direction.z).normalize_or(Vec3::Z);
+        self.frame_at_pose(center, Vec3::new(direction.x, 0.0, direction.z))
+    }
+    /// Static parked vehicle showcase pose on terrain for visual diagnostics without simulation physics.
+    #[cfg(feature = "physics-drive")]
+    pub fn parked_frame(&self, anchor: Vec3, heading: Vec3) -> Result<Frame, String> {
+        let center = Vec3::new(anchor.x, self.floor(anchor)?, anchor.z);
+        self.frame_at_pose(center, heading)
+    }
+    fn frame_at_pose(&self, center: Vec3, heading: Vec3) -> Result<Frame, String> {
+        let forward = Vec3::new(heading.x, 0.0, heading.z).normalize_or(Vec3::Z);
         let mut body = coords::car_to_stage(Vec3::ZERO, forward);
         body.w_axis = (center - body.transform_vector3(self.reference)).extend(1.0);
         for _ in 0..3 {
