@@ -231,7 +231,18 @@ impl Catalog {
                 if item.using_fallback_model && preset_own_model_exists {
                     existing.using_fallback_model = false;
                 } else {
+                    let prev_optional = existing.descriptor.optional_textures.clone();
+                    let prev_audio = existing.descriptor.audio_index.clone();
                     existing.descriptor = item.descriptor;
+                    if existing.descriptor.optional_textures.is_empty() && !prev_optional.is_empty()
+                    {
+                        existing.descriptor.optional_textures = prev_optional;
+                    }
+                    if existing.descriptor.audio_index == "Audio/Cars/Cars.ini"
+                        && prev_audio.to_ascii_lowercase().ends_with(".bank")
+                    {
+                        existing.descriptor.audio_index = prev_audio;
+                    }
                     existing.using_fallback_model = item.using_fallback_model;
                 }
                 let files = audit_vehicle(root, &existing.descriptor);

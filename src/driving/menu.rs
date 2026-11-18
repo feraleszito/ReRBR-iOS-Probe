@@ -540,7 +540,7 @@ impl Menu {
                         Command::ToggleExperimentalMode,
                     ));
                     rows.push(Row::action(
-                        "DIAGNÓSTICO NGP (9 ETAPAS)",
+                        "DIAGNÓSTICO NGP (10 ETAPAS)",
                         Command::RunFocusDiagnostics,
                     ));
                 }
@@ -1222,7 +1222,11 @@ impl Menu {
                     )
                 } else {
                     if inspected.id == "ford-focus-rs-wrc-2006" {
-                        "BLOCKED: REQUIRES NGP 7.5 + FMOD BANK + SGC".into()
+                        if ctx.ngp_experimental {
+                            "EXPERIMENTAL NGP: MODEL + PACK (SIN FMOD)".into()
+                        } else {
+                            "BLOCKED: ACTIVA MODO NGP EXPERIMENTAL".into()
+                        }
                     } else {
                         "BLOCKED: ORIGINAL CAR NOT VALIDATED IN LIVE PHYSICS".into()
                     }
@@ -1328,7 +1332,7 @@ impl Menu {
                 format!("{} — {}", vehicle.name, stage.name),
             ],
             Page::NgpExperimental => vec![
-                "DIAGNÓSTICO 9 ETAPAS — FORD FOCUS RS WRC 2006 (NO CERTIFICADO)".into(),
+                "DIAGNÓSTICO 10 ETAPAS — FORD FOCUS RS WRC 2006 (NO CERTIFICADO)".into(),
                 format!("ESTADO MODO EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
             ],
             Page::GamepadSettings => vec![

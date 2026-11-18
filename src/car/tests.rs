@@ -384,3 +384,133 @@ fn unsupported_chase_eye_is_rejected_instead_of_using_the_driver_camera() {
     let chase = placement::ChasePath::new(route, &terrain, &geometry()).unwrap();
     assert!(chase.frame(0.0).unwrap_err().contains("CHASE CAMERA"));
 }
+
+#[test]
+fn focus_2006_loads_own_synthetic_sgc_and_textures_never_impreza() {
+    fn encode_sgc(elements: &[sgc::Element]) -> Vec<u8> {
+        fn push_str(out: &mut Vec<u8>, s: &str) {
+            out.extend(s.as_bytes());
+            out.push(0);
+        }
+        fn push_header(out: &mut Vec<u8>, n: &sgc::Node) {
+            push_str(out, &n.name);
+            out.extend(n.id.to_le_bytes());
+            out.extend(n.parent.to_le_bytes());
+            out.extend(n.transform.words().into_iter().flat_map(f32::to_le_bytes));
+            out.extend(n.world.into_iter().flatten().flat_map(f32::to_le_bytes));
+        }
+        let mut bytes = sgc::BANNER.to_vec();
+        for e in elements {
+            let mut body = Vec::new();
+            let (kind, subtype) = match e {
+                sgc::Element::Node(n) => {
+                    push_header(&mut body, n);
+                    (3, 13)
+                }
+                sgc::Element::Mesh(m) => {
+                    push_header(&mut body, &m.node);
+                    body.extend(
+                        m.centre
+                            .into_iter()
+                            .chain(m.half_extent)
+                            .flat_map(f32::to_le_bytes),
+                    );
+                    body.extend(3i32.to_le_bytes());
+                    body.extend(5u32.to_le_bytes());
+                    for v in &m.vertices {
+                        body.extend(
+                            v.position
+                                .into_iter()
+                                .chain(v.normal)
+                                .flat_map(f32::to_le_bytes),
+                        );
+                    }
+                    body.extend(m.uvs.iter().flatten().copied().flat_map(f32::to_le_bytes));
+                    body.extend(1i32.to_le_bytes());
+                    body.extend([0u16, 1, 2].into_iter().flat_map(u16::to_le_bytes));
+                    body.extend(1i32.to_le_bytes());
+                    push_str(&mut body, "paint");
+                    body.extend([1u32, 0, 3, 0, 0].into_iter().flat_map(u32::to_le_bytes));
+                    (0, 1)
+                }
+                _ => unreachable!(),
+            };
+            bytes.extend(
+                [12u32, kind, subtype, 1, body.len() as u32]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes),
+            );
+            bytes.extend(body);
+        }
+        bytes
+    }
+
+    fn minimal_dxt1_4x4() -> Vec<u8> {
+        let mut dds = vec![0u8; 128 + 8];
+        dds[0..4].copy_from_slice(b"DDS ");
+        dds[4..8].copy_from_slice(&124u32.to_le_bytes());
+        dds[8..12].copy_from_slice(&0x1007u32.to_le_bytes());
+        dds[12..16].copy_from_slice(&4u32.to_le_bytes());
+        dds[16..20].copy_from_slice(&4u32.to_le_bytes());
+        dds[28..32].copy_from_slice(&1u32.to_le_bytes());
+        dds[76..80].copy_from_slice(&32u32.to_le_bytes());
+        dds[80..84].copy_from_slice(&0x4u32.to_le_bytes());
+        dds[84..88].copy_from_slice(b"DXT1");
+        dds
+    }
+
+    let root = std::env::temp_dir().join(format!("rerbr-focus-car-load-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let rbr = root.join("RBR");
+    std::fs::create_dir_all(rbr.join("Cars/impreza03")).unwrap();
+    std::fs::write(
+        rbr.join("Cars/Cars.ini"),
+        "[Car05]\r\nFileName = \"Cars\\impreza03\\impreza03.sgc\"\r\nIniFile = \"Cars\\impreza03\\impreza03.ini\"\r\nShaderFile = \"Cars\\impreza03\\impreza03_shaders.ini\"\r\nShaderSettings = \"Cars\\impreza03\\impreza03_shader_settings\"\r\nTexturePath = \"Cars\\impreza03\\Textures\\\"\r\n",
+    )
+    .unwrap();
+    // Corrupt impreza03.sgc so any accidental read of Subaru fails immediately.
+    std::fs::write(rbr.join("Cars/impreza03/impreza03.sgc"), b"NOT_FOCUS").unwrap();
+
+    let focus = rerbr_content::VehicleDescriptor::ford_focus_2006();
+    std::fs::create_dir_all(rbr.join("Cars/FORD_FOCUS_2006/textures")).unwrap();
+    let (elements, _, _, _) = fixture();
+    std::fs::write(rbr.join(&focus.model), encode_sgc(&elements)).unwrap();
+    let mut parts = String::from(
+        "[Cam_external]\nFOV=1.2\nNear=0.1\nPos=0 2 3\nTarget=0 1 -1\nUp=0 1 0\n\
+         [Cam_bonnet2]\nFOV=1.9\nNear=0.15\nPos=0 1 -2\nTarget=0 1 -5\nUp=0 1 0\n\
+         [Cam_internal]\nFOV=1.2\nNear=0.1\nPos=0 1 -1\nTarget=0 1 -4\nUp=0 1 0\n\
+         [e_body]\nFaceBlock0_Shader=CarTextureNoDirt\nFaceBlock0_Material=paint\n",
+    );
+    for side in selection::SIDES {
+        parts.push_str(&format!(
+            "[e_wheel_gravel_{side}]\nFaceBlock0_Shader=CarTextureNoDirt\nFaceBlock0_Material=paint\n"
+        ));
+    }
+    std::fs::write(rbr.join(&focus.parts), parts).unwrap();
+    std::fs::write(
+        rbr.join(&focus.shaders),
+        "[paint]\nOpacityChannel=false\n[paint_diffuse_bitmap]\nFilename=focus_wrc06_external.dds\n[TextureSets]\nTextureSet0=TSDefault\n[TSDefault]\nfocus_wrc06_external.dds=Cars/FORD_FOCUS_2006/textures/focus_wrc06_external.dds\n",
+    )
+    .unwrap();
+    std::fs::write(
+        rbr.join(&focus.shader_settings),
+        "[CarTextureNoDirt]\nKa=1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        rbr.join("Cars/FORD_FOCUS_2006/textures/focus_wrc06_external.dds"),
+        minimal_dxt1_4x4(),
+    )
+    .unwrap();
+
+    let car = load_vehicle_for_mode(&rbr, &focus, true)
+        .expect("Ford Focus 2006 must load its own FORD_FOCUS_2006 SGC/textures");
+    assert_eq!(car.vehicle.id, "ford-focus-rs-wrc-2006");
+    assert!(car.files.iter().any(|f| f.contains("FORD_FOCUS_2006")));
+    assert!(!car.files.iter().any(|f| f.contains("impreza03")));
+    assert!(car
+        .textures
+        .keys()
+        .any(|k| k.contains("focus_wrc06_external.dds")));
+    let _ = std::fs::remove_dir_all(&root);
+}

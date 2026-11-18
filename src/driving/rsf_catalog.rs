@@ -96,27 +96,41 @@ fn collect_shader_textures(rbr_root: &Path, shader_file: &str) -> Vec<String> {
     out
 }
 
+fn is_focus_2006_rsf_car(id: &str, car: &rsf::Car) -> bool {
+    if id == "ford-focus-rs-wrc-2006" {
+        return true;
+    }
+    let hay = format!("{} {}", car.name, car.pack).to_ascii_lowercase();
+    hay.contains("ford") && hay.contains("focus") && hay.contains("2006")
+}
+
+fn focus_2006_preset_entry() -> (CarEntry, VehicleDescriptor) {
+    let f = VehicleDescriptor::ford_focus_2006();
+    let entry = CarEntry {
+        index: car_pack::SLOT as usize,
+        file_name: f.model.clone(),
+        ini_file: f.parts.clone(),
+        shader_file: f.shaders.clone(),
+        shader_settings: f
+            .shader_settings
+            .strip_suffix("_clear.ini")
+            .unwrap_or(&f.shader_settings)
+            .to_string(),
+        texture_path: "Cars/FORD_FOCUS_2006/textures".into(),
+    };
+    (entry, f)
+}
+
 fn try_preset_or_folder_entry(
     rbr_root: &Path,
     car: &rsf::Car,
 ) -> Option<(CarEntry, Option<String>)> {
     let id = slugify_id(&car.name);
-    if id == "ford-focus-rs-wrc-2006" {
-        let f = VehicleDescriptor::ford_focus_2006();
-        if cars::resolve(rbr_root, &f.model).is_some() {
+    if is_focus_2006_rsf_car(&id, car) {
+        let (entry, _) = focus_2006_preset_entry();
+        if cars::resolve(rbr_root, &entry.file_name).is_some() {
             return Some((
-                CarEntry {
-                    index: car_pack::SLOT as usize,
-                    file_name: f.model,
-                    ini_file: f.parts,
-                    shader_file: f.shaders,
-                    shader_settings: f
-                        .shader_settings
-                        .strip_suffix("_clear.ini")
-                        .unwrap_or(&f.shader_settings)
-                        .to_string(),
-                    texture_path: "Cars/FORD_FOCUS_2006/textures".into(),
-                },
+                entry,
                 cars::resolve(rbr_root, "AudioFMOD/Focus_Mk2_WRC.bank")
                     .map(|_| "AudioFMOD/Focus_Mk2_WRC.bank".into()),
             ));
@@ -191,25 +205,42 @@ fn descriptor_from_entry(
     } else {
         format!("{}_clear.ini", entry.shader_settings.replace('\\', "/"))
     };
-    let mut required_textures = collect_shader_textures(rbr_root, &entry.shader_file);
-    if required_textures.is_empty() {
-        let tex_dir = entry.texture_path.replace('\\', "/");
-        let tex_dir = tex_dir.trim_end_matches('/');
-        if let Some(stem) = entry
-            .file_name
-            .replace('\\', "/")
-            .rsplit('/')
-            .next()
-            .and_then(|s| s.strip_suffix(".sgc").or_else(|| s.strip_suffix(".SGC")))
-        {
-            for suffix in ["external", "external_dynamic", "external_transparent"] {
-                let candidate = format!("{tex_dir}/{stem}_{suffix}.dds");
-                if rerbr_content::validate_relative_path(&candidate).is_ok() {
-                    required_textures.push(candidate);
+    let focus_preset = VehicleDescriptor::ford_focus_2006();
+    let is_focus_own_model = meta.id == focus_preset.id
+        && rerbr_content::same_path(&entry.file_name, &focus_preset.model);
+    let (required_textures, optional_textures, audio_index) = if is_focus_own_model {
+        let audio = if meta.audio_index == "Audio/Cars/Cars.ini" {
+            focus_preset.audio_index.clone()
+        } else {
+            meta.audio_index.to_string()
+        };
+        (
+            focus_preset.required_textures.clone(),
+            focus_preset.optional_textures.clone(),
+            audio,
+        )
+    } else {
+        let mut req = collect_shader_textures(rbr_root, &entry.shader_file);
+        if req.is_empty() {
+            let tex_dir = entry.texture_path.replace('\\', "/");
+            let tex_dir = tex_dir.trim_end_matches('/');
+            if let Some(stem) = entry
+                .file_name
+                .replace('\\', "/")
+                .rsplit('/')
+                .next()
+                .and_then(|s| s.strip_suffix(".sgc").or_else(|| s.strip_suffix(".SGC")))
+            {
+                for suffix in ["external", "external_dynamic", "external_transparent"] {
+                    let candidate = format!("{tex_dir}/{stem}_{suffix}.dds");
+                    if rerbr_content::validate_relative_path(&candidate).is_ok() {
+                        req.push(candidate);
+                    }
                 }
             }
         }
-    }
+        (req, Vec::new(), meta.audio_index.to_string())
+    };
     VehicleDescriptor {
         id: meta.id,
         name: meta.name,
@@ -222,8 +253,8 @@ fn descriptor_from_entry(
         shaders: entry.shader_file.replace('\\', "/"),
         shader_settings,
         required_textures,
-        optional_textures: Vec::new(),
-        audio_index: meta.audio_index.to_string(),
+        optional_textures,
+        audio_index,
         category: meta.category,
         rsf_pack: Some(meta.pack_name),
     }
@@ -344,6 +375,52 @@ fn resolve_pack_in(packs_root: &Path, pack: &str) -> Option<PathBuf> {
     cars::resolve(packs_root, pack).or_else(|| cars::resolve(packs_root, &format!("{pack}.zip")))
 }
 
+fn resolve_model_entry(
+    rbr_root: &Path,
+    install: Option<&rsf::Install>,
+    car: &rsf::Car,
+    retail: &[CarEntry],
+    using_fallback_model: &mut bool,
+    fallback_audio_hint: &mut Option<String>,
+    notes: &mut Vec<String>,
+) -> Result<CarEntry, String> {
+    if let Some(inst) = install {
+        match inst.model_entry(car, retail) {
+            Ok(m) if m.fallback.is_none() => return Ok(m.entry),
+            Ok(m) => {
+                if let Some((direct_entry, audio_hint)) = try_preset_or_folder_entry(rbr_root, car)
+                {
+                    *fallback_audio_hint = audio_hint;
+                    return Ok(direct_entry);
+                }
+                if let Some(reason) = m.fallback {
+                    *using_fallback_model = true;
+                    notes.push(format!("MODELO FALLBACK: {reason}"));
+                }
+                return Ok(m.entry);
+            }
+            Err(e) => {
+                if let Some((direct_entry, audio_hint)) = try_preset_or_folder_entry(rbr_root, car)
+                {
+                    *fallback_audio_hint = audio_hint;
+                    return Ok(direct_entry);
+                }
+                return Err(e);
+            }
+        }
+    }
+    if let Some((direct_entry, audio_hint)) = try_preset_or_folder_entry(rbr_root, car) {
+        *fallback_audio_hint = audio_hint;
+        return Ok(direct_entry);
+    }
+    if let Some(retail_slot5) = retail.iter().find(|c| c.index == car_pack::SLOT as usize) {
+        *using_fallback_model = true;
+        notes.push("MODELO FALLBACK SLOT 5 (SIN carmodels.json)".into());
+        return Ok(retail_slot5.clone());
+    }
+    Err("SIN MODELO 3D".into())
+}
+
 fn build_rsf_entry(
     rbr_root: &Path,
     install: Option<&rsf::Install>,
@@ -370,27 +447,15 @@ fn build_rsf_entry(
 
     let mut using_fallback_model = false;
     let mut fallback_audio_hint = None;
-    let model_entry = if let Some(inst) = install {
-        match inst.model_entry(car, retail) {
-            Ok(m) => {
-                if let Some(ref reason) = m.fallback {
-                    using_fallback_model = true;
-                    notes.push(format!("MODELO FALLBACK: {reason}"));
-                }
-                Ok(m.entry)
-            }
-            Err(e) => Err(e),
-        }
-    } else if let Some((direct_entry, audio_hint)) = try_preset_or_folder_entry(rbr_root, car) {
-        fallback_audio_hint = audio_hint;
-        Ok(direct_entry)
-    } else if let Some(retail_slot1) = retail.iter().find(|c| c.index == car_pack::SLOT as usize) {
-        using_fallback_model = true;
-        notes.push("MODELO FALLBACK SLOT 5 (SIN carmodels.json)".into());
-        Ok(retail_slot1.clone())
-    } else {
-        Err("SIN MODELO 3D".into())
-    };
+    let model_entry = resolve_model_entry(
+        rbr_root,
+        install,
+        car,
+        retail,
+        &mut using_fallback_model,
+        &mut fallback_audio_hint,
+        &mut notes,
+    );
 
     let fmod_bank = car
         .audio
@@ -440,15 +505,9 @@ fn build_rsf_entry(
     let id = slugify_id(&display_name);
 
     let entry = model_entry.unwrap_or_else(|_| {
-        let f = VehicleDescriptor::ford_focus_2006();
-        CarEntry {
-            index: car_pack::SLOT as usize,
-            file_name: f.model,
-            ini_file: f.parts,
-            shader_file: f.shaders,
-            shader_settings: f.shader_settings,
-            texture_path: "Cars/FORD_FOCUS_2006/textures".into(),
-        }
+        using_fallback_model = true;
+        let (f, _) = focus_2006_preset_entry();
+        f
     });
 
     let audio_index = fmod_bank
@@ -501,6 +560,128 @@ mod tests {
             slugify_id("Toyota GR Yaris Rally2"),
             "rsf-toyota-gr-yaris-rally2"
         );
+    }
+
+    fn write_synthetic_focus_install(root: &Path) {
+        let rbr = root.join("RBR");
+        let focus = VehicleDescriptor::ford_focus_2006();
+        std::fs::create_dir_all(rbr.join("Cars/impreza03")).unwrap();
+        std::fs::write(
+            rbr.join("Cars/Cars.ini"),
+            "[Car05]\r\nFileName = \"Cars\\impreza03\\impreza03.sgc\"\r\nIniFile = \"Cars\\impreza03\\impreza03.ini\"\r\nShaderFile = \"Cars\\impreza03\\impreza03_shaders.ini\"\r\nShaderSettings = \"Cars\\impreza03\\impreza03_shader_settings\"\r\nTexturePath = \"Cars\\impreza03\\Textures\\\"\r\n",
+        )
+        .unwrap();
+        std::fs::write(rbr.join("Cars/impreza03/impreza03.sgc"), b"impreza").unwrap();
+
+        let focus_dir = rbr.join("Cars/FORD_FOCUS_2006/textures");
+        std::fs::create_dir_all(&focus_dir).unwrap();
+        std::fs::write(rbr.join(&focus.model), b"focus").unwrap();
+        std::fs::write(rbr.join(&focus.parts), b"[Cam_external]\nFOV=1.2\n").unwrap();
+        std::fs::write(
+            rbr.join(&focus.shaders),
+            "[TSDefault]\r\nfocus_wrc06_external.dds = Cars\\FORD_FOCUS_2006\\textures\\focus_wrc06_external.dds\r\n",
+        )
+        .unwrap();
+        std::fs::write(rbr.join(&focus.shader_settings), b"[CarPaint]\r\n").unwrap();
+        for tex in &focus.required_textures {
+            std::fs::write(rbr.join(tex), b"DDS ").unwrap();
+        }
+
+        let pack = rbr.join("rsfdata/cars/Ford_Focus_Mk_II_RS_WRC_2006_ngp6");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join("common.lsp"), b"CarName = Ford Focus\n").unwrap();
+        std::fs::write(pack.join("gravel.lsp"), b"NumberOfGears = 5\n").unwrap();
+    }
+
+    #[test]
+    fn focus_2006_never_falls_back_to_impreza_without_carmodels_json() {
+        let root =
+            std::env::temp_dir().join(format!("rerbr-focus-no-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_synthetic_focus_install(&root);
+
+        let discovered = discover(&root.join("RBR"));
+        let focus = discovered
+            .iter()
+            .find(|d| d.descriptor.id == "ford-focus-rs-wrc-2006")
+            .expect("Focus pack should be discovered even without rsfdata/cache JSONs");
+        assert_eq!(focus.descriptor.model, "Cars/FORD_FOCUS_2006/focus06.sgc");
+        assert_eq!(focus.descriptor.parts, "Cars/FORD_FOCUS_2006/focus06.ini");
+        assert_eq!(
+            focus.descriptor.shaders,
+            "Cars/FORD_FOCUS_2006/focus06_shaders.ini"
+        );
+        assert_eq!(
+            focus.descriptor.shader_settings,
+            "Cars/FORD_FOCUS_2006/focus06_shader_settings_clear.ini"
+        );
+        assert!(!focus.using_fallback_model);
+
+        let catalog = super::super::content_manager::Catalog::scan_root(
+            &root,
+            &rerbr_content::Selection::default(),
+        );
+        let entry = catalog.vehicle("ford-focus-rs-wrc-2006").unwrap();
+        assert_eq!(entry.descriptor.model, "Cars/FORD_FOCUS_2006/focus06.sgc");
+        assert!(!entry.using_fallback_model);
+
+        let report = super::super::ngp_experimental::FocusDiagnosticsReport::inspect(
+            Some(&root),
+            &entry.descriptor,
+        );
+        let car_files = report
+            .steps
+            .iter()
+            .find(|s| s.stage == "CAR FILES")
+            .unwrap();
+        assert_eq!(
+            car_files.status,
+            super::super::ngp_experimental::DiagnosticStatus::Ok
+        );
+        let car_pack = report.steps.iter().find(|s| s.stage == "CAR PACK").unwrap();
+        assert_eq!(
+            car_pack.status,
+            super::super::ngp_experimental::DiagnosticStatus::Ok
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn focus_2006_prefers_installed_focus_folder_over_carmodels_fallback_chain() {
+        let root =
+            std::env::temp_dir().join(format!("rerbr-focus-cache-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_synthetic_focus_install(&root);
+
+        let cache = root.join("RBR/rsfdata/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("cars.json"),
+            r#"[{"id":"55","name":"Ford Focus Mk II RS WRC 2006","path":"Ford_Focus_Mk_II_RS_WRC_2006_ngp6","carmodel_id":"17","audio":"Focus_Mk2_WRC"}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cache.join("carmodels.json"),
+            r#"[{"id":"17","name":"Ford Focus Missing Chain","path":"MISSING_FOCUS_FOLDER","filename":"missing","fallback":"5"}]"#,
+        )
+        .unwrap();
+
+        let discovered = discover(&root.join("RBR"));
+        let focus = discovered
+            .iter()
+            .find(|d| d.descriptor.id == "ford-focus-rs-wrc-2006")
+            .expect("Focus pack should be discovered");
+        assert_eq!(focus.descriptor.model, "Cars/FORD_FOCUS_2006/focus06.sgc");
+        assert!(!focus.using_fallback_model);
+
+        let catalog = super::super::content_manager::Catalog::scan_root(
+            &root,
+            &rerbr_content::Selection::default(),
+        );
+        let entry = catalog.vehicle("ford-focus-rs-wrc-2006").unwrap();
+        assert_eq!(entry.descriptor.model, "Cars/FORD_FOCUS_2006/focus06.sgc");
+        assert!(!entry.using_fallback_model);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -482,6 +482,14 @@ impl Runtime {
             }
             StartRally => {
                 self.content = Catalog::scan(&self.selection);
+                if self.selection.vehicle.is_ngp_experimental_car() {
+                    if let Some(entry) = self.content.vehicle(&self.selection.vehicle.id) {
+                        if !entry.using_fallback_model && entry.descriptor != self.selection.vehicle
+                        {
+                            self.selection.vehicle = entry.descriptor.clone();
+                        }
+                    }
+                }
                 let result = self
                     .selection
                     .validate_for_mode(self.ngp_experimental)
