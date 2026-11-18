@@ -40,9 +40,69 @@ pub struct DiagnosticStep {
 
 #[derive(Debug, Clone)]
 pub struct FocusDiagnosticsReport {
+    pub vehicle_id: String,
     pub vehicle_name: String,
     pub pack_path: Option<PathBuf>,
     pub steps: Vec<DiagnosticStep>,
+    pub last_session_line: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionTelemetrySnapshot {
+    pub vehicle_id: String,
+    pub vehicle_name: String,
+    pub model_path: String,
+    pub stage_id: String,
+    pub active_now: bool,
+    pub had_driving_phase: bool,
+    pub worker_error: Option<String>,
+    pub physics_settled: bool,
+    pub physics_status: Option<String>,
+    pub sim_steps: u32,
+    pub speed_mps: f64,
+    pub rpm: f32,
+    pub gear: i32,
+    pub throttle_rx: f32,
+    pub steering_rx: f32,
+    pub clutch_rx: f32,
+    pub clutch_help: bool,
+    pub audio_status: String,
+}
+
+impl SessionTelemetrySnapshot {
+    pub fn has_runtime_evidence(&self) -> bool {
+        self.physics_settled || self.worker_error.is_some() || self.sim_steps > 0
+    }
+
+    pub fn matches_vehicle_id(&self, report_vehicle_id: &str) -> bool {
+        !self.vehicle_id.is_empty() && self.vehicle_id.eq_ignore_ascii_case(report_vehicle_id)
+    }
+
+    pub fn summary_line(&self) -> String {
+        let phase_tag = if self.active_now {
+            "EN VIVO"
+        } else {
+            "ÚLTIMA SESIÓN"
+        };
+        if let Some(err) = &self.worker_error {
+            return format!(
+                "{phase_tag}: {} ({}) en {} | ERROR: {err}",
+                self.vehicle_id, self.model_path, self.stage_id
+            );
+        }
+        format!(
+            "{phase_tag}: {} ({}) en {} | settled={} steps={} speed={:.1}m/s rpm={:.0} gear={} | audio={}",
+            self.vehicle_id,
+            self.model_path,
+            self.stage_id,
+            self.physics_settled,
+            self.sim_steps,
+            self.speed_mps,
+            self.rpm,
+            self.gear,
+            self.audio_status
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -327,9 +387,11 @@ impl FocusDiagnosticsReport {
         });
 
         Self {
+            vehicle_id: vehicle.id.clone(),
             vehicle_name: vehicle.name.clone(),
             pack_path,
             steps,
+            last_session_line: None,
         }
     }
 
@@ -363,9 +425,11 @@ impl FocusDiagnosticsReport {
             })
             .collect();
         Self {
+            vehicle_id: vehicle.id.clone(),
             vehicle_name: vehicle.name.clone(),
             pack_path: None,
             steps,
+            last_session_line: None,
         }
     }
 
@@ -482,16 +546,103 @@ impl FocusDiagnosticsReport {
         }
     }
 
+    /// Updates stages 6..=10 from either the live worker or the last retained real session
+    /// ONLY when that session ran the inspected vehicle (never mixes Corolla into Focus!).
+    pub fn apply_session_snapshot(&mut self, snap: &SessionTelemetrySnapshot) {
+        self.last_session_line = Some(snap.summary_line());
+        if !snap.matches_vehicle_id(&self.vehicle_id) || !snap.has_runtime_evidence() {
+            return;
+        }
+        let scope = if snap.active_now {
+            "EN VIVO"
+        } else {
+            "ÚLTIMA SESIÓN"
+        };
+        if let Some(err) = &snap.worker_error {
+            self.record_physics_failure(err);
+        } else if snap.physics_settled {
+            self.set_step(
+                "PHYSICS INITIALIZATION",
+                DiagnosticStatus::Ok,
+                format!(
+                    "[{scope}] {}",
+                    snap.physics_status
+                        .as_deref()
+                        .unwrap_or("FÍSICA INICIALIZADA (720HZ)")
+                ),
+            );
+            if snap.sim_steps > 0 {
+                self.set_step(
+                    "VEHICLE SPAWN",
+                    DiagnosticStatus::Ok,
+                    format!(
+                        "[{scope}] SPAWN VERIFICADO (STEP {} · {:.1} m/s · G{})",
+                        snap.sim_steps, snap.speed_mps, snap.gear
+                    ),
+                );
+            } else {
+                self.set_step(
+                    "VEHICLE SPAWN",
+                    DiagnosticStatus::Pending,
+                    format!("[{scope}] ESPERANDO PRIMER STEP 720HZ"),
+                );
+            }
+            if snap.had_driving_phase || snap.sim_steps > 0 {
+                self.set_step(
+                    "CONTROLS",
+                    DiagnosticStatus::Ok,
+                    format!(
+                        "[{scope}] THR {:.2} STR {:.2} CLU {:.2} AYUDA {}",
+                        snap.throttle_rx,
+                        snap.steering_rx,
+                        snap.clutch_rx,
+                        if snap.clutch_help { "ON" } else { "OFF" }
+                    ),
+                );
+                self.set_step(
+                    "DRIVING",
+                    DiagnosticStatus::Ok,
+                    format!(
+                        "[{scope}] TRAMO {} · {:.0} RPM · MODELO {}",
+                        snap.stage_id, snap.rpm, snap.model_path
+                    ),
+                );
+            }
+        }
+        if !snap.audio_status.is_empty() && snap.audio_status != "AUDIO UNINITIALIZED" {
+            let audio_st = if snap.audio_status.contains("AUTHENTIC") {
+                DiagnosticStatus::Ok
+            } else if snap.audio_status.contains("FMOD") {
+                DiagnosticStatus::Unsupported
+            } else {
+                DiagnosticStatus::Warning
+            };
+            self.set_step(
+                "AUDIO",
+                audio_st,
+                format!("[{scope}] {}", snap.audio_status),
+            );
+        }
+    }
+
     pub fn export_text(&self, extra_lines: &[String]) -> String {
-        let mut lines = Vec::with_capacity(self.steps.len() + extra_lines.len() + 6);
+        let mut lines = Vec::with_capacity(self.steps.len() + extra_lines.len() + 8);
         lines.push("=== RERBR iOS DIAGNOSTICO RUNTIME (10 ETAPAS) ===".to_string());
-        lines.push(format!("VEHICULO: {}", self.vehicle_name));
+        lines.push(format!(
+            "VEHICULO INSPECCIONADO: {} ({})",
+            self.vehicle_name, self.vehicle_id
+        ));
         lines.push(format!(
             "PACK NGP: {}",
             self.pack_path
                 .as_ref()
                 .map_or_else(|| "NINGUNO / RETAIL".into(), |p| p.display().to_string())
         ));
+        if let Some(last) = &self.last_session_line {
+            lines.push(format!("ULTIMA SESION REAL: {last}"));
+        } else {
+            lines.push("ULTIMA SESION REAL: NINGUNA EN ESTA EJECUCIÓN".to_string());
+        }
         lines.push("--- ETAPAS ---".to_string());
         for (i, step) in self.steps.iter().enumerate() {
             lines.push(format!(
@@ -766,5 +917,83 @@ mod tests {
         assert!(txt.contains("Cars/FORD_FOCUS_2006/focus06.sgc"));
         assert!(txt.contains("ESCUELA: 17/17 DISPONIBLES"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diagnostics_never_mixes_corolla_into_focus_and_preserves_last_focus_session() {
+        let focus = VehicleDescriptor::ford_focus_2006();
+        let mut focus_report = FocusDiagnosticsReport::inspect(None, &focus);
+
+        // 1. Corolla session must NEVER mark Focus stages 6/7/8/10 as OK.
+        let corolla_snap = SessionTelemetrySnapshot {
+            vehicle_id: "toyota-corolla-wrc".into(),
+            vehicle_name: "Toyota Corolla WRC".into(),
+            model_path: "Cars/COROLLA/corolla.sgc".into(),
+            stage_id: "harwood-forest".into(),
+            active_now: false,
+            had_driving_phase: true,
+            physics_settled: true,
+            physics_status: Some("ORIGINAL 1.02 PHYSICS".into()),
+            sim_steps: 720,
+            speed_mps: 15.0,
+            rpm: 6500.0,
+            gear: 3,
+            audio_status: "AUDIO SYNTH ENGINE".into(),
+            ..Default::default()
+        };
+        focus_report.apply_session_snapshot(&corolla_snap);
+        for st in [
+            "PHYSICS INITIALIZATION",
+            "VEHICLE SPAWN",
+            "CONTROLS",
+            "DRIVING",
+        ] {
+            let step = focus_report.steps.iter().find(|s| s.stage == st).unwrap();
+            assert_ne!(
+                step.status,
+                DiagnosticStatus::Ok,
+                "Corolla telemetry leaked into Focus {st}"
+            );
+        }
+        let exported = focus_report.export_text(&[]);
+        assert!(exported.contains("ford-focus-rs-wrc-2006"));
+        assert!(exported.contains("toyota-corolla-wrc"));
+
+        // 2. Retained Focus session (active_now=false after ResetToMain) preserves OK stages.
+        let focus_snap = SessionTelemetrySnapshot {
+            vehicle_id: focus.id.clone(),
+            vehicle_name: focus.name.clone(),
+            model_path: focus.model.clone(),
+            stage_id: "harwood-forest".into(),
+            active_now: false,
+            had_driving_phase: true,
+            physics_settled: true,
+            physics_status: Some("NGP 7.4 ACTIVE".into()),
+            sim_steps: 1440,
+            speed_mps: 22.0,
+            rpm: 7100.0,
+            gear: 4,
+            throttle_rx: 0.9,
+            steering_rx: 0.1,
+            clutch_rx: 0.0,
+            clutch_help: true,
+            audio_status: "FMOD FSB5 VORBIS".into(),
+            ..Default::default()
+        };
+        focus_report.apply_session_snapshot(&focus_snap);
+        for st in [
+            "PHYSICS INITIALIZATION",
+            "VEHICLE SPAWN",
+            "CONTROLS",
+            "DRIVING",
+        ] {
+            let step = focus_report.steps.iter().find(|s| s.stage == st).unwrap();
+            assert_eq!(
+                step.status,
+                DiagnosticStatus::Ok,
+                "{st} should remain OK after exit"
+            );
+            assert!(step.detail.contains("ÚLTIMA SESIÓN"));
+        }
     }
 }

@@ -1,23 +1,201 @@
-//! Authentic Richard Burns Rally School (17 lessons, maps 73..=89) catalog and grade tracker.
+//! Authentic Richard Burns Rally School (17 lessons, maps 73..=89) catalog, localized texts,
+//! `.dls` evaluation rules, instructor audio discovery, and grade progression tracker.
 //!
-//! Uses `rerbr_sim::rbr_school::lesson` for authentic lesson identifiers, setup scripts
-//! (`Physics/school/*.lsp`), tyre selection, and profile grade propagation without inventing
-//! synthetic voiceovers or fake coaching text.
+//! Uses `rerbr_sim::rbr_school::lesson`, `rerbr_sim::rbr_school::bank`, `rerbr_sim::rbr_school::speech`,
+//! and `rerbr_sim::rbr_formats::{rbz, strings, dls, markers}` without inventing synthetic voiceovers
+//! or fabricated coaching instructions.
 
-use rerbr_sim::rbr_formats::cars;
-use rerbr_sim::rbr_school::lesson::{award, Lesson};
+use rerbr_sim::rbr_formats::{cars, dls, markers, rbz, strings::Strings};
+use rerbr_sim::rbr_school::{
+    bank::Bank,
+    lesson::{award, Lesson},
+    speech,
+};
+use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SchoolAudioStatus {
+    Ready {
+        wav_count: usize,
+        lang: String,
+    },
+    RequiresWavConversion {
+        ogg_count: usize,
+        lang: String,
+    },
+    #[default]
+    Missing,
+}
+
+impl SchoolAudioStatus {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Ready { wav_count, lang } => {
+                format!("INSTRUCTOR {lang}: {wav_count} CLIPS WAV LISTOS")
+            }
+            Self::RequiresWavConversion { ogg_count, lang } => {
+                format!("INSTRUCTOR {lang}: {ogg_count} .OGG (CONVIERTE A .WAV PCM)")
+            }
+            Self::Missing => "INSTRUCTOR: SIN AUDIO/RS (OPCIONAL)".into(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct SchoolAudioCatalog {
+    pub status: SchoolAudioStatus,
+    pub clips: HashMap<u32, PathBuf>,
+}
+
+impl std::fmt::Debug for SchoolAudioCatalog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchoolAudioCatalog")
+            .field("status", &self.status)
+            .field("clip_count", &self.clips.len())
+            .finish()
+    }
+}
+
+impl SchoolAudioCatalog {
+    pub fn inspect(rbr_root: Option<&Path>) -> Self {
+        let Some(root) = rbr_root else {
+            return Self::default();
+        };
+        let mut best_ogg: Option<(String, usize)> = None;
+        for (rel, lang) in [("Audio/RS/Spa", "SPA"), ("Audio/RS/Eng", "ENG")] {
+            let Some(dir) = cars::resolve(root, rel) else {
+                continue;
+            };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut clips = HashMap::new();
+            let mut ogg_count = 0usize;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if ext == "wav" {
+                    if let Some(id) = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .and_then(|s| s.parse::<u32>().ok())
+                    {
+                        clips.insert(id, path);
+                    }
+                } else if ext == "ogg" {
+                    ogg_count += 1;
+                }
+            }
+            if !clips.is_empty() {
+                return Self {
+                    status: SchoolAudioStatus::Ready {
+                        wav_count: clips.len(),
+                        lang: lang.to_string(),
+                    },
+                    clips,
+                };
+            }
+            if ogg_count > 0 && best_ogg.is_none() {
+                best_ogg = Some((lang.to_string(), ogg_count));
+            }
+        }
+        if let Some((lang, ogg_count)) = best_ogg {
+            return Self {
+                status: SchoolAudioStatus::RequiresWavConversion { ogg_count, lang },
+                clips: HashMap::new(),
+            };
+        }
+        Self::default()
+    }
+
+    pub fn play_ids(&self, ids: &[u32]) -> usize {
+        if self.clips.is_empty() || ids.is_empty() {
+            return 0;
+        }
+        let mut batch = Vec::new();
+        for &id in ids {
+            if let Some(path) = self.clips.get(&id) {
+                if let Ok(samples) = super::audio::decode_wav_file(path) {
+                    if !samples.is_empty() {
+                        batch.push(Arc::new(samples));
+                    }
+                }
+            }
+        }
+        let count = batch.len();
+        if count > 0 {
+            super::audio::enqueue_speech_batch(batch);
+        }
+        count
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct SchoolLessonEntry {
     pub lesson: Lesson,
     pub key: &'static str,
+    pub title: Option<String>,
+    pub instruction: Option<String>,
+    pub cones_guide: Option<String>,
     pub map: u32,
     pub setup_file: &'static str,
     pub grade: u32,
     pub stem: String,
+    pub untimed: bool,
+    pub ride: bool,
+    pub perfect_time: f32,
+    pub pass_time: f32,
+    pub time_limit: f32,
+    pub target_distance: Option<f32>,
+    pub has_filters: bool,
+    pub briefing_audio_id: Option<u32>,
     pub assets_present: bool,
     pub missing_files: Vec<String>,
+}
+
+impl SchoolLessonEntry {
+    pub fn display_title(&self) -> &str {
+        self.title.as_deref().unwrap_or(self.key)
+    }
+
+    pub fn grade_label(&self) -> String {
+        match self.grade {
+            0 => "SIN COMPLETAR (0/4)".into(),
+            1..=3 => format!("APROBADO ({}/4)", self.grade),
+            _ => "PERFECTO (4/4)".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SchoolRunResult {
+    pub lesson_index: u32,
+    pub title: String,
+    pub key: &'static str,
+    pub verdict: u32,
+    pub elapsed_seconds: f32,
+    pub perfect_time: f32,
+    pub pass_time: f32,
+    pub time_limit: f32,
+    pub untimed: bool,
+    pub ride: bool,
+    pub retired: bool,
+    pub headline: String,
+    pub advice: Option<String>,
+    pub failure_reasons: Vec<String>,
+    pub previous_best: u32,
+    pub new_best: u32,
+    pub unlocked_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -26,6 +204,10 @@ pub struct SchoolCatalog {
     pub entries: Vec<SchoolLessonEntry>,
     pub selected: usize,
     pub status: String,
+    pub strings_status: String,
+    pub strings_available: bool,
+    strings: Strings,
+    pub audio: SchoolAudioCatalog,
 }
 
 impl Default for SchoolCatalog {
@@ -68,6 +250,8 @@ impl SchoolCatalog {
     }
 
     pub fn build(rbr_root: Option<&Path>, results: [u32; Lesson::COUNT as usize]) -> Self {
+        let (strings, strings_status, strings_available) = load_school_strings(rbr_root);
+        let audio = SchoolAudioCatalog::inspect(rbr_root);
         let mut present_count = 0usize;
         let entries: Vec<SchoolLessonEntry> = Lesson::all()
             .enumerate()
@@ -78,13 +262,29 @@ impl SchoolCatalog {
                 if assets_present {
                     present_count += 1;
                 }
+                let (si_key, sa_key) = lesson.brief_keys();
+                let title = strings.get(lesson.title_key()).map(str::to_string);
+                let instruction = strings.get(&si_key).map(str::to_string);
+                let cones_guide = strings.get(&sa_key).map(str::to_string);
+                let meta = inspect_dls_metadata(rbr_root, &stem);
                 SchoolLessonEntry {
                     lesson,
                     key: lesson.title_key(),
+                    title,
+                    instruction,
+                    cones_guide,
                     map,
                     setup_file: lesson.setup_file(),
                     grade: results[i],
                     stem,
+                    untimed: lesson.untimed(),
+                    ride: lesson.ride(),
+                    perfect_time: meta.perfect_time,
+                    pass_time: meta.pass_time,
+                    time_limit: meta.time_limit,
+                    target_distance: meta.target_distance,
+                    has_filters: meta.has_filters,
+                    briefing_audio_id: speech::briefing(lesson.index()),
                     assets_present,
                     missing_files,
                 }
@@ -102,6 +302,10 @@ impl SchoolCatalog {
             entries,
             selected: 0,
             status,
+            strings_status,
+            strings_available,
+            strings,
+            audio,
         }
     }
 
@@ -115,6 +319,217 @@ impl SchoolCatalog {
         }
         self.save_results();
     }
+
+    pub fn record_verdict_result(
+        &mut self,
+        st: &rerbr_sim::drive::SchoolSessionSnapshot,
+    ) -> SchoolRunResult {
+        let index = st.lesson_index as usize;
+        let previous_best = self.results.get(index).copied().unwrap_or(0);
+        self.record_verdict(index, st.verdict);
+        let new_best = self.results.get(index).copied().unwrap_or(0);
+        let unlocked_count = self.results.iter().filter(|&&g| g > 0).count();
+        let entry = self.entries.get(index);
+        let title = entry
+            .map(|e| e.display_title().to_string())
+            .unwrap_or_else(|| format!("LECCIÓN {}", index + 1));
+        let key = entry.map_or("SCHOOL", |e| e.key);
+        let untimed = entry.is_some_and(|e| e.untimed);
+        let ride = entry.is_some_and(|e| e.ride);
+        let retired = matches!(st.ended, Some(rerbr_sim::drive::SchoolOutcome::Retired));
+        let final_verdict = if ride { 4 } else { st.verdict };
+        let failure_reasons =
+            self.resolve_failure_reasons(&st.failure_reasons, retired, final_verdict);
+        let headline = if retired {
+            self.strings
+                .get("FAILURE1")
+                .map(str::to_string)
+                .unwrap_or_else(|| "COCHE RETIRADO / EJERCICIO FALLIDO".into())
+        } else if final_verdict == 0 {
+            self.strings
+                .get("FAILURE1")
+                .map(str::to_string)
+                .unwrap_or_else(|| "EJERCICIO NO SUPERADO (0/4)".into())
+        } else if final_verdict >= 4 {
+            format!("EXCELENTE · VEREDICTO {final_verdict}/4")
+        } else {
+            format!("SUPERADO · VEREDICTO {final_verdict}/4")
+        };
+        let advice = if final_verdict == 0 {
+            let adv_key = format!("SCOM_FAIL{}", (index % 4) + 1);
+            self.strings.get(&adv_key).map(str::to_string)
+        } else {
+            None
+        };
+        let mut result_audio = Vec::new();
+        if !ride {
+            result_audio.push(speech::end_page(final_verdict, st.lesson_index));
+        }
+        self.audio.play_ids(&result_audio);
+        SchoolRunResult {
+            lesson_index: st.lesson_index,
+            title,
+            key,
+            verdict: final_verdict,
+            elapsed_seconds: st.elapsed_seconds,
+            perfect_time: st.perfect_time,
+            pass_time: st.pass_time,
+            time_limit: st.time_limit,
+            untimed,
+            ride,
+            retired,
+            headline,
+            advice,
+            failure_reasons,
+            previous_best,
+            new_best,
+            unlocked_count,
+        }
+    }
+
+    pub fn resolve_failure_reasons(
+        &self,
+        raw: &[(String, bool)],
+        retired: bool,
+        verdict: u32,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for (key, _from_lesson) in raw {
+            let resolved = self
+                .strings
+                .get(key)
+                .map(str::to_string)
+                .unwrap_or_else(|| key.clone());
+            if !resolved.is_empty() && !out.contains(&resolved) {
+                out.push(resolved);
+            }
+        }
+        if out.is_empty() && retired {
+            out.push("ABANDONO O DAÑO CRÍTICO DEL VEHÍCULO".into());
+        } else if out.is_empty() && verdict == 0 {
+            out.push("CRITERIO DE EVALUACIÓN NO CUMPLIDO".into());
+        }
+        out
+    }
+
+    pub fn play_briefing_audio(&self, index: usize) -> usize {
+        let Some(entry) = self.entries.get(index) else {
+            return 0;
+        };
+        let Some(id) = entry.briefing_audio_id else {
+            return 0;
+        };
+        self.audio.play_ids(&[id])
+    }
+
+    pub fn play_event_speech(&self, ids: &[u32]) -> usize {
+        self.audio.play_ids(ids)
+    }
+
+    pub fn explain_incident(&self, code: i32) -> String {
+        match code {
+            0 => "AVISO: CONTROL DE EJERCICIO".into(),
+            1 => "PUNTO DE CONTROL / ZONA DE FRENADO".into(),
+            2 => self
+                .strings
+                .get("OOBFAIL")
+                .map(str::to_string)
+                .unwrap_or_else(|| "FUERA DE PISTA".into()),
+            3 => self
+                .strings
+                .get("CRASHFAIL")
+                .map(str::to_string)
+                .unwrap_or_else(|| "COLISIÓN / SALIDA FUERTE".into()),
+            other => format!("INCIDENTE ESCUELA ({other})"),
+        }
+    }
+}
+
+#[derive(Default)]
+struct DlsMeta {
+    perfect_time: f32,
+    pass_time: f32,
+    time_limit: f32,
+    target_distance: Option<f32>,
+    has_filters: bool,
+}
+
+fn inspect_dls_metadata(rbr_root: Option<&Path>, stem: &str) -> DlsMeta {
+    let Some(root) = rbr_root else {
+        return DlsMeta::default();
+    };
+    let Some(dls_path) = cars::resolve(root, &format!("Maps/{stem}.dls")) else {
+        return DlsMeta::default();
+    };
+    let Ok(bytes) = std::fs::read(dls_path) else {
+        return DlsMeta::default();
+    };
+    let Ok(parsed) = dls::parse(&bytes) else {
+        return DlsMeta::default();
+    };
+    let Ok(entry) = markers::driveline_entry(&parsed) else {
+        return DlsMeta::default();
+    };
+    let bank = Bank::from_stream(&Bank::fresh(), &entry.replay, 0);
+    let target_distance = bank
+        .subs
+        .iter()
+        .find(|s| s.tag == 4 || s.tag == 5)
+        .map(|s| s.center)
+        .or_else(|| bank.checks.first().map(|c| c.pos));
+    DlsMeta {
+        perfect_time: bank.perfect_time,
+        pass_time: bank.pass_time,
+        time_limit: bank.time_limit,
+        target_distance,
+        has_filters: !bank.subs.is_empty() || !bank.checks.is_empty(),
+    }
+}
+
+fn load_school_strings(rbr_root: Option<&Path>) -> (Strings, String, bool) {
+    let Some(root) = rbr_root else {
+        return (
+            Strings::default(),
+            "TEXTOS: DOCUMENTS NO DISPONIBLE".into(),
+            false,
+        );
+    };
+    let Some(archive) = cars::resolve(root, "strings.rbz") else {
+        return (
+            Strings::default(),
+            "SIN STRINGS.RBZ (USA CLAVES ORIGINALES)".into(),
+            false,
+        );
+    };
+    let Ok(mut zip) = rbz::open(&archive) else {
+        return (
+            Strings::default(),
+            "ERROR LEYENDO STRINGS.RBZ".into(),
+            false,
+        );
+    };
+    for (entry_name, lang) in [
+        ("Strings/bstrings.spa", "SPA"),
+        ("Strings/bstrings.eng", "ENG"),
+    ] {
+        if let Ok(mut file) = zip.by_name(entry_name) {
+            let mut bytes = Vec::new();
+            if file.read_to_end(&mut bytes).is_ok() {
+                if let Ok(table) = rerbr_sim::rbr_formats::strings::parse(&bytes) {
+                    return (
+                        table,
+                        format!("TEXTOS ORIGINALES OK ({lang} · {entry_name})"),
+                        true,
+                    );
+                }
+            }
+        }
+    }
+    (
+        Strings::default(),
+        "STRINGS.RBZ SIN BSTRINGS.SPA/.ENG".into(),
+        false,
+    )
 }
 
 pub fn encode_results(results: &[u32; Lesson::COUNT as usize]) -> String {
@@ -210,6 +625,39 @@ mod tests {
                 "all 17 school lessons on track-73..89_M should be detected: {:?}",
                 cat.entries[0].missing_files
             );
+            assert!(
+                cat.strings_available,
+                "PC RBR install should decode strings.rbz: {}",
+                cat.strings_status
+            );
+            assert!(cat.entries[0].title.is_some());
+            assert!(cat.entries[0].instruction.is_some());
+            assert!(cat.entries[2].pass_time > 0.0);
+            assert!(matches!(
+                cat.audio.status,
+                SchoolAudioStatus::Ready { .. } | SchoolAudioStatus::RequiresWavConversion { .. }
+            ));
         }
+    }
+
+    #[test]
+    fn school_audio_detects_wav_vs_ogg_honestly() {
+        let root = std::env::temp_dir().join("rerbr_school_audio_test");
+        let _ = std::fs::remove_dir_all(&root);
+        let rs_spa = root.join("Audio/RS/Spa");
+        std::fs::create_dir_all(&rs_spa).unwrap();
+        std::fs::write(rs_spa.join("294.ogg"), b"fakeogg").unwrap();
+        let cat_ogg = SchoolAudioCatalog::inspect(Some(&root));
+        assert!(matches!(
+            cat_ogg.status,
+            SchoolAudioStatus::RequiresWavConversion { ogg_count: 1, .. }
+        ));
+        std::fs::write(rs_spa.join("294.wav"), b"fakewav").unwrap();
+        let cat_wav = SchoolAudioCatalog::inspect(Some(&root));
+        assert!(matches!(
+            cat_wav.status,
+            SchoolAudioStatus::Ready { wav_count: 1, .. }
+        ));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

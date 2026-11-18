@@ -88,6 +88,31 @@ impl Clock {
         self.result = None;
     }
 
+    /// Starts Rally School driving immediately (no countdown, matching `Stage::school_start`).
+    pub fn start_school_driving(&mut self, now: Instant) {
+        self.phase = Phase::Driving;
+        self.elapsed = Duration::ZERO;
+        self.last = Some(now);
+        self.go_until = Some(now + Duration::from_millis(900));
+        self.false_start = false;
+        self.penalty = Duration::ZERO;
+        self.start_pos = None;
+        self.start_forward = None;
+        self.false_start_notice_until = None;
+        self.finish_rollout_target_dist = None;
+        self.finish_rollout_started = None;
+        self.finish_rollout_until = None;
+        self.result = None;
+    }
+
+    /// Freezes the race clock when a Rally School exercise concludes (`ModeEnd::Finished` / `Retired`).
+    pub fn complete_school_finish(&mut self) {
+        self.phase = Phase::Finished;
+        self.last = None;
+        self.go_until = None;
+        self.false_start_notice_until = None;
+    }
+
     pub fn pause(&mut self) {
         self.last = None;
     }

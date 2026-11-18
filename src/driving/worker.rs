@@ -1,6 +1,6 @@
 use rerbr_sim::{
     diagnostics::Sample,
-    drive::{Control, Session, StageTiming},
+    drive::{Control, SchoolEventNotice, SchoolSessionSnapshot, Session, StageTiming},
     inputs::Paths,
     STACK_BYTES,
 };
@@ -23,6 +23,9 @@ pub struct Shared {
     pub last_step_ms: f64,
     pub physics_status: Option<String>,
     pub timing: StageTiming,
+    pub school_start_requested: bool,
+    pub school_state: Option<SchoolSessionSnapshot>,
+    pub school_events: Vec<SchoolEventNotice>,
 }
 pub struct Worker {
     pub state: Arc<Mutex<Shared>>,
@@ -46,6 +49,9 @@ impl Worker {
                 last_step_ms: 0.0,
                 physics_status: None,
                 timing: StageTiming::default(),
+                school_start_requested: false,
+                school_state: None,
+                school_events: Vec::new(),
             })),
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
@@ -91,6 +97,9 @@ impl Worker {
             last_step_ms: 0.0,
             physics_status: None,
             timing: StageTiming::default(),
+            school_start_requested: false,
+            school_state: None,
+            school_events: Vec::new(),
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let s = state.clone();
@@ -205,16 +214,23 @@ fn run(
         s.physics_status = Some(session.physics_audit().summary());
         s.payload_bytes = session.payload_bytes();
         s.timing = session.timing();
+        s.school_state = session.school_state();
         s.pair = Some((previous.clone(), previous.clone(), Instant::now()));
     }
     let dt = f64::from(session.dt());
     let mut last = Instant::now();
     let mut clock = SimulationClock::default();
     while !stop.load(Ordering::Relaxed) {
-        let paused = {
-            let s = shared.lock().unwrap();
-            s.paused
+        let (paused, start_school) = {
+            let mut s = shared.lock().unwrap();
+            let req = std::mem::take(&mut s.school_start_requested);
+            (s.paused, req)
         };
+        if start_school {
+            session.start_school_drive();
+            let mut s = shared.lock().unwrap();
+            s.school_state = session.school_state();
+        }
         let now = Instant::now();
         let elapsed = now.duration_since(last).as_secs_f64();
         last = now;
@@ -266,6 +282,11 @@ fn run(
             s.last_step_ms = began.elapsed().as_secs_f64() * 1000.0;
             s.payload_bytes = session.payload_bytes();
             s.timing = session.timing();
+            s.school_state = session.school_state();
+            let new_events = session.take_school_events();
+            if !new_events.is_empty() {
+                s.school_events.extend(new_events);
+            }
             // Publish the simulated boundary, retaining fractional fixed-step debt.
             let boundary = now
                 .checked_sub(Duration::from_secs_f64((clock.debt - dt).max(0.0)))

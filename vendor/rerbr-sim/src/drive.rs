@@ -20,11 +20,14 @@ pub fn collision_triangles_for(
         .collect())
 }
 use rbr_gameplay::{
+    car_damage::CarriedDamage,
+    mode::{ModeEnd, ModeRules, StepView},
     stage::{Stage, State, NGP_LOAD_SUBSTEPS},
     weather::{self, Draws, Preset, Season},
 };
 use rbr_hybrid::pure::{self, Playback};
 use rbr_physics::rigid_body::layout as body;
+use rbr_school::{lesson::Lesson, step::SchoolEvent, SchoolRun};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StageTiming {
@@ -39,6 +42,35 @@ pub struct StageTiming {
     pub finish_crossed_forward: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchoolOutcome {
+    Finished,
+    Retired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchoolEventNotice {
+    pub speech_ids: Vec<u32>,
+    pub incident_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SchoolSessionSnapshot {
+    pub lesson_index: u32,
+    pub started: bool,
+    pub untimed: bool,
+    pub ride: bool,
+    pub ended: Option<SchoolOutcome>,
+    pub elapsed_seconds: f32,
+    pub perfect_time: f32,
+    pub pass_time: f32,
+    pub time_limit: f32,
+    pub target_distance: Option<f32>,
+    pub verdict: u32,
+    /// `(key, from_lesson_dls)` pairs in upstream `explain::failure_reasons` order.
+    pub failure_reasons: Vec<(String, bool)>,
+}
+
 pub struct Session {
     physics_audit: crate::physics_audit::PhysicsAudit,
     playback: Playback,
@@ -48,6 +80,13 @@ pub struct Session {
     clutch_help: bool,
     finish_direction: Option<[f32; 3]>,
     finish_crossed_forward: bool,
+    school_run: Option<SchoolRun>,
+    school_started: bool,
+    school_time_seconds: f32,
+    school_end: Option<SchoolOutcome>,
+    school_events: Vec<SchoolEventNotice>,
+    school_driveline: Vec<rbr_formats::trk::DriveLineRecord>,
+    school_driveline_values: Vec<f32>,
 }
 #[derive(Clone, Copy)]
 struct BootAids {
@@ -311,6 +350,12 @@ impl Session {
                 return Err("automatic transmission unavailable: original VCU upshift thresholds are empty; manual transmission remains supported".into());
             }
         }
+        let (school_run, school_driveline, school_driveline_values) = if let Some(lesson) = aids.lesson {
+            let (run, records, values) = load_school_runtime(&data, &name, lesson);
+            (run, records, values)
+        } else {
+            (None, Vec::new(), Vec::new())
+        };
         eprintln!(
             "physics-drive BOOT READY: selected {} / {}; dt={dt:.10}; built={:?}; panic_unwind={}; host={}/{}",
             selection.stage.id,
@@ -329,7 +374,71 @@ impl Session {
             clutch_help: aids.clutch_help,
             finish_direction,
             finish_crossed_forward: false,
+            school_run,
+            school_started: false,
+            school_time_seconds: 0.0,
+            school_end: None,
+            school_events: Vec::new(),
+            school_driveline,
+            school_driveline_values,
         })
+    }
+    /// Begins authentic `rbr_school::SchoolRun` evaluation once the player confirms the briefing.
+    pub fn start_school_drive(&mut self) {
+        if let Some(run) = &mut self.school_run {
+            self.school_started = true;
+            self.school_time_seconds = 0.0;
+            self.school_end = None;
+            self.school_events.clear();
+            let _ = self.playback.pure.take_wall_emits();
+            let _ = self.playback.pure.take_retire();
+            run.start();
+        }
+    }
+    pub fn take_school_events(&mut self) -> Vec<SchoolEventNotice> {
+        std::mem::take(&mut self.school_events)
+    }
+    pub fn school_state(&self) -> Option<SchoolSessionSnapshot> {
+        let run = self.school_run.as_ref()?;
+        let lesson = run.lesson();
+        let bank = run.bank();
+        let damage = self.carried_damage();
+        let eval_time = self.school_time_seconds;
+        let verdict =
+            if self.school_end.is_some() || self.school_started { run.verdict(eval_time, &damage) } else { 0 };
+        let failure_reasons = if self.school_end.is_some() && verdict == 0 {
+            run.failure_reasons(eval_time).into_iter().map(|r| (r.key, r.lesson)).collect()
+        } else {
+            Vec::new()
+        };
+        Some(SchoolSessionSnapshot {
+            lesson_index: lesson.index(),
+            started: self.school_started,
+            untimed: lesson.untimed(),
+            ride: lesson.ride(),
+            ended: self.school_end,
+            elapsed_seconds: self.school_time_seconds,
+            perfect_time: bank.perfect_time,
+            pass_time: bank.pass_time,
+            time_limit: bank.time_limit,
+            target_distance: run
+                .drive_line_at()
+                .or_else(|| bank.subs.iter().find(|s| s.tag == 4 || s.tag == 5).map(|s| s.center)),
+            verdict,
+            failure_reasons,
+        })
+    }
+    fn carried_damage(&self) -> CarriedDamage {
+        let mem = &self.playback.pure.mem;
+        let car = mem.u32(pure::CAR_PTR);
+        if car == 0 {
+            return CarriedDamage::default();
+        }
+        let handler = mem.u32(car + rbr_physics::car_body::layout::DAMAGE_HANDLER);
+        if handler == 0 {
+            return CarriedDamage::default();
+        }
+        CarriedDamage::read(|at| mem.u32(handler + at))
     }
     pub fn physics_audit(&self) -> &crate::physics_audit::PhysicsAudit {
         &self.physics_audit
@@ -357,8 +466,75 @@ impl Session {
             payload[k * 4..k * 4 + 4].copy_from_slice(&word.unwrap_or(0).to_le_bytes());
         }
         let before = pure::time_keeper(&self.playback.pure.mem);
+        let school_running = self.school_started && self.school_end.is_none();
+        if school_running {
+            if let Some(run) = &mut self.school_run {
+                run.before_step(&input);
+            }
+        }
         self.playback.step(Some(&payload), 1);
         self.steps = self.steps.checked_add(1).ok_or("physics step counter exhausted")?;
+        if school_running {
+            let (wall_inside, wall_crossed) = self.playback.pure.take_wall_emits();
+            let retire = self.playback.pure.take_retire();
+            let mem = &self.playback.pure.mem;
+            let car = mem.u32(pure::CAR_PTR);
+            let (param, position, velocity) = if car != 0 {
+                (mem.f32(car + 0x17c), mem.f32s(car + body::POSITION), mem.f32s(car + body::LINEAR_VELOCITY))
+            } else {
+                (0.0, [0.0; 3], [0.0; 3])
+            };
+            let distance = rbr_gameplay::driveline::sample_x(&self.school_driveline_values, param);
+            let drive_line = self
+                .school_run
+                .as_ref()
+                .and_then(|run| run.drive_line_at())
+                .and_then(|d| sample_drive_line_point(&self.school_driveline, d));
+            if let Some(run) = &mut self.school_run {
+                run.after_step(&StepView {
+                    sample: rbr_gameplay::game::StepSample {
+                        driveline_parameter: param,
+                        retire,
+                        position,
+                        velocity,
+                        wall_inside,
+                        wall_crossed,
+                        ..Default::default()
+                    },
+                    distance,
+                    drive_line,
+                    app_state: 1,
+                });
+                self.school_time_seconds += self.dt;
+                let ended = if run.lesson().ride() {
+                    let tk = pure::time_keeper(&self.playback.pure.mem);
+                    let splits_total = tk.card.splits().len();
+                    let finished = tk.card.finish_time.is_some()
+                        && tk.card.finish > 0.0
+                        && tk.card.passed >= splits_total
+                        && self.finish_crossed_forward;
+                    finished.then_some(ModeEnd::Finished)
+                } else {
+                    run.frame(self.dt, self.school_time_seconds)
+                };
+                for ev in run.take_events() {
+                    let speech_ids = run.speech_ids(&ev);
+                    let incident_code = match ev {
+                        SchoolEvent::Incident { code } => Some(code),
+                        _ => None,
+                    };
+                    if !speech_ids.is_empty() || incident_code.is_some() {
+                        self.school_events.push(SchoolEventNotice { speech_ids, incident_code });
+                    }
+                }
+                if let Some(mode_end) = ended {
+                    self.school_end = Some(match mode_end {
+                        ModeEnd::Finished => SchoolOutcome::Finished,
+                        ModeEnd::Retired => SchoolOutcome::Retired,
+                    });
+                }
+            }
+        }
         if before.card.finish_time.is_none() {
             let after = pure::time_keeper(&self.playback.pure.mem);
             if after.card.finish_time.is_some()
@@ -410,6 +586,64 @@ impl Session {
     pub fn payload_bytes(&self) -> usize {
         self.playback.pure.mem.pages().expect("paged boot").allocated_bytes()
     }
+}
+
+fn load_school_runtime(
+    data: &rbr_formats::data::Data,
+    stage_name: &str,
+    lesson: Lesson,
+) -> (Option<SchoolRun>, Vec<rbr_formats::trk::DriveLineRecord>, Vec<f32>) {
+    let Ok(dls_bytes) = rbr_formats::stage_files::read(data, stage_name, "dls") else {
+        return (None, Vec::new(), Vec::new());
+    };
+    let Ok(dls) = rbr_formats::dls::parse(&dls_bytes) else {
+        return (None, Vec::new(), Vec::new());
+    };
+    let Ok(entry) = rbr_formats::markers::driveline_entry(&dls) else {
+        return (None, Vec::new(), Vec::new());
+    };
+    let mut prior = rbr_school::bank::Bank::fresh();
+    // Clear the init hold so Trigger emits instructor speech cues during live driving.
+    prior.live = false;
+    let bank = rbr_school::bank::Bank::from_stream(&prior, &entry.replay, 0);
+    let run = SchoolRun::new(lesson, bank, dls.string_bytes.clone());
+
+    let records = rbr_formats::stage_files::read(data, stage_name, "trk")
+        .ok()
+        .and_then(|trk_bytes| rbr_formats::trk::parse(&trk_bytes).ok())
+        .and_then(|track| {
+            track.chunks.into_iter().find_map(|c| match c.payload {
+                rbr_formats::trk::ChunkPayload::DriveLine(d) => Some(d.records),
+                _ => None,
+            })
+        })
+        .unwrap_or_default();
+    let values = records.iter().map(|r| r.value).collect();
+    (Some(run), records, values)
+}
+
+fn sample_drive_line_point(records: &[rbr_formats::trk::DriveLineRecord], dist: f32) -> Option<[f32; 3]> {
+    if records.is_empty() || !dist.is_finite() {
+        return None;
+    }
+    if records.len() == 1 {
+        let p = records[0].vectors[0];
+        return Some([p.x, p.y, p.z]);
+    }
+    let idx = records.windows(2).position(|w| w[0].value <= dist && dist <= w[1].value).unwrap_or_else(|| {
+        records
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| (a.value - dist).abs().total_cmp(&(b.value - dist).abs()))
+            .map(|(i, _)| i.min(records.len() - 2))
+            .unwrap_or(0)
+    });
+    let (a, b) = (&records[idx], &records[idx + 1]);
+    let span = b.value - a.value;
+    let frac = if span.abs() > 1e-5 { ((dist - a.value) / span).clamp(0.0, 1.0) } else { 0.0 };
+    let pa = a.vectors[0];
+    let pb = b.vectors[0];
+    Some([pa.x + (pb.x - pa.x) * frac, pa.y + (pb.y - pa.y) * frac, pa.z + (pb.z - pa.z) * frac])
 }
 
 fn finish_direction_for(data: &rbr_formats::data::Data, stage_name: &str) -> Option<[f32; 3]> {
@@ -793,6 +1027,94 @@ mod surface_tests {
                 s.rpm
             );
             assert!(s.speed() > 6.0, "school lesson {idx} failed to accelerate: {}", s.speed());
+        }
+    }
+
+    #[test]
+    fn school_all_17_dls_banks_and_rules_parse_cleanly() {
+        let rbr = std::path::Path::new(r"C:\Richard Burns Rally");
+        if !rbr.join("Maps/track-81_M.dls").is_file() || !rbr.join("strings.rbz").is_file() {
+            return;
+        }
+        let data = crate::inputs::Paths { install: rbr.to_path_buf(), overlay: None, maps: rbr.join("Maps") }.data();
+        let mut zip = rbr_formats::rbz::open(&rbr.join("strings.rbz")).unwrap();
+        let mut spa_bytes = Vec::new();
+        std::io::Read::read_to_end(&mut zip.by_name("Strings/bstrings.spa").unwrap(), &mut spa_bytes).unwrap();
+        let spa = rbr_formats::strings::parse(&spa_bytes).unwrap();
+
+        for idx in 0..rbr_school::lesson::Lesson::COUNT {
+            let lesson = rbr_school::lesson::Lesson::new(idx).unwrap();
+            let map = lesson.map();
+            let stage_name = rbr.join("Maps").join(format!("track-{map}_M")).to_string_lossy().into_owned();
+            let (run_opt, records, values) = super::load_school_runtime(&data, &stage_name, lesson);
+            let run = run_opt.unwrap_or_else(|| panic!("lesson {idx} map {map} missing SchoolRun"));
+            assert!(!records.is_empty(), "lesson {idx} missing driveline records");
+            assert_eq!(records.len(), values.len());
+            let bank = run.bank();
+            let title = spa.get(lesson.title_key()).unwrap_or("<MISSING>");
+            let (si_key, sa_key) = lesson.brief_keys();
+            let si = spa.get(&si_key).unwrap_or("<MISSING>");
+            let sa = spa.get(&sa_key).unwrap_or("<MISSING>");
+            eprintln!(
+                "DLS {:02} UI={} map={} title={:?} untimed={} ride={} times=({:.1}/{:.1}/{:.1}) subs={} checks={} pairs={} si={:?} sa={:?}",
+                idx,
+                idx + 1,
+                map,
+                title,
+                lesson.untimed(),
+                lesson.ride(),
+                bank.perfect_time,
+                bank.pass_time,
+                bank.time_limit,
+                bank.subs.len(),
+                bank.checks.len(),
+                bank.pairs.len(),
+                si,
+                sa
+            );
+            assert_ne!(title, "<MISSING>", "missing Spanish title {}", lesson.title_key());
+            assert_ne!(si, "<MISSING>", "missing Spanish instruction {}", si_key);
+        }
+    }
+
+    #[test]
+    fn school_all_17_lessons_boot_and_expose_rules() {
+        use crate::drive::Session;
+        use crate::inputs::Paths;
+        let desktop_rbr = std::path::Path::new(r"C:\Users\adria\Desktop\RBR");
+        let rbr = std::path::Path::new(r"C:\Richard Burns Rally");
+        if !desktop_rbr.join("Plugins/NGP.dll").is_file() || !rbr.join("Maps/track-81_M.col").is_file() {
+            return;
+        }
+        let paths =
+            Paths { install: rbr.to_path_buf(), overlay: Some(desktop_rbr.to_path_buf()), maps: rbr.join("Maps") };
+        let impreza = rerbr_content::VehicleDescriptor::original_rbr_presets()
+            .into_iter()
+            .find(|v| v.original_slot == rbr_school::lesson::CAR)
+            .expect("Car05 impreza preset");
+        for idx in 0..rbr_school::lesson::Lesson::COUNT {
+            let lesson = rbr_school::lesson::Lesson::new(idx).unwrap();
+            let map = lesson.map();
+            let stage =
+                rerbr_content::StageDescriptor::school_lesson(map, format!("track-{map}_M"), "RBR/Maps", 1).unwrap();
+            let sel = rerbr_content::Selection { vehicle: impreza.clone(), stage };
+            let mut session = Session::boot_lesson(&paths, &sel, idx, false, false)
+                .unwrap_or_else(|e| panic!("lesson {idx} (map {map}) boot failed: {e}"));
+            session.start_school_drive();
+            let st = session.school_state().expect("school_state");
+            eprintln!(
+                "LESSON {:02} map={} key={} untimed={} ride={} times=({:.1}/{:.1}/{:.1}) target={:?}",
+                idx,
+                map,
+                lesson.title_key(),
+                st.untimed,
+                st.ride,
+                st.perfect_time,
+                st.pass_time,
+                st.time_limit,
+                st.target_distance
+            );
+            assert!(session.sample().rpm > 800.0, "lesson {idx} engine stalled");
         }
     }
 }

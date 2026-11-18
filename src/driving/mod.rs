@@ -112,6 +112,9 @@ pub struct Runtime {
     pub championship: championship::ChampionshipCalendar,
     pub school: school::SchoolCatalog,
     pub active_school_lesson: Option<u32>,
+    pub active_school_result: Option<school::SchoolRunResult>,
+    school_incident_banner: Option<(String, Instant)>,
+    last_session_snapshot: Option<ngp_experimental::SessionTelemetrySnapshot>,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -124,10 +127,8 @@ impl Runtime {
         let default_selection = rerbr_content::Selection::default();
         let scanned = Catalog::scan(&default_selection);
         let stage = restored_stage(&scanned, &settings.stage_id);
-        let selection = rerbr_content::Selection {
-            stage,
-            ..default_selection
-        };
+        let vehicle = restored_vehicle(&scanned, &settings.vehicle_id, settings.ngp_experimental);
+        let selection = rerbr_content::Selection { vehicle, stage };
         let mut controls = Controls::new();
         controls.sensitivity = settings.sensitivity;
         controls.dead_zone = settings.dead_zone;
@@ -217,6 +218,9 @@ impl Runtime {
             championship: championship::ChampionshipCalendar::load_default(),
             school: school::SchoolCatalog::load_default(),
             active_school_lesson: None,
+            active_school_result: None,
+            school_incident_banner: None,
+            last_session_snapshot: None,
         }
     }
     pub fn process_gamepad_snapshot(&mut self, snap: &gamepad::GamepadSnapshot, now_secs: f64) {
@@ -318,36 +322,38 @@ impl Runtime {
     pub(crate) fn set_visual_start_pose(&mut self, cam: Camera) {
         self.visual_start_pose = Some((cam.target, cam.target - cam.eye));
     }
-    fn refresh_focus_diagnostics(&mut self) {
-        let doc = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from);
-        let inspected = self
-            .content
-            .vehicles
-            .get(self.menu.inspected_vehicle)
-            .map(|e| &e.descriptor)
-            .filter(|v| v.is_ngp_experimental_car());
-        let target = if self.selection.vehicle.is_ngp_experimental_car() {
-            self.selection.vehicle.clone()
-        } else if let Some(v) = inspected {
-            v.clone()
-        } else {
-            rerbr_content::VehicleDescriptor::ford_focus_2006()
+    fn school_speech_allowed(&self) -> bool {
+        self.active_school_lesson.is_some()
+            && matches!(
+                self.menu.page,
+                menu::Page::SchoolBriefing | menu::Page::SchoolResult | menu::Page::Driving
+            )
+    }
+    fn capture_session_snapshot(&mut self, active_now: bool) {
+        let Ok(st) = self.worker.state.try_lock() else {
+            return;
         };
-        let mut report = ngp_experimental::FocusDiagnosticsReport::inspect(doc.as_deref(), &target);
-        let audio_st = audio::status();
-        let active_session =
-            self.race.phase == race::Phase::Driving || self.menu.page == menu::Page::Paused;
-        let worker_snapshot = self.worker.state.try_lock().ok();
-        let latest = worker_snapshot
-            .as_ref()
-            .and_then(|st| st.pair.as_ref().map(|(_, b, _)| b).or(st.rest.as_ref()));
-        let live = ngp_experimental::LiveRuntimeState {
-            worker_error: worker_snapshot.as_ref().and_then(|st| st.error.as_deref()),
-            physics_settled: worker_snapshot.as_ref().is_some_and(|st| st.rest.is_some()),
-            physics_status: worker_snapshot
-                .as_ref()
-                .and_then(|st| st.physics_status.as_deref()),
-            sim_steps: latest.map(|s| s.step),
+        let latest = st.pair.as_ref().map(|(_, b, _)| b).or(st.rest.as_ref());
+        let sim_steps = latest.map_or(0, |s| s.step);
+        let physics_settled = st.rest.is_some();
+        let has_data = physics_settled || st.error.is_some() || sim_steps > 0;
+        if !has_data {
+            return;
+        }
+        self.last_session_snapshot = Some(ngp_experimental::SessionTelemetrySnapshot {
+            vehicle_id: self.selection.vehicle.id.clone(),
+            vehicle_name: self.selection.vehicle.name.clone(),
+            model_path: self.selection.vehicle.model.clone(),
+            stage_id: self.selection.stage.id.clone(),
+            active_now,
+            had_driving_phase: matches!(
+                self.race.phase,
+                race::Phase::Driving | race::Phase::Finishing | race::Phase::Finished
+            ) || sim_steps > 0,
+            worker_error: st.error.clone(),
+            physics_settled,
+            physics_status: st.physics_status.clone(),
+            sim_steps,
             speed_mps: latest.map_or(0.0, Sample::speed),
             rpm: latest.map_or(0.0, |s| s.rpm),
             gear: latest.map_or(1, |s| s.gear),
@@ -355,13 +361,38 @@ impl Runtime {
             steering_rx: latest.map_or(0.0, |s| s.steering_received),
             clutch_rx: latest.map_or(0.0, |s| s.payload_clutch),
             clutch_help: self.clutch_help,
-            session_active: active_session,
-            stage_id: &self.selection.stage.id,
-            model_path: &self.selection.vehicle.model,
-            audio_status: &audio_st,
+            audio_status: audio::status(),
+        });
+    }
+    fn refresh_focus_diagnostics(&mut self) {
+        let doc = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from);
+        let active_now = !matches!(self.race.phase, race::Phase::Idle | race::Phase::Finished);
+        self.capture_session_snapshot(active_now);
+        let inspected = self
+            .content
+            .vehicles
+            .get(self.menu.inspected_vehicle)
+            .map(|e| &e.descriptor)
+            .filter(|v| v.is_ngp_experimental_car());
+        let last_ngp = self
+            .last_session_snapshot
+            .as_ref()
+            .and_then(|snap| self.content.vehicle(&snap.vehicle_id))
+            .map(|e| &e.descriptor)
+            .filter(|v| v.is_ngp_experimental_car());
+        let target = if self.selection.vehicle.is_ngp_experimental_car() {
+            self.selection.vehicle.clone()
+        } else if let Some(v) = inspected {
+            v.clone()
+        } else if let Some(v) = last_ngp {
+            v.clone()
+        } else {
+            rerbr_content::VehicleDescriptor::ford_focus_2006()
         };
-        report.apply_live_state(&live);
-        drop(worker_snapshot);
+        let mut report = ngp_experimental::FocusDiagnosticsReport::inspect(doc.as_deref(), &target);
+        if let Some(snap) = &self.last_session_snapshot {
+            report.apply_session_snapshot(snap);
+        }
         self.focus_diagnostics = Some(report);
     }
     pub fn selection(&self) -> &rerbr_content::Selection {
@@ -449,6 +480,7 @@ impl Runtime {
             music_volume: self.music_volume,
             codriver_volume: self.codriver_volume,
             camera: self.camera_index(),
+            vehicle_id: self.selection.vehicle.id.clone(),
             stage_id: self.selection.stage.id.clone(),
             ngp_experimental: self.ngp_experimental,
         }
@@ -461,10 +493,16 @@ impl Runtime {
     fn apply_command(&mut self, command: menu::Command) {
         use menu::Command::*;
         match command {
-            Open(page) => self.menu.open(page),
+            Open(page) => {
+                if page == menu::Page::NgpExperimental {
+                    self.refresh_focus_diagnostics();
+                }
+                self.menu.open(page);
+            }
             Back => self.menu.back(),
             ResetToMain => {
                 self.pause();
+                self.capture_session_snapshot(false);
                 self.worker.shutdown();
                 self.worker = worker::Worker::idle();
                 self.clear_scene_pose();
@@ -475,6 +513,9 @@ impl Runtime {
                 self.replay_player = None;
                 self.replay_recorder.clear();
                 self.saved_replay = None;
+                self.active_school_lesson = None;
+                self.active_school_result = None;
+                self.school_incident_banner = None;
                 self.pending_scene_action = Some(SceneAction::Unload);
                 self.menu.reset_to_main();
                 self.message = None;
@@ -536,12 +577,16 @@ impl Runtime {
                                 &self.selection.stage.stem,
                             )
                         });
+                        self.capture_session_snapshot(false);
                         self.worker.shutdown();
                         self.clear_scene_pose();
                         self.loading_started = Instant::now();
                         self.race.prepare();
                         self.replay_player = None;
                         self.replay_recorder.clear();
+                        self.active_school_lesson = None;
+                        self.active_school_result = None;
+                        self.school_incident_banner = None;
                         if let Some(pack) = pack_path {
                             self.experimental_visual_only = false;
                             self.worker = worker::Worker::new_experimental_pack_with_aids(
@@ -575,6 +620,7 @@ impl Runtime {
                             &self.selection.stage.stem,
                         )
                     });
+                    self.capture_session_snapshot(false);
                     self.worker.shutdown();
                     self.clear_scene_pose();
                     self.loading_started = Instant::now();
@@ -582,6 +628,8 @@ impl Runtime {
                     self.replay_player = None;
                     self.replay_recorder.clear();
                     self.active_school_lesson = None;
+                    self.active_school_result = None;
+                    self.school_incident_banner = None;
                     self.worker = worker::Worker::new_selected_with_aids(
                         self.selection.clone(),
                         false,
@@ -618,7 +666,10 @@ impl Runtime {
             }
             Restart => {
                 self.pause();
+                self.capture_session_snapshot(false);
                 self.worker.shutdown();
+                self.active_school_result = None;
+                self.school_incident_banner = None;
                 if self.selection.vehicle.is_ngp_experimental_car() {
                     self.refresh_focus_diagnostics();
                     if let Some(pack) = self
@@ -704,7 +755,11 @@ impl Runtime {
                 self.replay_player = None;
                 audio::set_paused(true);
                 audio::set_menu_music_active(true);
-                self.menu.show(menu::Page::StageComplete);
+                if self.active_school_result.is_some() {
+                    self.menu.show(menu::Page::SchoolResult);
+                } else {
+                    self.menu.show(menu::Page::StageComplete);
+                }
             }
             NextGaragePage => {
                 let total = self.content.vehicles.len().div_ceil(9);
@@ -1210,11 +1265,16 @@ impl Runtime {
             SchoolInspectLesson => {
                 if let Some(entry) = self.school.entries.get(self.school.selected) {
                     self.message = Some(if entry.assets_present {
-                        format!("{} ({}) DISPONIBLE", entry.key, entry.stem)
+                        format!(
+                            "{} ({}) · {}",
+                            entry.display_title(),
+                            entry.stem,
+                            entry.grade_label()
+                        )
                     } else {
                         format!(
                             "{}: FALTA {}",
-                            entry.key,
+                            entry.display_title(),
                             entry
                                 .missing_files
                                 .first()
@@ -1230,7 +1290,7 @@ impl Runtime {
                 if !entry.assets_present {
                     self.message = Some(format!(
                         "{}: FALTA {}",
-                        entry.key,
+                        entry.display_title(),
                         entry
                             .missing_files
                             .first()
@@ -1264,18 +1324,25 @@ impl Runtime {
                             self.message = Some(format!("ESCUELA BLOQUEADA: {err}"));
                             return;
                         }
+                        self.capture_session_snapshot(false);
                         audio::set_menu_music_active(false);
                         audio::set_paused(true);
                         audio::set_codriver_active(false);
                         audio::clear_speech_queue();
                         self.codriver = None;
+                        self.capture_session_snapshot(false);
                         self.worker.shutdown();
                         self.clear_scene_pose();
                         self.loading_started = Instant::now();
                         self.race.prepare();
                         self.replay_player = None;
                         self.replay_recorder.clear();
+                        self.active_school_lesson = None;
+                        self.active_school_result = None;
+                        self.school_incident_banner = None;
                         self.active_school_lesson = Some(entry.lesson.index());
+                        self.active_school_result = None;
+                        self.school_incident_banner = None;
                         self.experimental_visual_only = false;
                         self.worker = worker::Worker::new_school_lesson(
                             self.selection.clone(),
@@ -1295,6 +1362,57 @@ impl Runtime {
                     }
                 }
             }
+            SchoolConfirmStart => {
+                if self.active_school_lesson.is_none() {
+                    return;
+                }
+                let worker_ok = {
+                    let mut st = self.worker.state.lock().unwrap();
+                    let ok = st.error.is_none() && st.rest.is_some();
+                    if ok {
+                        st.school_start_requested = true;
+                        st.school_events.clear();
+                    }
+                    ok
+                };
+                if worker_ok && self.pivots.is_some() && self.scene_error.is_none() {
+                    self.controls.clear();
+                    self.replay_recorder.clear();
+                    self.school_incident_banner = None;
+                    self.active_school_result = None;
+                    self.race.start_school_driving(Instant::now());
+                    self.menu.resume();
+                    self.message = None;
+                } else {
+                    self.message = Some("ESPERANDO INICIALIZACIÓN DE LA LECCIÓN".into());
+                }
+            }
+            SchoolFinishNow => {
+                if self.active_school_lesson.is_some() {
+                    let st = self.worker.state.lock().unwrap().school_state.clone();
+                    if let Some(st) = st {
+                        self.finalize_school_completion(&st);
+                    }
+                }
+            }
+            SchoolRetryLesson => {
+                if self.active_school_lesson.is_some() {
+                    self.apply_command(Restart);
+                }
+            }
+            SchoolNextStartLesson => {
+                let next_idx = self
+                    .active_school_result
+                    .as_ref()
+                    .map(|r| r.lesson_index as usize + 1)
+                    .or_else(|| self.active_school_lesson.map(|i| i as usize + 1))
+                    .unwrap_or(self.school.selected + 1);
+                self.apply_command(ResetToMain);
+                if next_idx < self.school.entries.len() {
+                    self.school.selected = next_idx;
+                    self.apply_command(SchoolStartLesson);
+                }
+            }
             ExportDiagnostics => {
                 self.refresh_focus_diagnostics();
                 let doc = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from);
@@ -1302,7 +1420,7 @@ impl Runtime {
                     (Some(dir), Some(report)) => {
                         let extra = vec![
                             format!(
-                                "SELECCION: {} / {} ({})",
+                                "SELECCION MENU ACTUAL: {} / {} ({})",
                                 self.selection.vehicle.id,
                                 self.selection.vehicle.model,
                                 self.selection.stage.id
@@ -1314,7 +1432,11 @@ impl Runtime {
                             format!("AUDIO STATUS: {}", audio::status()),
                             format!("MUSIC STATUS: {}", audio::menu_music_status()),
                             format!("CODRIVER STATUS: {}", audio::codriver_status()),
-                            format!("ESCUELA RALLY: {}", self.school.status),
+                            format!(
+                                "ESCUELA RALLY: {} ({})",
+                                self.school.status,
+                                self.school.audio.status.label()
+                            ),
                         ];
                         match report.write_export_file(dir, &extra) {
                             Ok(path) => {
@@ -1442,6 +1564,7 @@ impl Runtime {
         );
     }
     fn finalize_stage_completion(&mut self) {
+        self.capture_session_snapshot(false);
         self.race.complete_finish();
         if let Some(res) = self.race.result() {
             if self.championship.progress.active {
@@ -1458,6 +1581,21 @@ impl Runtime {
         self.message = None;
         audio::set_codriver_active(false);
         audio::clear_speech_queue();
+        audio::set_menu_music_active(true);
+    }
+    fn finalize_school_completion(&mut self, st: &rerbr_sim::drive::SchoolSessionSnapshot) {
+        self.capture_session_snapshot(false);
+        self.race.complete_school_finish();
+        audio::set_paused(true);
+        audio::clear_speech_queue();
+        audio::set_codriver_active(true);
+        let result = self.school.record_verdict_result(st);
+        self.saved_replay = self.replay_recorder.finish();
+        self.controls.clear();
+        self.active_school_result = Some(result);
+        self.school_incident_banner = None;
+        self.menu.show(menu::Page::SchoolResult);
+        self.message = None;
         audio::set_menu_music_active(true);
     }
     fn sync_race_state(
@@ -1485,33 +1623,68 @@ impl Runtime {
             && self.scene_error.is_none()
             && (self.experimental_visual_only || (state.rest.is_some() && state.error.is_none()));
         if self.menu.page == menu::Page::Loading && healthy {
-            self.race.start_presentation(now);
-            self.menu.resume();
-            self.message = None;
+            if let Some(lesson_idx) = self.active_school_lesson {
+                drop(state);
+                audio::clear_speech_queue();
+                audio::set_codriver_active(true);
+                self.school.play_briefing_audio(lesson_idx as usize);
+                self.menu.show(menu::Page::SchoolBriefing);
+                self.message = None;
+                state = self.worker.state.lock().unwrap();
+            } else {
+                self.race.start_presentation(now);
+                self.menu.resume();
+                self.message = None;
+            }
         }
         let active = !self.experimental_visual_only
             && self.menu.page == menu::Page::Driving
             && steering_ready
             && healthy;
         self.race.tick(now, active);
-        if self.race.phase == race::Phase::Driving
-            && state.timing.finished
-            && state.timing.finish_crossed_forward
-        {
-            self.race.begin_finish_rollout(
-                now,
-                state.timing.splits_passed,
-                state.timing.splits_total,
-                state.timing.finish_distance,
-            );
-        }
-        if self
-            .race
-            .rollout_complete(now, state.timing.driveline_distance)
-        {
-            drop(state);
-            self.finalize_stage_completion();
-            state = self.worker.state.lock().unwrap();
+        if self.active_school_lesson.is_some() {
+            let drained = std::mem::take(&mut state.school_events);
+            let school_snapshot = state.school_state.clone();
+            if self.menu.page == menu::Page::Driving {
+                for ev in &drained {
+                    if !ev.speech_ids.is_empty() {
+                        self.school.play_event_speech(&ev.speech_ids);
+                    }
+                    if let Some(code) = ev.incident_code {
+                        self.school_incident_banner = Some((
+                            self.school.explain_incident(code),
+                            now + Duration::from_secs(4),
+                        ));
+                    }
+                }
+                if let Some(st) = school_snapshot {
+                    if st.ended.is_some() {
+                        drop(state);
+                        self.finalize_school_completion(&st);
+                        state = self.worker.state.lock().unwrap();
+                    }
+                }
+            }
+        } else {
+            if self.race.phase == race::Phase::Driving
+                && state.timing.finished
+                && state.timing.finish_crossed_forward
+            {
+                self.race.begin_finish_rollout(
+                    now,
+                    state.timing.splits_passed,
+                    state.timing.splits_total,
+                    state.timing.finish_distance,
+                );
+            }
+            if self
+                .race
+                .rollout_complete(now, state.timing.driveline_distance)
+            {
+                drop(state);
+                self.finalize_stage_completion();
+                state = self.worker.state.lock().unwrap();
+            }
         }
         let running = self.menu.page == menu::Page::Driving && steering_ready && healthy;
         let driveline_dist = state.timing.driveline_distance;
@@ -1551,13 +1724,18 @@ impl Runtime {
                 self.race.phase,
                 race::Phase::Driving | race::Phase::Finishing
             );
-        audio::set_codriver_active(codriver_active);
+        audio::set_codriver_active(codriver_active || self.school_speech_allowed());
         if running && self.race.phase == race::Phase::Driving {
             if let Some(codriver) = &mut self.codriver {
                 codriver.tick(driveline_dist, speed_mps);
             }
         }
-        (state.pair.clone(), state.rest.clone(), state.paused)
+        let ret = (state.pair.clone(), state.rest.clone(), state.paused);
+        drop(state);
+        if ret.1.is_some() {
+            self.capture_session_snapshot(running);
+        }
+        ret
     }
     pub fn frame(&mut self, path: &ChasePath) -> Option<Frame> {
         let now = Instant::now();
@@ -1874,6 +2052,8 @@ impl Runtime {
             pacenote_atlas_status: Some(self.pacenote_atlas_status.as_str()),
             championship: Some(&self.championship),
             school: Some(&self.school),
+            active_school_lesson: self.active_school_lesson,
+            school_result: self.active_school_result.as_ref(),
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
@@ -2356,6 +2536,29 @@ impl Runtime {
         {
             banners.push((format!("NOTA: {note}"), INFO));
         }
+        if self.active_school_lesson.is_some() {
+            if let Some((text, until)) = &self.school_incident_banner {
+                if Instant::now() < *until {
+                    banners.push((text.clone(), WARN));
+                }
+            }
+            if let Some(st) = &state.school_state {
+                let target = if st.perfect_time > 0.0 && st.pass_time > 0.0 {
+                    format!(
+                        "ESCUELA · OBJ <= {:.1}S / PERF <= {:.1}S",
+                        st.pass_time, st.perfect_time
+                    )
+                } else if let Some(d) = st.target_distance {
+                    format!(
+                        "ESCUELA · DISTANCIA {:.0}M / ZONA {:.0}M",
+                        state.timing.driveline_distance, d
+                    )
+                } else {
+                    "ESCUELA RBR ACTIVA".into()
+                };
+                banners.push((target, INFO));
+            }
+        }
         for (index, (text, color)) in banners.iter().take(3).enumerate() {
             let rect = Rect::new(
                 0.18,
@@ -2535,6 +2738,23 @@ fn restored_stage(catalog: &Catalog, id: &str) -> rerbr_content::StageDescriptor
                 && (!entry.files.checked || entry.files.missing.is_empty())
         })
         .or_else(|| catalog.stage(&default.id))
+        .map(|entry| entry.descriptor.clone())
+        .unwrap_or(default)
+}
+
+fn restored_vehicle(
+    catalog: &Catalog,
+    id: &str,
+    ngp_experimental: bool,
+) -> rerbr_content::VehicleDescriptor {
+    let default = rerbr_content::VehicleDescriptor::default();
+    catalog
+        .vehicle(id)
+        .filter(|entry| {
+            (ngp_experimental || !entry.descriptor.is_ngp_experimental_car())
+                && (!entry.files.checked || entry.files.missing.is_empty())
+        })
+        .or_else(|| catalog.vehicle(&default.id))
         .map(|entry| entry.descriptor.clone())
         .unwrap_or(default)
 }
@@ -3034,5 +3254,120 @@ mod reload_tests {
 
         app.apply_command(menu::Command::ResetToMain);
         assert_eq!(app.menu.page, menu::Page::Main);
+    }
+
+    #[test]
+    fn school_briefing_drive_verdict_and_replay_flow_works_end_to_end() {
+        let mut app = Runtime::new();
+        app.school.entries[2].assets_present = true;
+        app.school.selected = 2;
+
+        // 1. Open lesson -> Loading
+        app.apply_command(menu::Command::SchoolStartLesson);
+        assert_eq!(app.menu.page, menu::Page::Loading);
+        assert_eq!(app.active_school_lesson, Some(2));
+
+        // Simulate settled school session + loaded scenery
+        app.worker.shutdown();
+        app.worker = worker::Worker::idle();
+        app.install_pivots([Vec3::ZERO; 4]);
+        app.tilt = 0.0;
+        {
+            let mut st = app.worker.state.lock().unwrap();
+            st.rest = Some(Sample::default());
+        }
+        let layout = DrivingLayout::default();
+        app.sync_race_state(Instant::now(), 1.0 / 60.0, &layout, true);
+        assert_eq!(app.menu.page, menu::Page::SchoolBriefing);
+
+        // 2. Confirm briefing -> Driving immediately (no quick-race countdown)
+        app.apply_command(menu::Command::SchoolConfirmStart);
+        assert_eq!(app.menu.page, menu::Page::Driving);
+        assert_eq!(app.race.phase, race::Phase::Driving);
+        assert!(app.worker.state.lock().unwrap().school_start_requested);
+
+        app.replay_recorder
+            .record(0.0, [Mat4::IDENTITY; 5], 0.0, 0.0, 1000.0, 1);
+        app.replay_recorder
+            .record(1.0, [Mat4::IDENTITY; 5], 100.0, 20.0, 3000.0, 2);
+
+        // 3. SchoolRun reaches verdict -> SchoolResult & persisted grade
+        {
+            let mut st = app.worker.state.lock().unwrap();
+            st.school_state = Some(rerbr_sim::drive::SchoolSessionSnapshot {
+                lesson_index: 2,
+                started: true,
+                untimed: false,
+                ride: false,
+                ended: Some(rerbr_sim::drive::SchoolOutcome::Finished),
+                elapsed_seconds: 9.5,
+                perfect_time: 9.0,
+                pass_time: 10.0,
+                time_limit: 11.0,
+                target_distance: Some(160.0),
+                verdict: 3,
+                failure_reasons: Vec::new(),
+            });
+        }
+        app.sync_race_state(Instant::now(), 1.0 / 60.0, &layout, true);
+        assert_eq!(app.menu.page, menu::Page::SchoolResult);
+        let res = app.active_school_result.as_ref().unwrap();
+        assert_eq!(res.verdict, 3);
+        assert_eq!(app.school.results[0..=2], [3, 3, 3]);
+
+        // 4. Open replay and return cleanly to SchoolResult
+        app.apply_command(menu::Command::StartReplay);
+        assert_eq!(app.menu.page, menu::Page::Replay);
+        app.apply_command(menu::Command::ReplayExit);
+        assert_eq!(app.menu.page, menu::Page::SchoolResult);
+
+        // 5. Exit cleanly to Main
+        app.apply_command(menu::Command::ResetToMain);
+        assert_eq!(app.menu.page, menu::Page::Main);
+        assert!(app.active_school_lesson.is_none());
+    }
+
+    #[test]
+    fn diagnostics_retain_focus_session_across_reset_to_main_without_corolla_leak() {
+        let mut app = Runtime::new();
+        app.ngp_experimental = true;
+        let focus = rerbr_content::VehicleDescriptor::ford_focus_2006();
+        app.configure_selection(rerbr_content::Selection {
+            vehicle: focus.clone(),
+            ..app.selection.clone()
+        })
+        .unwrap();
+        app.worker.shutdown();
+        app.worker = worker::Worker::idle();
+        app.install_pivots([Vec3::ZERO; 4]);
+        app.tilt = 0.0;
+        {
+            let mut st = app.worker.state.lock().unwrap();
+            let mut sample = Sample {
+                step: 1440,
+                rpm: 6800.0,
+                gear: 3,
+                velocity: [0.0, 0.0, 20.0],
+                ..Sample::default()
+            };
+            sample.throttle_received = 1.0;
+            st.rest = Some(sample.clone());
+            st.pair = Some((sample.clone(), sample, Instant::now()));
+            st.physics_status = Some("NGP 7.4 FOCUS READY".into());
+        }
+        app.race.phase = race::Phase::Driving;
+        app.menu.page = menu::Page::Driving;
+        let layout = DrivingLayout::default();
+        app.sync_race_state(Instant::now(), 1.0 / 60.0, &layout, true);
+
+        // Exit to main menu (destroys worker); retained snapshot must preserve Focus telemetry
+        app.apply_command(menu::Command::ResetToMain);
+        app.refresh_focus_diagnostics();
+        let report = app.focus_diagnostics.as_ref().unwrap();
+        assert_eq!(report.vehicle_id, focus.id);
+        let export = report.export_text(&[]);
+        assert!(export.contains("ÚLTIMA SESIÓN"));
+        assert!(export.contains("STEP 1440"));
+        assert!(export.contains(&focus.model));
     }
 }

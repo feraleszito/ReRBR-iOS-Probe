@@ -126,12 +126,19 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
                 if mesh.bad_triangles != 0 || mesh.skipped_draws != 0 {
                     return Err(format!("STAGE: unsupported terrain block {id}"));
                 }
+                if mesh.indices.is_empty() {
+                    if mesh.far_draws > 0 {
+                        continue;
+                    }
+                    return Err(format!("STAGE: block {id} has no near/always triangles"));
+                }
                 mesh.bounds()?;
                 append(&mut terrain, mesh);
                 report.blocks += 1;
             }
         }
     }
+    terrain.bounds()?;
     // Retain a compact CPU ground index without scenery. GPU geometry is resident once.
     scene.vertices.clone_from(&terrain.vertices);
     scene.indices.clone_from(&terrain.indices);
@@ -426,5 +433,74 @@ mod tests {
             ..b
         };
         assert!(object_mesh(&b, 12, 16, None, 1, Mat4::IDENTITY).is_err());
+    }
+
+    #[test]
+    fn school_all_17_stages_diagnostic_if_pc_present() {
+        let maps = Path::new(r"C:\Richard Burns Rally\Maps");
+        if !maps.join("track-73_M.lbs").is_file() {
+            return;
+        }
+        for lesson in 0u32..17 {
+            let map = [
+                81, 87, 83, 82, 80, 79, 78, 77, 76, 84, 85, 86, 73, 88, 89, 75, 74,
+            ][lesson as usize];
+            let stem = format!("track-{map}_M");
+            let desc =
+                rerbr_content::StageDescriptor::school_lesson(map, stem.clone(), "RBR/Maps", 1)
+                    .unwrap();
+            let bytes = crate::asset_probe::read_stage_stem(maps, &stem).unwrap();
+            let lbs = lbs::parse(&bytes).unwrap();
+            let mut block_info = Vec::new();
+            for c in &lbs.chunks {
+                if let lbs::Chunk::Geometry(g) = c {
+                    for (id, block) in g.blocks.iter().enumerate() {
+                        let m = mesh::block_mesh(block);
+                        let view_slots: Vec<_> = block
+                            .views
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(s, v)| v.as_ref().map(|b| (s, b.vertex_count)))
+                            .collect();
+                        let lists: Vec<_> = block
+                            .chunks
+                            .iter()
+                            .map(|ch| (ch.list, ch.view, ch.shadow, ch.prim_count))
+                            .collect();
+                        if m.indices.is_empty() || m.bad_triangles != 0 || m.skipped_draws != 0 {
+                            block_info.push(format!(
+                                "blk{id}(idx={},bad={},skip={},far={},views={:?},chunks={:?})",
+                                m.indices.len(),
+                                m.bad_triangles,
+                                m.skipped_draws,
+                                m.far_draws,
+                                view_slots,
+                                lists
+                            ));
+                        }
+                    }
+                }
+            }
+            let res = load_selected(maps, &desc);
+            assert!(
+                res.is_ok(),
+                "school lesson {lesson} (map={map}) failed to load: {:?}",
+                res.err()
+            );
+            assert!(
+                block_info
+                    .iter()
+                    .all(|info| !info.contains("bad=0,skip=0,far=0") && info.contains("skip=0")),
+                "unexpected terrain block anomaly in lesson {lesson} (map={map}): {block_info:?}"
+            );
+            eprintln!(
+                "SCHOOL LESSON {:02} (UI {}) map={}: {:?} | anomalies={:?}",
+                lesson,
+                lesson + 1,
+                map,
+                res.as_ref().map(|s| s.report.blocks).map_err(|e| e.clone()),
+                block_info
+            );
+        }
     }
 }

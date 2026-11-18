@@ -33,6 +33,8 @@ pub enum Page {
     PacenoteHudSettings,
     Championship,
     RallySchool,
+    SchoolBriefing,
+    SchoolResult,
 }
 
 pub(crate) fn format_stage_time(seconds: f64) -> String {
@@ -149,6 +151,10 @@ pub enum Command {
     SchoolNextLesson,
     SchoolInspectLesson,
     SchoolStartLesson,
+    SchoolConfirmStart,
+    SchoolFinishNow,
+    SchoolRetryLesson,
+    SchoolNextStartLesson,
     ExportDiagnostics,
 }
 
@@ -251,6 +257,8 @@ pub struct Context<'a> {
     pub pacenote_atlas_status: Option<&'a str>,
     pub championship: Option<&'a super::championship::ChampionshipCalendar>,
     pub school: Option<&'a super::school::SchoolCatalog>,
+    pub active_school_lesson: Option<u32>,
+    pub school_result: Option<&'a super::school::SchoolRunResult>,
 }
 
 #[derive(Debug, Default)]
@@ -377,6 +385,8 @@ impl Menu {
             Page::PacenoteHudSettings => "NOTAS VISUALES",
             Page::Championship => "CAMPEONATO RBR",
             Page::RallySchool => "ESCUELA DE RALLY",
+            Page::SchoolBriefing => "INSTRUCCIONES DE LECCIÓN",
+            Page::SchoolResult => "RESULTADO ESCUELA DE RALLY",
         }
     }
     pub fn rows(&self, ctx: &Context) -> Vec<Row> {
@@ -902,18 +912,30 @@ impl Menu {
                     if let Some(entry) = sch.entries.get(sch.selected) {
                         rows.push(Row::info(
                             format!("LECCIÓN {}/17", sch.selected + 1),
-                            format!("{} (MAP {})", entry.key, entry.map),
+                            format!("{} (MAP {})", entry.display_title(), entry.map),
                         ));
-                        rows.push(Row::info("SETUP", entry.setup_file));
-                        rows.push(Row::info("ARCHIVO", entry.stem.as_str()));
+                        let rule_summary = if entry.perfect_time > 0.0
+                            && entry.pass_time > 0.0
+                            && entry.time_limit > 0.0
+                        {
+                            format!(
+                                "{:.0}s / {:.0}s / {:.0}s",
+                                entry.perfect_time, entry.pass_time, entry.time_limit
+                            )
+                        } else if entry.untimed {
+                            "EJERCICIO GUIADO (SIN CRONO)".into()
+                        } else {
+                            entry.setup_file.into()
+                        };
+                        rows.push(Row::info("REGLAS", rule_summary));
                         rows.push(Row::info(
                             "NOTA / ARCHIVOS",
                             if entry.assets_present {
-                                format!("GRADO {}/4 · ARCHIVOS OK", entry.grade)
+                                format!("{} · ARCHIVOS OK", entry.grade_label())
                             } else {
                                 format!(
-                                    "GRADO {}/4 · FALTA {}",
-                                    entry.grade,
+                                    "{} · FALTA {}",
+                                    entry.grade_label(),
                                     entry
                                         .missing_files
                                         .first()
@@ -921,8 +943,9 @@ impl Menu {
                                 )
                             },
                         ));
+                        rows.push(Row::info("TEXTOS / VOZ", sch.audio.status.label()));
                         rows.push(Row {
-                            label: "INICIAR LECCIÓN".into(),
+                            label: "ABRIR LECCIÓN (VER INSTRUCCIONES)".into(),
                             kind: RowKind::Action {
                                 command: Command::SchoolStartLesson,
                                 enabled: entry.assets_present,
@@ -943,6 +966,25 @@ impl Menu {
                     rows.push(Row::info("ESTADO", "SIN CATÁLOGO"));
                 }
                 rows.push(Row::action("VOLVER", Command::Back));
+                rows
+            }
+            Page::SchoolBriefing => vec![
+                Row::action("INICIAR EJERCICIO", Command::SchoolConfirmStart),
+                Row::action("SALIR AL MENÚ PRINCIPAL", Command::ResetToMain),
+            ],
+            Page::SchoolResult => {
+                let mut rows = Vec::new();
+                if ctx.has_replay {
+                    rows.push(Row::action("VER REPETICIÓN", Command::StartReplay));
+                }
+                rows.push(Row::action("REPETIR LECCIÓN", Command::SchoolRetryLesson));
+                if ctx.school_result.is_some_and(|r| r.lesson_index + 1 < 17) {
+                    rows.push(Row::action(
+                        "SIGUIENTE LECCIÓN",
+                        Command::SchoolNextStartLesson,
+                    ));
+                }
+                rows.push(Row::action("MENÚ PRINCIPAL", Command::ResetToMain));
                 rows
             }
             Page::CameraEditor => vec![
@@ -1111,14 +1153,25 @@ impl Menu {
                 Row::info("LICENCIA", "GPL-3.0-OR-LATER"),
                 Row::action("VOLVER", Command::Back),
             ],
-            Page::Paused => vec![
-                Row::action("REANUDAR", Command::Start),
-                Row::action("RESCATAR COCHE (AYUDA)", Command::RecoverCar),
-                Row::action("REINICIAR TRAMO", Command::Restart),
-                Row::action("CONFIGURACIÓN", Command::Open(Page::Settings)),
-                Row::action("CONTROLES", Command::Open(Page::Controls)),
-                Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
-            ],
+            Page::Paused => {
+                let mut rows = vec![
+                    Row::action("REANUDAR", Command::Start),
+                    Row::action("RESCATAR COCHE (AYUDA)", Command::RecoverCar),
+                ];
+                if ctx.active_school_lesson.is_some() {
+                    rows.push(Row::action(
+                        "FINALIZAR / EVALUAR LECCIÓN",
+                        Command::SchoolFinishNow,
+                    ));
+                }
+                rows.extend([
+                    Row::action("REINICIAR TRAMO", Command::Restart),
+                    Row::action("CONFIGURACIÓN", Command::Open(Page::Settings)),
+                    Row::action("CONTROLES", Command::Open(Page::Controls)),
+                    Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
+                ]);
+                rows
+            }
             Page::Driving => Vec::new(),
             Page::StageComplete => {
                 let mut rows = Vec::new();
@@ -1349,8 +1402,34 @@ impl Menu {
             ],
             Page::RallySchool => vec![
                 "17 LECCIONES ORIGINALES (MAPS 73..89 / PHYSICS/SCHOOL)".into(),
-                "SIN VOCES SINTÉTICAS: REQUIERE ARCHIVOS PRIVADOS".into(),
+                ctx.school
+                    .map(|s| s.strings_status.clone())
+                    .unwrap_or_else(|| "SIN STRINGS.RBZ".into()),
             ],
+            Page::SchoolBriefing => {
+                if let Some((idx, sch)) = ctx.active_school_lesson.zip(ctx.school) {
+                    if let Some(entry) = sch.entries.get(idx as usize) {
+                        return vec![
+                            format!("LECCIÓN {}/17 · {}", idx + 1, entry.display_title()),
+                            format!(
+                                "MAP {} · {} · CAR05 IMPREZA 2003",
+                                entry.map, entry.setup_file
+                            ),
+                        ];
+                    }
+                }
+                vec!["ESCUELA DE RALLY · PREPARADO EN SALIDA".into()]
+            }
+            Page::SchoolResult => {
+                if let Some(res) = ctx.school_result {
+                    vec![
+                        format!("LECCIÓN {}/17 · {}", res.lesson_index + 1, res.title),
+                        res.headline.clone(),
+                    ]
+                } else {
+                    vec!["EVALUACIÓN DE LECCIÓN FINALIZADA".into()]
+                }
+            }
         }
     }
     fn row_bounds(&self) -> (f32, f32, f32, f32) {
@@ -1359,6 +1438,7 @@ impl Menu {
             Page::Loading => (0.28, 0.44, 0.76, 0.86),
             Page::ControlsEditor => (0.28, 0.44, 0.04, 0.36),
             Page::NgpExperimental => (0.055, 0.89, 0.615, 0.89),
+            Page::SchoolBriefing | Page::SchoolResult => (0.055, 0.89, 0.655, 0.89),
             _ => (ROW_X, ROW_WIDTH, ROW_TOP, ROW_BOTTOM),
         }
     }
@@ -1498,6 +1578,10 @@ impl Menu {
                     DIM,
                 );
             }
+        } else if self.page == Page::SchoolBriefing {
+            self.draw_school_briefing_panel(canvas, ctx);
+        } else if self.page == Page::SchoolResult {
+            self.draw_school_result_panel(canvas, ctx);
         }
 
         let rows = self.rows(ctx);
@@ -1512,7 +1596,7 @@ impl Menu {
             let is_primary = matches!(
                 row.kind,
                 RowKind::Action {
-                    command: Command::StartRally,
+                    command: Command::StartRally | Command::SchoolConfirmStart,
                     enabled: true,
                 }
             );
@@ -1611,6 +1695,130 @@ impl Menu {
                     color,
                 );
             }
+        }
+    }
+    fn draw_school_briefing_panel(&self, canvas: &mut Canvas, ctx: &Context) {
+        let panel = Rect::new(0.055, 0.195, 0.89, 0.440);
+        ui::panel(canvas, panel, PANEL_DEEP, LINE);
+        let (px, py, pw, _) = ui::px(panel, canvas);
+        let Some((idx, sch)) = ctx.active_school_lesson.zip(ctx.school) else {
+            return;
+        };
+        let Some(entry) = sch.entries.get(idx as usize) else {
+            return;
+        };
+        let mut lines: Vec<(String, [u8; 4])> = Vec::new();
+        let objective = entry
+            .instruction
+            .clone()
+            .unwrap_or_else(|| format!("SIN STRINGS.RBZ (CLAVE {})", entry.key));
+        for part in objective.lines() {
+            for w in ui::wrap(&format!("OBJETIVO: {part}"), 60) {
+                lines.push((w, TEXT));
+            }
+        }
+        if let Some(cones) = &entry.cones_guide {
+            for (ci, part) in cones.lines().enumerate() {
+                let prefix = if ci == 0 { "CONOS / ZONAS: " } else { "  " };
+                for w in ui::wrap(&format!("{prefix}{part}"), 60) {
+                    lines.push((w, WARN));
+                }
+            }
+        }
+        let timing_line =
+            if entry.perfect_time > 0.0 && entry.pass_time > 0.0 && entry.time_limit > 0.0 {
+                format!(
+                    "TIEMPOS: PERFECTO <= {:.1}S · APROBADO <= {:.1}S · LÍMITE {:.1}S",
+                    entry.perfect_time, entry.pass_time, entry.time_limit
+                )
+            } else if entry.untimed {
+                "EVALUACIÓN: PRUEBA DE CONTROL (SIN LÍMITE ESTRICTO DE TIEMPO)".into()
+            } else {
+                "EVALUACIÓN: CONDUCCIÓN DE PRUEBA".into()
+            };
+        lines.push((timing_line, GOOD));
+        if let Some(dist) = entry.target_distance {
+            lines.push((
+                format!("REFERENCIA / ZONA DE PARADA: {dist:.0}M POR PISTA"),
+                DIM,
+            ));
+        }
+        if entry.ride {
+            lines.push((
+                "MODO DEMO: REPRODUCCIÓN AUTOMÁTICA .ARP NO ACTIVA; CONDUCE EL TRAMO".into(),
+                WARN,
+            ));
+        }
+        lines.push((sch.audio.status.label(), DIM));
+        let max_lines = 9;
+        for (i, (line, color)) in lines.into_iter().take(max_lines).enumerate() {
+            ui::text_clipped(
+                canvas,
+                px + 12.0,
+                py + 10.0 + i as f32 * 16.0,
+                pw - 24.0,
+                &line,
+                0.70,
+                color,
+            );
+        }
+    }
+    fn draw_school_result_panel(&self, canvas: &mut Canvas, ctx: &Context) {
+        let panel = Rect::new(0.055, 0.195, 0.89, 0.440);
+        let border = ctx
+            .school_result
+            .map_or(LINE, |r| if r.verdict > 0 { GOOD } else { BAD });
+        ui::panel(canvas, panel, PANEL_DEEP, border);
+        let (px, py, pw, _) = ui::px(panel, canvas);
+        let Some(res) = ctx.school_result else {
+            return;
+        };
+        let mut lines: Vec<(String, [u8; 4])> = Vec::new();
+        let verdict_color = if res.verdict > 0 { GOOD } else { BAD };
+        lines.push((
+            format!(
+                "CALIFICACIÓN: {}/4 · TIEMPO: {} · MEJOR: {} -> {} ({}/17)",
+                res.verdict,
+                format_stage_time(f64::from(res.elapsed_seconds)),
+                res.previous_best,
+                res.new_best,
+                res.unlocked_count
+            ),
+            verdict_color,
+        ));
+        if res.perfect_time > 0.0 && res.pass_time > 0.0 && res.time_limit > 0.0 {
+            lines.push((
+                format!(
+                    "OBJETIVOS: PERFECTO <= {:.1}S · APROBADO <= {:.1}S · LÍMITE {:.1}S",
+                    res.perfect_time, res.pass_time, res.time_limit
+                ),
+                DIM,
+            ));
+        }
+        if res.verdict == 0 {
+            for reason in &res.failure_reasons {
+                for w in ui::wrap(&format!("MOTIVO: {reason}"), 60) {
+                    lines.push((w, BAD));
+                }
+            }
+            if let Some(advice) = &res.advice {
+                for w in ui::wrap(&format!("INSTRUCTOR: {advice}"), 60) {
+                    lines.push((w, WARN));
+                }
+            }
+        } else {
+            lines.push(("PROGRESO GUARDADO EN SCHOOL_PROFILE.TXT".into(), TEXT));
+        }
+        for (i, (line, color)) in lines.into_iter().take(9).enumerate() {
+            ui::text_clipped(
+                canvas,
+                px + 12.0,
+                py + 10.0 + i as f32 * 16.0,
+                pw - 24.0,
+                &line,
+                0.70,
+                color,
+            );
         }
     }
     fn draw_loading(&self, canvas: &mut Canvas, ctx: &Context) {
@@ -1828,6 +2036,7 @@ pub struct Settings {
     pub music_volume: f64,
     pub codriver_volume: f64,
     pub camera: u8,
+    pub vehicle_id: String,
     pub stage_id: String,
     pub ngp_experimental: bool,
 }
@@ -1845,6 +2054,7 @@ impl Default for Settings {
             music_volume: 0.70,
             codriver_volume: 0.85,
             camera: 0,
+            vehicle_id: rerbr_content::VehicleDescriptor::default().id,
             stage_id: rerbr_content::StageDescriptor::default().id,
             ngp_experimental: false,
         }
@@ -1903,6 +2113,9 @@ impl Settings {
                         settings.camera = v.min(2);
                     }
                 }
+                "vehicle_id" if !value.trim().is_empty() => {
+                    settings.vehicle_id = value.trim().to_string();
+                }
                 "stage_id" if !value.trim().is_empty() => {
                     settings.stage_id = value.trim().to_string();
                 }
@@ -1923,9 +2136,9 @@ impl Settings {
     }
     fn encode(&self) -> String {
         format!(
-            "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nclutch_help={}\nvolume={}\nmusic_volume={}\ncodriver_volume={}\ncamera={}\nstage_id={}\nngp_experimental={}\n",
+            "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nclutch_help={}\nvolume={}\nmusic_volume={}\ncodriver_volume={}\ncamera={}\nvehicle_id={}\nstage_id={}\nngp_experimental={}\n",
             self.sensitivity, self.dead_zone, self.fps, self.diagnostics,
-            self.minimal_hud, self.invert_pedals, self.clutch_help, self.volume, self.music_volume, self.codriver_volume, self.camera, self.stage_id, self.ngp_experimental
+            self.minimal_hud, self.invert_pedals, self.clutch_help, self.volume, self.music_volume, self.codriver_volume, self.camera, self.vehicle_id, self.stage_id, self.ngp_experimental
         )
     }
     pub fn save(&self) {
@@ -1980,6 +2193,8 @@ mod tests {
             pacenote_atlas_status: None,
             championship: None,
             school: None,
+            active_school_lesson: None,
+            school_result: None,
         }
     }
 
@@ -2550,6 +2765,9 @@ mod tests {
             Page::Paused,
             Page::StageComplete,
             Page::Replay,
+            Page::RallySchool,
+            Page::SchoolBriefing,
+            Page::SchoolResult,
         ];
 
         for page in all_pages {

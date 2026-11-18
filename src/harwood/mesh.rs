@@ -33,6 +33,7 @@ pub struct Mesh {
     pub bad_triangles: usize,
     pub skipped_draws: usize,
     pub far_draws: usize,
+    pub shadow_draws: usize,
     pub specular_draws: usize,
 }
 
@@ -140,7 +141,7 @@ pub fn block_mesh(block: &lbs::GeometryBlock<'_>) -> Mesh {
         }
         if mesh.indices.len() > first {
             if chunk.shadow {
-                mesh.skipped_draws += 1;
+                mesh.shadow_draws += 1;
             }
             if chunk.specular {
                 mesh.specular_draws += 1;
@@ -187,4 +188,102 @@ fn vertex_bytes<'a>(
 
 fn f32_at(bytes: &[u8], at: usize) -> f32 {
     f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_render_chunk(view: usize, list: u8, shadow: bool) -> lbs::RenderChunk {
+        lbs::RenderChunk {
+            view,
+            vertex_shader: 0,
+            pixel_shader: 0,
+            start_index: 0,
+            prim_count: 1,
+            vertex_count: 3,
+            min_index: 0,
+            bounds: lbs::Bounds {
+                center: [0.0; 3],
+                half_extent: [1.0; 3],
+            },
+            shadow,
+            shadow_texture: 0,
+            specular: false,
+            specular_texture: 0,
+            textures: vec![0, 1],
+            vertex_constants_flag: false,
+            vertex_constants: [0.0; 4],
+            vertex_constants_word: 0,
+            list,
+        }
+    }
+
+    #[test]
+    fn block_mesh_counts_view_7_shadow_chunk_as_shadow_draw_not_skipped() {
+        let stride = lbs::VIEW_STRIDES[7];
+        let mut vertices = vec![0u8; stride * 3];
+        for (i, pos) in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+            .iter()
+            .enumerate()
+        {
+            let base = i * stride;
+            for (axis, v) in pos.iter().enumerate() {
+                vertices[base + axis * 4..base + axis * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        let indices: Vec<u8> = [0u16, 1, 2]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut views: [Option<lbs::Buffers<'_>>; 9] = [None; 9];
+        views[7] = Some(lbs::Buffers {
+            indices: &indices,
+            vertices: &vertices,
+            vertex_count: 3,
+            stride,
+        });
+        let block = lbs::GeometryBlock {
+            views,
+            chunks: vec![sample_render_chunk(7, 1, true)],
+            bounds: lbs::Bounds {
+                center: [0.5, 0.0, 0.5],
+                half_extent: [0.5, 0.0, 0.5],
+            },
+        };
+        let mesh = block_mesh(&block);
+        assert_eq!(mesh.skipped_draws, 0);
+        assert_eq!(mesh.shadow_draws, 1);
+        assert_eq!(mesh.draws.len(), 1);
+        assert_eq!(mesh.indices.len(), 3);
+    }
+
+    #[test]
+    fn block_mesh_counts_list_3_far_chunk_without_near_indices() {
+        let stride = lbs::VIEW_STRIDES[0];
+        let vertices = vec![0u8; stride * 3];
+        let indices: Vec<u8> = [0u16, 1, 2]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut views: [Option<lbs::Buffers<'_>>; 9] = [None; 9];
+        views[0] = Some(lbs::Buffers {
+            indices: &indices,
+            vertices: &vertices,
+            vertex_count: 3,
+            stride,
+        });
+        let block = lbs::GeometryBlock {
+            views,
+            chunks: vec![sample_render_chunk(0, 3, false)],
+            bounds: lbs::Bounds {
+                center: [0.0; 3],
+                half_extent: [1.0; 3],
+            },
+        };
+        let mesh = block_mesh(&block);
+        assert!(mesh.indices.is_empty());
+        assert_eq!(mesh.far_draws, 1);
+        assert_eq!(mesh.skipped_draws, 0);
+    }
 }
