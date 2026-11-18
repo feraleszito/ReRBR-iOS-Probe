@@ -208,7 +208,7 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
             _ => (),
         }
     }
-    if report.blocks != stage.terrain_blocks {
+    if report.blocks == 0 || (!stage.is_school_stage() && report.blocks != stage.terrain_blocks) {
         return Err(format!(
             "STAGE: expected {} blocks for {}, got {}",
             stage.terrain_blocks, stage.id, report.blocks

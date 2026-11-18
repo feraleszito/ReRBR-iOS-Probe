@@ -56,7 +56,15 @@ impl Worker {
         automatic: bool,
         clutch_help: bool,
     ) -> Self {
-        Self::spawn_inner(selection, automatic, clutch_help, None)
+        Self::spawn_inner(selection, automatic, clutch_help, None, None)
+    }
+    pub fn new_school_lesson(
+        selection: rerbr_content::Selection,
+        lesson_index: u32,
+        automatic: bool,
+        clutch_help: bool,
+    ) -> Self {
+        Self::spawn_inner(selection, automatic, clutch_help, None, Some(lesson_index))
     }
     pub fn new_experimental_pack_with_aids(
         selection: rerbr_content::Selection,
@@ -64,13 +72,14 @@ impl Worker {
         automatic: bool,
         clutch_help: bool,
     ) -> Self {
-        Self::spawn_inner(selection, automatic, clutch_help, Some(pack_path))
+        Self::spawn_inner(selection, automatic, clutch_help, Some(pack_path), None)
     }
     fn spawn_inner(
         selection: rerbr_content::Selection,
         automatic: bool,
         clutch_help: bool,
         experimental_pack: Option<std::path::PathBuf>,
+        school_lesson: Option<u32>,
     ) -> Self {
         let state = Arc::new(Mutex::new(Shared {
             input: Control::default(),
@@ -98,6 +107,7 @@ impl Worker {
                         clutch_help,
                         &selection,
                         experimental_pack.as_deref(),
+                        school_lesson,
                     )
                 }));
                 let error = match result {
@@ -146,6 +156,7 @@ fn run(
     clutch_help: bool,
     selection: &rerbr_content::Selection,
     experimental_pack: Option<&std::path::Path>,
+    school_lesson: Option<u32>,
 ) -> Result<(), String> {
     static OWNER: Mutex<()> = Mutex::new(());
     let _owner = loop {
@@ -163,15 +174,18 @@ fn run(
     let documents = std::env::var_os("RERBR_PROBE_DOCUMENTS").ok_or("Documents unavailable")?;
     let doc_path = std::path::Path::new(&documents);
     let paths = Paths::for_mode(doc_path, selection, experimental_pack.is_some())?;
-    let mut session = match experimental_pack {
-        Some(pack_path) => Session::boot_experimental_pack_with_aids(
+    let mut session = match (experimental_pack, school_lesson) {
+        (Some(pack_path), _) => Session::boot_experimental_pack_with_aids(
             &paths,
             selection,
             pack_path,
             automatic,
             clutch_help,
         )?,
-        None => Session::boot_with_aids(&paths, selection, automatic, clutch_help)?,
+        (None, Some(lesson_index)) => {
+            Session::boot_lesson(&paths, selection, lesson_index, automatic, clutch_help)?
+        }
+        (None, None) => Session::boot_with_aids(&paths, selection, automatic, clutch_help)?,
     };
     if stop.load(Ordering::Relaxed) {
         return Ok(());

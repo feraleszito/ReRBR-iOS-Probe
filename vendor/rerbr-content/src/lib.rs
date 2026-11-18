@@ -237,9 +237,39 @@ impl StageDescriptor {
     pub fn is_experimental(&self) -> bool {
         self.is_original_rbr() && !self.is_validated_reference()
     }
+    pub fn is_school_stage(&self) -> bool {
+        matches!(self.original_map, 73..=89)
+    }
+    pub fn school_lesson(
+        map: u32,
+        stem: impl Into<String>,
+        documents_maps: impl Into<String>,
+        terrain_blocks: usize,
+    ) -> Result<Self, String> {
+        if !matches!(map, 73..=89) {
+            return Err(format!(
+                "map {map} is not a Rally School map (expected 73..=89)"
+            ));
+        }
+        let stem = stem.into();
+        let weather_letter = school_weather_letter(map, &stem)?;
+        let stage = Self {
+            id: format!("school-map-{map}"),
+            name: format!("Rally School (Map {map})"),
+            original_map: map,
+            stem,
+            documents_maps: documents_maps.into(),
+            weather_letter,
+            wetness: 0,
+            wear: 1,
+            terrain_blocks: terrain_blocks.max(1),
+        };
+        stage.validate_current_backend()?;
+        Ok(stage)
+    }
     pub fn surface(&self) -> &'static str {
         match self.original_map {
-            41..=46 | 51..=56 => "Tarmac",
+            41..=46 | 51..=56 | 73 | 85 | 86 => "Tarmac",
             _ => "Gravel",
         }
     }
@@ -250,6 +280,7 @@ impl StageDescriptor {
             41..=46 => "France",
             51..=56 => "Japan",
             61..=66 => "United States",
+            73..=89 => "Rally School",
             _ => "Unknown",
         }
     }
@@ -285,13 +316,33 @@ impl StageDescriptor {
                     && self.wear == preset.wear
                     && self.terrain_blocks == preset.terrain_blocks
             });
-        if !matches_preset {
+        let matches_school = matches!(self.original_map, 73..=89)
+            && self.id == format!("school-map-{}", self.original_map)
+            && school_weather_letter(self.original_map, &self.stem)
+                .is_ok_and(|letter| letter == self.weather_letter);
+        if !(allowed_maps && (matches_preset || matches_school)) {
             return Err(format!(
                 "unsupported stage profile '{}'; only validated presets are enabled",
                 self.id
             ));
         }
         Ok(())
+    }
+}
+fn school_weather_letter(map: u32, stem: &str) -> Result<u32, String> {
+    let expected_prefix = format!("track-{map}_");
+    let suffix = stem
+        .strip_prefix(&expected_prefix)
+        .ok_or_else(|| format!("school stem '{stem}' must start with '{expected_prefix}'"))?;
+    match suffix {
+        "M" => Ok(0),
+        "N" => Ok(1),
+        "E" => Ok(2),
+        "O" => Ok(3),
+        "S" => Ok(4),
+        _ => Err(format!(
+            "unsupported weather variant '{suffix}' in '{stem}'"
+        )),
     }
 }
 impl Selection {

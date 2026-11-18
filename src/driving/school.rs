@@ -15,7 +15,9 @@ pub struct SchoolLessonEntry {
     pub map: u32,
     pub setup_file: &'static str,
     pub grade: u32,
+    pub stem: String,
     pub assets_present: bool,
+    pub missing_files: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -71,10 +73,8 @@ impl SchoolCatalog {
             .enumerate()
             .map(|(i, lesson)| {
                 let map = lesson.map();
-                let assets_present = rbr_root.is_some_and(|root| {
-                    cars::resolve(root, &format!("Maps/track-{map}_O.col")).is_some()
-                        || cars::resolve(root, &format!("Maps/track-{map}_N.col")).is_some()
-                });
+                let (stem, missing_files) = inspect_lesson_assets(rbr_root, map);
+                let assets_present = missing_files.is_empty();
                 if assets_present {
                     present_count += 1;
                 }
@@ -84,14 +84,16 @@ impl SchoolCatalog {
                     map,
                     setup_file: lesson.setup_file(),
                     grade: results[i],
+                    stem,
                     assets_present,
+                    missing_files,
                 }
             })
             .collect();
         let status = if rbr_root.is_none() {
             "DOCUMENTS NO DISPONIBLE".into()
         } else if present_count == 0 {
-            "FALTA MAPS/TRACK-73..89 PARA ESCUELA DE RALLY".into()
+            "FALTAN MAPS/TRACK-73..89_M.* O PHYSICS.RBZ".into()
         } else {
             format!("{present_count}/17 LECCIONES DISPONIBLES")
         };
@@ -133,6 +135,40 @@ pub fn parse_results(text: &str) -> [u32; Lesson::COUNT as usize] {
     out
 }
 
+fn inspect_lesson_assets(rbr_root: Option<&Path>, map: u32) -> (String, Vec<String>) {
+    let Some(root) = rbr_root else {
+        return (
+            format!("track-{map}_M"),
+            vec!["Documents/RBR (carpeta no disponible)".into()],
+        );
+    };
+    let stem = ["M", "O", "N"]
+        .into_iter()
+        .map(|variant| format!("track-{map}_{variant}"))
+        .find(|candidate| cars::resolve(root, &format!("Maps/{candidate}.col")).is_some())
+        .unwrap_or_else(|| format!("track-{map}_M"));
+    let mut missing = Vec::new();
+    for ext in rerbr_content::PHYSICS_STAGE_EXTENSIONS {
+        let rel = format!("Maps/{stem}.{ext}");
+        if cars::resolve(root, &rel).is_none() {
+            missing.push(rel);
+        }
+    }
+    let tex_rel = format!("Maps/{stem}_textures.rbz");
+    if cars::resolve(root, &tex_rel).is_none() {
+        missing.push(tex_rel);
+    }
+    for common in ["physics.rbz", "misc.rbz", "Scripts.rbz", "Cars/Cars.ini"] {
+        if cars::resolve(root, common).is_none() {
+            missing.push(common.into());
+        }
+    }
+    if cars::resolve(root, "Cars/impreza03/impreza03.sgc").is_none() {
+        missing.push("Cars/impreza03/impreza03.sgc".into());
+    }
+    (stem, missing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +182,34 @@ mod tests {
         cat.record_verdict(2, 3);
         assert_eq!(cat.results[0..3], [3, 3, 3]);
         assert_eq!(parse_results(&encode_results(&cat.results)), cat.results);
+    }
+
+    #[test]
+    fn school_catalog_detects_real_track_m_and_lists_exact_missing_files() {
+        let dir = std::env::temp_dir().join("rerbr_school_missing_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cat = SchoolCatalog::build(Some(&dir), [0; 17]);
+        assert!(!cat.entries[0].assets_present);
+        assert!(cat.entries[0]
+            .missing_files
+            .iter()
+            .any(|p| p.contains("track-") && p.ends_with("_M.col")));
+        assert!(!cat.entries[0]
+            .missing_files
+            .iter()
+            .any(|p| p.contains("Maps/School")));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let pc_rbr = std::path::Path::new(r"C:\Richard Burns Rally");
+        if pc_rbr.join("Maps/track-73_M.col").is_file() {
+            let cat = SchoolCatalog::build(Some(pc_rbr), [0; 17]);
+            let ready = cat.entries.iter().filter(|e| e.assets_present).count();
+            assert_eq!(
+                ready, 17,
+                "all 17 school lessons on track-73..89_M should be detected: {:?}",
+                cat.entries[0].missing_files
+            );
+        }
     }
 }

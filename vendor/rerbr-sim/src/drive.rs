@@ -53,6 +53,7 @@ pub struct Session {
 struct BootAids {
     automatic: bool,
     clutch_help: bool,
+    lesson: Option<rbr_school::lesson::Lesson>,
 }
 impl Session {
     /// Call on the dedicated STACK_BYTES worker; callers must catch pure-host panics there.
@@ -78,7 +79,7 @@ impl Session {
             selection.vehicle.original_slot,
             None,
             selection,
-            BootAids { automatic, clutch_help: false },
+            BootAids { automatic, clutch_help: false, lesson: None },
         )
     }
 
@@ -136,7 +137,7 @@ impl Session {
             rbr_formats::car_pack::SLOT,
             car_pack,
             selection,
-            BootAids { automatic, clutch_help },
+            BootAids { automatic, clutch_help, lesson: None },
         )
     }
 
@@ -156,8 +157,55 @@ impl Session {
             selection.vehicle.original_slot,
             None,
             selection,
-            BootAids { automatic, clutch_help },
+            BootAids { automatic, clutch_help, lesson: None },
         )
+    }
+
+    pub fn boot_lesson(
+        paths: &inputs::Paths,
+        selection: &rerbr_content::Selection,
+        lesson_index: u32,
+        automatic: bool,
+        clutch_help: bool,
+    ) -> Result<Self, String> {
+        let lesson = rbr_school::lesson::Lesson::new(lesson_index)
+            .ok_or_else(|| format!("unknown rally school lesson index {lesson_index}"))?;
+        if selection.stage.original_map != lesson.map() {
+            return Err(format!(
+                "lesson {lesson_index} expects map {}, got {}",
+                lesson.map(),
+                selection.stage.original_map
+            ));
+        }
+        selection.validate_current_backend()?;
+        let checked = inputs::check_selection(paths, selection)?;
+        let data = paths.data();
+        let mut session = Self::boot_core(
+            paths,
+            data,
+            checked.physics,
+            rbr_school::lesson::CAR,
+            None,
+            selection,
+            BootAids { automatic, clutch_help, lesson: Some(lesson) },
+        )?;
+        // School stages skip countdown; burn off spawn override_timer and crank starter if lesson starts off.
+        let car = session.playback.pure.mem.u32(rbr_hybrid::pure::CAR_PTR);
+        for _ in 0..2000 {
+            if session.playback.pure.mem.f32(car + rbr_physics::car_body::layout::T_OVERRIDE) <= 0.0 {
+                break;
+            }
+            session.step(Control::default())?;
+        }
+        if session.sample().rpm < 50.0 {
+            for k in 0..1080 {
+                session.step(Control { aux: 1, ..Default::default() })?;
+                if k >= 900 && session.sample().rpm > 1200.0 {
+                    break;
+                }
+            }
+        }
+        Ok(session)
     }
 
     fn boot_core(
@@ -173,26 +221,34 @@ impl Session {
             return Err("physics-drive requires panic=unwind".into());
         }
         let season = Season::load(&data)?;
-        let row = season
-            .rows
-            .iter()
-            .position(|r| {
-                r.map == selection.stage.original_map
-                    && r.letter == selection.stage.weather_letter
-                    && r.wetness == selection.stage.wetness
-            })
-            .ok_or_else(|| {
-                format!(
-                    "missing weather row for stage {} (letter {}, wetness {})",
-                    selection.stage.id, selection.stage.weather_letter, selection.stage.wetness
-                )
-            })?;
-        let weather = weather::quick_race(
-            &season,
-            selection.stage.original_map,
-            Preset::Random,
-            Draws { row: Some(row), wear: selection.stage.wear },
-        )?;
+        let weather = if let Some(row) = season.rows.iter().position(|r| {
+            r.map == selection.stage.original_map
+                && r.letter == selection.stage.weather_letter
+                && r.wetness == selection.stage.wetness
+        }) {
+            weather::quick_race(
+                &season,
+                selection.stage.original_map,
+                Preset::Random,
+                Draws { row: Some(row), wear: selection.stage.wear },
+            )?
+        } else if aids.lesson.is_some() {
+            rbr_gameplay::weather::Weather {
+                map: selection.stage.original_map,
+                row: None,
+                letter: selection.stage.weather_letter,
+                cloud: 0,
+                cloud_letter: 0,
+                preset: 0,
+                wetness: selection.stage.wetness,
+                wear: selection.stage.wear,
+            }
+        } else {
+            return Err(format!(
+                "missing weather row for stage {} (letter {}, wetness {})",
+                selection.stage.id, selection.stage.weather_letter, selection.stage.wetness
+            ));
+        };
         let audit_archive = physics_archive.clone();
         let mut race = boot::Race::quick_race(
             selection.stage.original_map,
@@ -201,6 +257,9 @@ impl Session {
             weather,
             physics_archive,
         );
+        if let Some(lesson) = aids.lesson {
+            race = race.in_school(lesson);
+        }
         let physics_audit = match &car_pack {
             Some(cp) => crate::physics_audit::inspect_pack(&audit_archive, &cp.pack, race.surface)?,
             None => {
@@ -237,7 +296,7 @@ impl Session {
             playback.step(None, 40);
             stage = stage.load_tick(40);
         }
-        stage = stage.go().countdown_tick(dt);
+        stage = if aids.lesson.is_some() { stage.school_start() } else { stage.go().countdown_tick(dt) };
         if stage.state() != State::Driving {
             return Err("stage did not reach Driving".into());
         }
@@ -677,6 +736,63 @@ mod surface_tests {
             );
             assert!(re_held.speed() <= released.speed() + 0.05, "declutching while moving must not accelerate");
             assert!(re_held.rpm > 7000.0, "declutching under throttle must allow engine RPM to rise");
+        }
+    }
+
+    #[test]
+    fn school_lesson_boot_and_step_smoke() {
+        use crate::drive::{Control, Session};
+        use crate::inputs::Paths;
+        let desktop_rbr = std::path::Path::new(r"C:\Users\adria\Desktop\RBR");
+        let rbr = std::path::Path::new(r"C:\Richard Burns Rally");
+        if !desktop_rbr.join("Plugins/NGP.dll").is_file()
+            || !rbr.join("Maps/track-81_M.col").is_file()
+            || !rbr.join("Maps/track-73_M.col").is_file()
+        {
+            return;
+        }
+        let paths =
+            Paths { install: rbr.to_path_buf(), overlay: Some(desktop_rbr.to_path_buf()), maps: rbr.join("Maps") };
+        let impreza = rerbr_content::VehicleDescriptor::original_rbr_presets()
+            .into_iter()
+            .find(|v| v.original_slot == rbr_school::lesson::CAR)
+            .expect("Car05 impreza preset");
+        for idx in [0u32, 1u32, 12u32] {
+            let lesson = rbr_school::lesson::Lesson::new(idx).unwrap();
+            let map = lesson.map();
+            let stage =
+                rerbr_content::StageDescriptor::school_lesson(map, format!("track-{map}_M"), "RBR/Maps", 1).unwrap();
+            let sel = rerbr_content::Selection { vehicle: impreza.clone(), stage };
+            let mut session = Session::boot_lesson(&paths, &sel, idx, false, false).unwrap();
+            assert!(session.sample().rpm > 800.0, "school lesson {idx} should boot ready with running engine");
+            for step_i in 0..1440 {
+                let clutch = if step_i < 240 {
+                    1.0
+                } else if step_i < 480 {
+                    0.5
+                } else {
+                    0.0
+                };
+                let c = Control {
+                    throttle: 1.0,
+                    clutch,
+                    steering: 0.25,
+                    flags: if session.sample().commanded_gear != 2 { 4 } else { 0 },
+                    gear: (session.sample().commanded_gear != 2).then_some(2),
+                    ..Default::default()
+                };
+                session.step(c).unwrap();
+            }
+            let s = session.sample();
+            eprintln!(
+                "SCHOOL lesson={idx} map={map}: gear={} cmd={} thr={:.2} speed={:.2}m/s rpm={:.0}",
+                s.gear,
+                s.commanded_gear,
+                s.throttle_received,
+                s.speed(),
+                s.rpm
+            );
+            assert!(s.speed() > 6.0, "school lesson {idx} failed to accelerate: {}", s.speed());
         }
     }
 }

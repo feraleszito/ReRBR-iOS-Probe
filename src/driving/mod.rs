@@ -111,6 +111,7 @@ pub struct Runtime {
     pub pacenote_hud: pacenote_icons::PacenoteHudSettings,
     pub championship: championship::ChampionshipCalendar,
     pub school: school::SchoolCatalog,
+    pub active_school_lesson: Option<u32>,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -215,6 +216,7 @@ impl Runtime {
             pacenote_hud: pacenote_icons::PacenoteHudSettings::load(),
             championship: championship::ChampionshipCalendar::load_default(),
             school: school::SchoolCatalog::load_default(),
+            active_school_lesson: None,
         }
     }
     pub fn process_gamepad_snapshot(&mut self, snap: &gamepad::GamepadSnapshot, now_secs: f64) {
@@ -545,6 +547,7 @@ impl Runtime {
                     self.race.prepare();
                     self.replay_player = None;
                     self.replay_recorder.clear();
+                    self.active_school_lesson = None;
                     self.worker = worker::Worker::new_selected_with_aids(
                         self.selection.clone(),
                         false,
@@ -600,6 +603,14 @@ impl Runtime {
                         self.experimental_visual_only = true;
                         self.worker = worker::Worker::idle();
                     }
+                } else if let Some(lesson_idx) = self.active_school_lesson {
+                    self.experimental_visual_only = false;
+                    self.worker = worker::Worker::new_school_lesson(
+                        self.selection.clone(),
+                        lesson_idx,
+                        false,
+                        self.clutch_help,
+                    );
                 } else {
                     self.experimental_visual_only = false;
                     self.worker = worker::Worker::new_selected_with_aids(
@@ -1165,13 +1176,89 @@ impl Runtime {
             SchoolInspectLesson => {
                 if let Some(entry) = self.school.entries.get(self.school.selected) {
                     self.message = Some(if entry.assets_present {
-                        format!("{} (MAP {}) DISPONIBLE", entry.key, entry.map)
+                        format!("{} ({}) DISPONIBLE", entry.key, entry.stem)
                     } else {
                         format!(
-                            "{}: FALTA Documents/RBR/Maps/track-{}_*.col",
-                            entry.key, entry.map
+                            "{}: FALTA {}",
+                            entry.key,
+                            entry
+                                .missing_files
+                                .first()
+                                .map_or("ARCHIVOS DE LECCIÓN", String::as_str)
                         )
                     });
+                }
+            }
+            SchoolStartLesson => {
+                let Some(entry) = self.school.entries.get(self.school.selected).cloned() else {
+                    return;
+                };
+                if !entry.assets_present {
+                    self.message = Some(format!(
+                        "{}: FALTA {}",
+                        entry.key,
+                        entry
+                            .missing_files
+                            .first()
+                            .map_or("ARCHIVOS DE LECCIÓN", String::as_str)
+                    ));
+                    return;
+                }
+                if self.race.phase != race::Phase::Idle {
+                    self.message = Some("RALLY ALREADY LOADING OR ACTIVE".into());
+                    return;
+                }
+                let Some(impreza) = rerbr_content::VehicleDescriptor::original_rbr_presets()
+                    .into_iter()
+                    .find(|v| v.original_slot == 5)
+                else {
+                    self.message = Some("FALTA PRESET SUBARU IMPREZA 2003 (CAR05)".into());
+                    return;
+                };
+                match rerbr_content::StageDescriptor::school_lesson(
+                    entry.map,
+                    entry.stem.clone(),
+                    "RBR/Maps",
+                    1,
+                ) {
+                    Ok(stage) => {
+                        let next_sel = rerbr_content::Selection {
+                            vehicle: impreza,
+                            stage,
+                        };
+                        if let Err(err) = self.configure_selection(next_sel) {
+                            self.message = Some(format!("ESCUELA BLOQUEADA: {err}"));
+                            return;
+                        }
+                        audio::set_menu_music_active(false);
+                        audio::set_paused(true);
+                        audio::set_codriver_active(false);
+                        audio::clear_speech_queue();
+                        self.codriver = None;
+                        self.worker.shutdown();
+                        self.clear_scene_pose();
+                        self.loading_started = Instant::now();
+                        self.race.prepare();
+                        self.replay_player = None;
+                        self.replay_recorder.clear();
+                        self.active_school_lesson = Some(entry.lesson.index());
+                        self.experimental_visual_only = false;
+                        self.worker = worker::Worker::new_school_lesson(
+                            self.selection.clone(),
+                            entry.lesson.index(),
+                            false,
+                            self.clutch_help,
+                        );
+                        self.pending_scene_action = Some(SceneAction::Load {
+                            selection: Box::new(self.selection.clone()),
+                            experimental_ngp: false,
+                        });
+                        self.menu.show(menu::Page::Loading);
+                        self.message = None;
+                    }
+                    Err(err) => {
+                        self.message = Some(format!("ESCUELA BLOQUEADA: {err}"));
+                    }
                 }
             }
         }

@@ -148,6 +148,7 @@ pub enum Command {
     SchoolPrevLesson,
     SchoolNextLesson,
     SchoolInspectLesson,
+    SchoolStartLesson,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -903,18 +904,29 @@ impl Menu {
                             format!("{} (MAP {})", entry.key, entry.map),
                         ));
                         rows.push(Row::info("SETUP", entry.setup_file));
+                        rows.push(Row::info("ARCHIVO", entry.stem.as_str()));
                         rows.push(Row::info(
                             "NOTA / ARCHIVOS",
-                            format!(
-                                "GRADO {}/4 · {}",
-                                entry.grade,
-                                if entry.assets_present {
-                                    "ARCHIVOS OK"
-                                } else {
-                                    "FALTAN MAPS/SCHOOL"
-                                }
-                            ),
+                            if entry.assets_present {
+                                format!("GRADO {}/4 · ARCHIVOS OK", entry.grade)
+                            } else {
+                                format!(
+                                    "GRADO {}/4 · FALTA {}",
+                                    entry.grade,
+                                    entry
+                                        .missing_files
+                                        .first()
+                                        .map_or("ARCHIVOS", String::as_str)
+                                )
+                            },
                         ));
+                        rows.push(Row {
+                            label: "INICIAR LECCIÓN".into(),
+                            kind: RowKind::Action {
+                                command: Command::SchoolStartLesson,
+                                enabled: entry.assets_present,
+                            },
+                        });
                     }
                     rows.push(Row::stepper(
                         "SELECCIONAR LECCIÓN",
