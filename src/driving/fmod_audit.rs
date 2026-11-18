@@ -181,4 +181,44 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn census_all_rsf_audiofmod_banks_on_pc() {
+        let dir = Path::new(r"C:\Richard Burns Rally\AudioFMOD");
+        if !dir.is_dir() {
+            return;
+        }
+        let rbr = Path::new(r"C:\Richard Burns Rally");
+        let (mut total, mut pcm_banks, mut vorbis_banks, mut failed) =
+            (0usize, 0usize, 0usize, 0usize);
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                let n = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                n.ends_with(".bank") && !n.ends_with(".strings.bank")
+            })
+            .collect();
+        entries.sort();
+        for p in entries {
+            total += 1;
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap();
+            let rep = inspect_bank(rbr, &format!("AudioFMOD/{name}"));
+            match rep.support {
+                FmodBankSupport::Pcm16Playable { .. } => pcm_banks += 1,
+                FmodBankSupport::VorbisUnsupportedOnIos { .. } => vorbis_banks += 1,
+                _ => failed += 1,
+            }
+        }
+        eprintln!(
+            "FMOD CENSUS total={total} pcm16={pcm_banks} fsb5_vorbis={vorbis_banks} other_or_err={failed}"
+        );
+        assert!(total > 0);
+        assert_eq!(failed, 0);
+    }
 }

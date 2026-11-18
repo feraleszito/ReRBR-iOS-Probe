@@ -135,11 +135,17 @@ pub enum SurfaceKind {
 struct SurfaceAudio {
     surface: SurfaceKind,
     speed_mps: f32,
+    prev_speed_mps: f32,
     slip: f32,
     grounded_wheels: usize,
+    prev_grounded_wheels: usize,
     rng: u32,
     lp_state: f32,
     gravel_pulse: f32,
+    landing_pulse: f32,
+    impact_pulse: f32,
+    squeal_phase: f32,
+    thud_phase: f32,
 }
 
 impl Default for SurfaceAudio {
@@ -147,11 +153,17 @@ impl Default for SurfaceAudio {
         Self {
             surface: SurfaceKind::Gravel,
             speed_mps: 0.0,
+            prev_speed_mps: 0.0,
             slip: 0.0,
             grounded_wheels: 4,
+            prev_grounded_wheels: 4,
             rng: 0x1357_9bdf,
             lp_state: 0.0,
             gravel_pulse: 0.0,
+            landing_pulse: 0.0,
+            impact_pulse: 0.0,
+            squeal_phase: 0.0,
+            thud_phase: 0.0,
         }
     }
 }
@@ -168,33 +180,112 @@ impl SurfaceAudio {
         (self.rng as i32) as f32 / i32::MAX as f32
     }
 
-    fn mix_into(&mut self, out: &mut [f32], frames: usize, volume: f32, is_cockpit: bool) {
-        if volume <= 0.0 || self.grounded_wheels == 0 || self.speed_mps < 1.0 {
+    fn update_telemetry(
+        &mut self,
+        surface: SurfaceKind,
+        speed_mps: f32,
+        wheel_slip: f32,
+        grounded_wheels: usize,
+    ) {
+        let speed = if speed_mps.is_finite() {
+            speed_mps.max(0.0)
+        } else {
+            0.0
+        };
+        let slip = if wheel_slip.is_finite() {
+            wheel_slip.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if self.prev_grounded_wheels == 0 && grounded_wheels > 0 && speed > 4.0 {
+            let energy = 0.35 + (speed / 45.0).clamp(0.0, 0.55);
+            self.landing_pulse = (self.landing_pulse + energy).min(0.95);
+        }
+        let delta_v = (self.prev_speed_mps - speed).max(0.0);
+        if delta_v > 1.8 {
+            let energy = (delta_v * 0.14).clamp(0.15, 1.0);
+            self.impact_pulse = (self.impact_pulse + energy).min(1.0);
+        }
+        self.surface = surface;
+        self.prev_speed_mps = speed;
+        self.speed_mps = speed;
+        self.slip = slip;
+        self.prev_grounded_wheels = grounded_wheels;
+        self.grounded_wheels = grounded_wheels;
+    }
+
+    fn mix_into(
+        &mut self,
+        out: &mut [f32],
+        frames: usize,
+        volume: f32,
+        sample_rate: u32,
+        is_cockpit: bool,
+    ) {
+        if volume <= 0.0 {
             return;
         }
-        let ground_scale = (self.grounded_wheels as f32 / 4.0).clamp(0.25, 1.0);
-        let cockpit_atten = if is_cockpit { 0.55 } else { 0.90 };
         let rolling = (self.speed_mps / 45.0).clamp(0.0, 1.0);
         let slip = self.slip.clamp(0.0, 1.0);
+        let has_contact = self.grounded_wheels > 0 && self.speed_mps >= 1.0;
+        let has_transients = self.landing_pulse > 0.002 || self.impact_pulse > 0.002;
+        if !has_contact && !has_transients {
+            return;
+        }
+        let sr = sample_rate.max(11025) as f32;
+        let ground_scale = (self.grounded_wheels as f32 / 4.0).clamp(0.25, 1.0);
+        let cockpit_atten = if is_cockpit { 0.55 } else { 0.90 };
         let alpha = match self.surface {
-            SurfaceKind::Gravel => 0.14 + rolling * 0.10,
+            SurfaceKind::Gravel => 0.14 + rolling * 0.12,
             SurfaceKind::Tarmac => 0.06 + slip * 0.18,
         };
-        let level = (0.04 * rolling + 0.11 * slip) * volume * ground_scale * cockpit_atten;
+        let surface_level = if has_contact {
+            (0.045 * rolling + 0.12 * slip) * volume * ground_scale * cockpit_atten
+        } else {
+            0.0
+        };
+        let squeal_amt = if has_contact && self.surface == SurfaceKind::Tarmac && slip > 0.12 {
+            ((slip - 0.12) / 0.88) * rolling.max(0.25) * 0.11 * volume * cockpit_atten
+        } else {
+            0.0
+        };
+        let squeal_inc = (720.0 + 180.0 * slip) / sr;
+        let thud_inc = 78.0 / sr;
+        let tau = std::f32::consts::TAU;
         for i in 0..frames {
             let n = self.next_noise();
             self.lp_state += alpha * (n - self.lp_state);
-            let sample = match self.surface {
+            let mut sample = match self.surface {
                 SurfaceKind::Gravel => {
-                    // Sparse pebble impacts modulated cleanly by speed + slip
-                    if self.rng & 0x1ff == 0 {
-                        self.gravel_pulse = 0.6 + rolling * 0.4;
+                    let pebble_mask = if slip > 0.25 { 0xff } else { 0x1ff };
+                    if (self.rng & pebble_mask) == 0 && has_contact {
+                        self.gravel_pulse = 0.55 + rolling * 0.35 + slip * 0.25;
                     }
-                    self.gravel_pulse *= 0.992;
-                    (self.lp_state * 0.75 + n * self.gravel_pulse * 0.45) * level
+                    self.gravel_pulse *= 0.991;
+                    (self.lp_state * 0.78 + n * self.gravel_pulse * 0.48) * surface_level
                 }
-                SurfaceKind::Tarmac => (self.lp_state * (0.45 + slip * 0.75)) * level,
+                SurfaceKind::Tarmac => {
+                    let squeal = if squeal_amt > 0.0 {
+                        self.squeal_phase = (self.squeal_phase + squeal_inc).fract();
+                        let s1 = (self.squeal_phase * tau).sin();
+                        let s2 = (self.squeal_phase * 1.49 * tau).sin();
+                        (s1 * 0.65 + s2 * 0.35) * squeal_amt
+                    } else {
+                        0.0
+                    };
+                    (self.lp_state * (0.45 + slip * 0.70)) * surface_level + squeal
+                }
             };
+            if self.landing_pulse > 0.001 || self.impact_pulse > 0.001 {
+                self.thud_phase = (self.thud_phase + thud_inc).fract();
+                let thud_wave = (self.thud_phase * tau).sin() * 0.75 + self.lp_state * 0.25;
+                sample += thud_wave
+                    * (self.landing_pulse * 0.26 + self.impact_pulse * 0.34)
+                    * volume
+                    * cockpit_atten;
+                self.landing_pulse *= 0.9965;
+                self.impact_pulse *= 0.9955;
+            }
             if i * 2 + 1 < out.len() {
                 out[i * 2] = (out[i * 2] + sample).clamp(-1.0, 1.0);
                 out[i * 2 + 1] = (out[i * 2 + 1] + sample).clamp(-1.0, 1.0);
@@ -328,18 +419,8 @@ pub fn update_surface_state(
     grounded_wheels: usize,
 ) {
     if let Ok(mut lock) = runtime().try_lock() {
-        lock.surface_audio.surface = surface;
-        lock.surface_audio.speed_mps = if speed_mps.is_finite() {
-            speed_mps.max(0.0)
-        } else {
-            0.0
-        };
-        lock.surface_audio.slip = if wheel_slip.is_finite() {
-            wheel_slip.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        lock.surface_audio.grounded_wheels = grounded_wheels;
+        lock.surface_audio
+            .update_telemetry(surface, speed_mps, wheel_slip, grounded_wheels);
     }
 }
 
@@ -711,7 +792,8 @@ pub fn render(out: &mut [f32], frames: usize, sample_rate: u32) {
     if !lock.paused && lock.volume > 0.0 {
         let vol = lock.volume;
         let is_cockpit = lock.is_cockpit;
-        lock.surface_audio.mix_into(out, frames, vol, is_cockpit);
+        lock.surface_audio
+            .mix_into(out, frames, vol, sample_rate, is_cockpit);
     }
     if !lock.paused && lock.codriver_volume > 0.0 {
         let codriver_vol = lock.codriver_volume;
@@ -821,5 +903,35 @@ mod tests {
         player.clear();
         player.mix_into(&mut out, 4, 1.0);
         assert_eq!(out, [0.0; 8]);
+    }
+
+    #[test]
+    fn surface_audio_synthesizes_landing_thuds_skid_and_airborne_silence() {
+        let mut s = SurfaceAudio::default();
+        let mut out = vec![0.0f32; 512];
+
+        // Airborne produces silence when no transient thud is active.
+        s.update_telemetry(SurfaceKind::Gravel, 25.0, 0.0, 0);
+        s.mix_into(&mut out, 256, 1.0, 44100, false);
+        assert!(out.iter().all(|&x| x == 0.0));
+
+        // Landing from jump (0 -> 4 wheels) excites landing_pulse.
+        s.update_telemetry(SurfaceKind::Gravel, 25.0, 0.2, 4);
+        assert!(s.landing_pulse > 0.5);
+        out.fill(0.0);
+        s.mix_into(&mut out, 256, 1.0, 44100, false);
+        let energy: f32 = out.iter().map(|x| x * x).sum();
+        assert!(energy > 0.1, "landing impact must produce audible energy");
+
+        // Tarmac high slip generates tire squeal energy.
+        let mut tarmac = SurfaceAudio::default();
+        tarmac.update_telemetry(SurfaceKind::Tarmac, 30.0, 0.85, 4);
+        out.fill(0.0);
+        tarmac.mix_into(&mut out, 256, 1.0, 44100, false);
+        let skid_energy: f32 = out.iter().map(|x| x * x).sum();
+        assert!(
+            skid_energy > 0.05,
+            "tarmac skid must produce audible energy"
+        );
     }
 }
