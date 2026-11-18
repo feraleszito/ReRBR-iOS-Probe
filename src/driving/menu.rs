@@ -29,6 +29,7 @@ pub enum Page {
     StageComplete,
     Replay,
     NgpExperimental,
+    GamepadSettings,
 }
 
 pub(crate) fn format_stage_time(seconds: f64) -> String {
@@ -106,6 +107,23 @@ pub enum Command {
     GlobalOpacityUp,
     CtrlSave,
     CtrlReset,
+    RecoverCar,
+    GpDeadDown,
+    GpDeadUp,
+    GpSensDown,
+    GpSensUp,
+    GpCurveDown,
+    GpCurveUp,
+    GpInvertSteer,
+    GpInvertTriggers,
+    GpBindGearUp,
+    GpBindGearDown,
+    GpBindHandbrake,
+    GpBindClutch,
+    GpBindCamera,
+    GpBindRecover,
+    GpSave,
+    GpReset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +217,9 @@ pub struct Context<'a> {
     pub has_replay: bool,
     pub ngp_experimental: bool,
     pub focus_diagnostics: Option<&'a super::ngp_experimental::FocusDiagnosticsReport>,
+    pub gamepad_connected: bool,
+    pub gamepad_name: Option<&'a str>,
+    pub gamepad_settings: super::gamepad::GamepadSettings,
 }
 
 #[derive(Debug, Default)]
@@ -209,6 +230,8 @@ pub struct Menu {
     pub inspected_stage: usize,
     pub garage_page: usize,
     pub stage_page: usize,
+    pub focused_row: usize,
+    pub gamepad_focus_active: bool,
 }
 impl Menu {
     pub fn open(&mut self, page: Page) {
@@ -217,26 +240,87 @@ impl Menu {
         }
         self.stack.push(self.page);
         self.page = page;
+        self.focused_row = 0;
     }
     pub fn back(&mut self) {
         self.page = self.stack.pop().unwrap_or(Page::Main);
+        self.focused_row = 0;
     }
     pub fn reset_to_main(&mut self) {
         self.stack.clear();
         self.page = Page::Main;
+        self.focused_row = 0;
     }
     pub fn show(&mut self, page: Page) {
         self.stack.clear();
         self.page = page;
+        self.focused_row = 0;
     }
     pub fn resume(&mut self) {
         self.stack.clear();
         self.page = Page::Driving;
+        self.focused_row = 0;
     }
     pub fn pause(&mut self) {
         if self.page == Page::Driving {
             self.stack.clear();
             self.page = Page::Paused;
+            self.focused_row = 0;
+        }
+    }
+
+    fn row_interactive(row: &Row) -> bool {
+        matches!(
+            row.kind,
+            RowKind::Action { enabled: true, .. } | RowKind::Stepper { .. }
+        )
+    }
+
+    pub fn focus_move(&mut self, rows: &[Row], delta: i32) {
+        let indices: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| Self::row_interactive(r).then_some(i))
+            .collect();
+        if indices.is_empty() {
+            self.focused_row = 0;
+            return;
+        }
+        self.gamepad_focus_active = true;
+        let current_pos = indices.iter().position(|&i| i == self.focused_row);
+        let next_pos = match current_pos {
+            Some(pos) => {
+                let len = indices.len() as isize;
+                ((pos as isize + delta as isize).rem_euclid(len)) as usize
+            }
+            None => 0,
+        };
+        self.focused_row = indices[next_pos];
+    }
+
+    pub fn focus_confirm(&self, rows: &[Row]) -> Option<Command> {
+        let row = rows.get(self.focused_row)?;
+        match row.kind {
+            RowKind::Action {
+                command,
+                enabled: true,
+            } => Some(command),
+            RowKind::Stepper { up, .. } => Some(up),
+            _ => rows.iter().find_map(|r| match r.kind {
+                RowKind::Action {
+                    command,
+                    enabled: true,
+                } => Some(command),
+                _ => None,
+            }),
+        }
+    }
+
+    pub fn focus_adjust(&self, rows: &[Row], delta: i32) -> Option<Command> {
+        let row = rows.get(self.focused_row)?;
+        match row.kind {
+            RowKind::Stepper { down, up, .. } => Some(if delta < 0 { down } else { up }),
+            _ => None,
         }
     }
     pub fn title(&self) -> &'static str {
@@ -258,6 +342,7 @@ impl Menu {
             Page::StageComplete => "STAGE COMPLETE",
             Page::Replay => "REPETICIÓN",
             Page::NgpExperimental => "NGP EXPERIMENTAL",
+            Page::GamepadSettings => "MANDO / GAMEPAD",
         }
     }
     pub fn rows(&self, ctx: &Context) -> Vec<Row> {
@@ -739,10 +824,87 @@ impl Menu {
                     },
                 },
                 Row::action("RESTABLECER CALIBRACIÓN", Command::ResetCalibration),
+                Row::action(
+                    format!(
+                        "MANDO / GAMEPAD: {}",
+                        if ctx.gamepad_connected {
+                            ctx.gamepad_name.unwrap_or("CONECTADO")
+                        } else {
+                            "SIN MANDO"
+                        }
+                    ),
+                    Command::Open(Page::GamepadSettings),
+                ),
                 Row::info("TRANSMISIÓN", format!("MANUAL {}", vehicle.forward_gears)),
                 Row::info("CAMBIO", "PULSA GEAR - / +"),
                 Row::action("VOLVER", Command::Back),
             ],
+            Page::GamepadSettings => {
+                let gp = &ctx.gamepad_settings;
+                vec![
+                    Row::info(
+                        "ESTADO",
+                        if ctx.gamepad_connected {
+                            ctx.gamepad_name.unwrap_or("CONECTADO")
+                        } else {
+                            "CONECTA MANDO BLUETOOTH / USB"
+                        },
+                    ),
+                    Row::stepper(
+                        "ZONA MUERTA",
+                        Command::GpDeadDown,
+                        Command::GpDeadUp,
+                        format!("{:.0}%", gp.deadzone * 100.0),
+                    ),
+                    Row::stepper(
+                        "SENSIBILIDAD",
+                        Command::GpSensDown,
+                        Command::GpSensUp,
+                        format!("{:.2}", gp.sensitivity),
+                    ),
+                    Row::stepper(
+                        "CURVA RESPUESTA",
+                        Command::GpCurveDown,
+                        Command::GpCurveUp,
+                        format!("{:.2}", gp.response_curve),
+                    ),
+                    Row::action(
+                        format!("INVERTIR DIRECCIÓN: {}", on_off(gp.invert_steering)),
+                        Command::GpInvertSteer,
+                    ),
+                    Row::action(
+                        format!("INVERTIR GATILLOS: {}", on_off(gp.invert_triggers)),
+                        Command::GpInvertTriggers,
+                    ),
+                    Row::action(
+                        format!("SUBIR MARCHA: {}", gp.gear_up.label()),
+                        Command::GpBindGearUp,
+                    ),
+                    Row::action(
+                        format!("BAJAR MARCHA: {}", gp.gear_down.label()),
+                        Command::GpBindGearDown,
+                    ),
+                    Row::action(
+                        format!("FRENO DE MANO: {}", gp.handbrake.label()),
+                        Command::GpBindHandbrake,
+                    ),
+                    Row::action(
+                        format!("EMBRAGUE: {}", gp.clutch.label()),
+                        Command::GpBindClutch,
+                    ),
+                    Row::action(
+                        format!("CÁMARA: {}", gp.camera.label()),
+                        Command::GpBindCamera,
+                    ),
+                    Row::action(
+                        format!("RESCATE: {}", gp.recover.label()),
+                        Command::GpBindRecover,
+                    ),
+                    Row::action("GUARDAR PERFIL MANDO", Command::GpSave),
+                    Row::action("RESTABLECER MANDO", Command::GpReset),
+                    Row::action("VOLVER", Command::Back),
+                ]
+            }
             Page::About => vec![
                 Row::info("VERSIÓN", env!("CARGO_PKG_VERSION")),
                 Row::info("BUILD", option_env!("GITHUB_RUN_NUMBER").unwrap_or("LOCAL")),
@@ -751,6 +913,7 @@ impl Menu {
             ],
             Page::Paused => vec![
                 Row::action("REANUDAR", Command::Start),
+                Row::action("RESCATAR COCHE (AYUDA)", Command::RecoverCar),
                 Row::action("REINICIAR TRAMO", Command::Restart),
                 Row::action("CONFIGURACIÓN", Command::Open(Page::Settings)),
                 Row::action("CONTROLES", Command::Open(Page::Controls)),
@@ -967,6 +1130,10 @@ impl Menu {
                 "DIAGNÓSTICO 9 ETAPAS — FORD FOCUS RS WRC 2006 (NO CERTIFICADO)".into(),
                 format!("ESTADO MODO EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
             ],
+            Page::GamepadSettings => vec![
+                "CONDUCCIÓN: STICK IZQ DIRECCIÓN / RT ACELERAR / LT FRENO".into(),
+                "MENÚS: D-PAD O STICK NAVEGAR / A CONFIRMAR / B VOLVER".into(),
+            ],
         }
     }
     fn row_bounds(&self) -> (f32, f32, f32, f32) {
@@ -1140,8 +1307,17 @@ impl Menu {
                 PANEL_DEEP
             };
             canvas.rect(x, y, w, h, panel);
+            let focused = self.gamepad_focus_active && interactive && index == self.focused_row;
             if is_primary {
-                ui::frame(canvas, rect, ACCENT, 1.5);
+                ui::frame(
+                    canvas,
+                    rect,
+                    if focused { WARN } else { ACCENT },
+                    if focused { 2.5 } else { 1.5 },
+                );
+            } else if focused {
+                ui::frame(canvas, rect, WARN, 2.0);
+                canvas.rect(x, y, 5.0, h, WARN);
             } else {
                 if interactive {
                     canvas.rect(x, y, 3.0, h, ACCENT);
@@ -1576,6 +1752,9 @@ mod tests {
             has_replay: false,
             ngp_experimental: false,
             focus_diagnostics: None,
+            gamepad_connected: false,
+            gamepad_name: None,
+            gamepad_settings: crate::driving::gamepad::GamepadSettings::default(),
         }
     }
 

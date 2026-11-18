@@ -4,6 +4,7 @@ pub mod cameras;
 pub mod codriver;
 pub mod content_manager;
 pub mod controls;
+pub mod gamepad;
 pub mod layout;
 pub(crate) mod loading;
 pub mod menu;
@@ -95,6 +96,11 @@ pub struct Runtime {
     pub focus_diagnostics: Option<ngp_experimental::FocusDiagnosticsReport>,
     pub experimental_visual_only: bool,
     pub visual_start_pose: Option<(Vec3, Vec3)>,
+    pub gamepad: gamepad::GamepadRuntime,
+    gamepad_started: Instant,
+    gamepad_frame: gamepad::GamepadDrivingFrame,
+    gamepad_polled_this_frame: bool,
+    recover_car_frames: u32,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -175,7 +181,90 @@ impl Runtime {
             focus_diagnostics: None,
             experimental_visual_only: false,
             visual_start_pose: None,
+            gamepad: gamepad::GamepadRuntime::load(),
+            gamepad_started: Instant::now(),
+            gamepad_frame: gamepad::GamepadDrivingFrame::default(),
+            gamepad_polled_this_frame: false,
+            recover_car_frames: 0,
         }
+    }
+    pub fn process_gamepad_snapshot(&mut self, snap: &gamepad::GamepadSnapshot, now_secs: f64) {
+        if self.menu.page == menu::Page::Driving {
+            let f = self.gamepad.driving_input(snap);
+            self.gamepad_frame = f;
+            if f.pause_pressed {
+                self.pause();
+                return;
+            }
+            if f.camera_pressed {
+                self.menu_command(menu::Command::CameraNext);
+            }
+            if f.recover_pressed {
+                self.menu_command(menu::Command::RecoverCar);
+            }
+            if !self.controls.automatic && f.gear_delta != 0 {
+                let max_gear = self.selection.vehicle.forward_gears + 1;
+                if f.gear_delta > 0 {
+                    self.controls.selected_gear = (self.controls.selected_gear + 1).min(max_gear);
+                } else {
+                    self.controls.selected_gear = self.controls.selected_gear.saturating_sub(1);
+                }
+            }
+        } else {
+            self.gamepad_frame = gamepad::GamepadDrivingFrame::default();
+            let events = self.gamepad.menu_events(snap, now_secs);
+            if events.is_empty() {
+                return;
+            }
+            let rows = {
+                let ctx = self.context();
+                self.menu.rows(&ctx)
+            };
+            for ev in events {
+                match ev {
+                    gamepad::MenuNavEvent::Up => self.menu.focus_move(&rows, -1),
+                    gamepad::MenuNavEvent::Down => self.menu.focus_move(&rows, 1),
+                    gamepad::MenuNavEvent::Left => {
+                        if let Some(cmd) = self.menu.focus_adjust(&rows, -1) {
+                            self.menu_command(cmd);
+                        }
+                    }
+                    gamepad::MenuNavEvent::Right => {
+                        if let Some(cmd) = self.menu.focus_adjust(&rows, 1) {
+                            self.menu_command(cmd);
+                        }
+                    }
+                    gamepad::MenuNavEvent::Confirm => {
+                        if self.menu.page == menu::Page::Replay {
+                            self.menu_command(menu::Command::ReplayTogglePause);
+                        } else if let Some(cmd) = self.menu.focus_confirm(&rows) {
+                            self.menu_command(cmd);
+                        }
+                    }
+                    gamepad::MenuNavEvent::Back => {
+                        if self.menu.page == menu::Page::Paused {
+                            self.menu_command(menu::Command::Start);
+                        } else if self.menu.page == menu::Page::Replay {
+                            self.menu_command(menu::Command::ReplayExit);
+                        } else {
+                            self.menu_command(menu::Command::Back);
+                        }
+                    }
+                    gamepad::MenuNavEvent::Pause => {
+                        if self.menu.page == menu::Page::Paused {
+                            self.menu_command(menu::Command::Start);
+                        } else if self.menu.page == menu::Page::Replay {
+                            self.menu_command(menu::Command::ReplayTogglePause);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fn poll_gamepad(&mut self) {
+        let snap = gamepad::poll_system_gamepad();
+        let now_secs = self.gamepad_started.elapsed().as_secs_f64();
+        self.process_gamepad_snapshot(&snap, now_secs);
     }
     pub fn take_scene_action(&mut self) -> Option<SceneAction> {
         self.pending_scene_action.take()
@@ -442,7 +531,9 @@ impl Runtime {
                     self.race.phase,
                     race::Phase::Finishing | race::Phase::Finished
                 ) && self.pivots.is_some()
-                    && (self.experimental_visual_only || self.tilt.is_finite())
+                    && (self.experimental_visual_only
+                        || self.tilt.is_finite()
+                        || self.gamepad.connected)
                     && self.scene_error.is_none()
                     && worker_ok
                 {
@@ -846,10 +937,93 @@ impl Runtime {
                 self.controls_layout.save();
                 self.message = Some("CONTROLES RESTABLECIDOS".into());
             }
+            RecoverCar => {
+                if self.race.phase == race::Phase::Driving {
+                    self.recover_car_frames = 4;
+                    if self.menu.page == menu::Page::Paused {
+                        self.controls.clear();
+                        self.gamepad.clear_driving_edges();
+                        self.menu.resume();
+                    }
+                    self.message = Some("RESCATE DE COCHE SOLICITADO".into());
+                } else {
+                    self.message = Some("RESCATE DISPONIBLE EN CONDUCCIÓN".into());
+                }
+            }
+            GpDeadDown => {
+                self.gamepad.settings.deadzone = (self.gamepad.settings.deadzone - 0.02).max(0.0);
+            }
+            GpDeadUp => {
+                self.gamepad.settings.deadzone = (self.gamepad.settings.deadzone + 0.02).min(0.35);
+            }
+            GpSensDown => {
+                self.gamepad.settings.sensitivity =
+                    (self.gamepad.settings.sensitivity - 0.05).max(0.5);
+            }
+            GpSensUp => {
+                self.gamepad.settings.sensitivity =
+                    (self.gamepad.settings.sensitivity + 0.05).min(2.5);
+            }
+            GpCurveDown => {
+                self.gamepad.settings.response_curve =
+                    (self.gamepad.settings.response_curve - 0.1).max(1.0);
+            }
+            GpCurveUp => {
+                self.gamepad.settings.response_curve =
+                    (self.gamepad.settings.response_curve + 0.1).min(2.5);
+            }
+            GpInvertSteer => {
+                self.gamepad.settings.invert_steering = !self.gamepad.settings.invert_steering;
+            }
+            GpInvertTriggers => {
+                self.gamepad.settings.invert_triggers = !self.gamepad.settings.invert_triggers;
+            }
+            GpBindGearUp => {
+                self.gamepad
+                    .settings
+                    .cycle_binding(gamepad::GamepadAction::GearUp);
+            }
+            GpBindGearDown => {
+                self.gamepad
+                    .settings
+                    .cycle_binding(gamepad::GamepadAction::GearDown);
+            }
+            GpBindHandbrake => {
+                self.gamepad
+                    .settings
+                    .cycle_binding(gamepad::GamepadAction::Handbrake);
+            }
+            GpBindClutch => {
+                self.gamepad
+                    .settings
+                    .cycle_binding(gamepad::GamepadAction::Clutch);
+            }
+            GpBindCamera => {
+                self.gamepad
+                    .settings
+                    .cycle_binding(gamepad::GamepadAction::Camera);
+            }
+            GpBindRecover => {
+                self.gamepad
+                    .settings
+                    .cycle_binding(gamepad::GamepadAction::Recover);
+            }
+            GpSave => {
+                self.gamepad.settings.save();
+                self.message = Some("PERFIL DE MANDO GUARDADO".into());
+            }
+            GpReset => {
+                self.gamepad.settings = gamepad::GamepadSettings::default();
+                self.gamepad.settings.save();
+                self.message = Some("MANDO RESTABLECIDO".into());
+            }
         }
     }
     pub fn touch(&mut self, t: Touch, size: (u32, u32)) {
         self.drawable_size = size;
+        if t.phase == TouchPhase::Started {
+            self.menu.gamepad_focus_active = false;
+        }
         let x = t.location.x / f64::from(size.0.max(1));
         let y = t.location.y / f64::from(size.1.max(1));
         if self.menu.page == menu::Page::ControlsEditor {
@@ -1028,7 +1202,19 @@ impl Runtime {
         state.input = if self.race.phase == race::Phase::Finishing {
             rerbr_sim::drive::Control::default()
         } else {
-            self.controls.input_in(layout, self.tilt, seconds)
+            let mut input = self.controls.input_in(layout, self.tilt, seconds);
+            if self.gamepad_frame.active {
+                input.steering = self.gamepad_frame.steering;
+                input.throttle = input.throttle.max(self.gamepad_frame.throttle);
+                input.brake = input.brake.max(self.gamepad_frame.brake);
+                input.handbrake = input.handbrake.max(self.gamepad_frame.handbrake);
+                input.clutch = input.clutch.max(self.gamepad_frame.clutch);
+            }
+            if self.recover_car_frames > 0 {
+                self.recover_car_frames -= 1;
+                input.flags |= 0x10;
+            }
+            input
         };
         let codriver_active = running
             && matches!(
@@ -1051,6 +1237,8 @@ impl Runtime {
             self.fps = self.fps * 0.9 + 0.1 / seconds;
         }
         self.tilt = motion(true);
+        self.poll_gamepad();
+        self.gamepad_polled_this_frame = true;
         if now >= self.footprint_at {
             self.footprint = rerbr_sim::footprint();
             self.footprint_at = now + Duration::from_secs(1);
@@ -1117,8 +1305,8 @@ impl Runtime {
         }
 
         let layout = self.effective_layout(self.drawable_size);
-        let (pair, rest, paused) =
-            self.sync_race_state(now, seconds, &layout, self.tilt.is_finite());
+        let steering_ready = self.tilt.is_finite() || self.gamepad.connected;
+        let (pair, rest, paused) = self.sync_race_state(now, seconds, &layout, steering_ready);
         audio::set_paused(paused);
         if self.experimental_visual_only {
             if let Some(pivots) = self.pivots {
@@ -1345,6 +1533,12 @@ impl Runtime {
             has_replay: self.saved_replay.is_some(),
             ngp_experimental: self.ngp_experimental,
             focus_diagnostics: self.focus_diagnostics.as_ref(),
+            gamepad_connected: self.gamepad.connected,
+            gamepad_name: self
+                .gamepad
+                .connected
+                .then_some(self.gamepad.controller_name.as_str()),
+            gamepad_settings: self.gamepad.settings.clone(),
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
@@ -1354,7 +1548,7 @@ impl Runtime {
         if (!self.experimental_visual_only && state.rest.is_none()) || self.pivots.is_none() {
             return "LOADING PRIVATE STAGE / CAR / PHYSICS".into();
         }
-        if !self.experimental_visual_only && !self.tilt.is_finite() {
+        if !self.experimental_visual_only && !self.tilt.is_finite() && !self.gamepad.connected {
             return "STEERING UNAVAILABLE - HOLD IPAD IN LANDSCAPE".into();
         }
         if let Some(message) = &self.message {
@@ -1377,6 +1571,9 @@ impl Runtime {
         size: (u32, u32),
     ) {
         self.drawable_size = size;
+        if !std::mem::take(&mut self.gamepad_polled_this_frame) {
+            self.poll_gamepad();
+        }
         let state = self.worker.state.lock().unwrap().clone();
         let mut canvas = Canvas::new(size);
         let layout = self.effective_layout(size);
@@ -1668,7 +1865,10 @@ impl Runtime {
             banners.push((format!("ERROR: {error}"), BAD));
         } else if !self.experimental_visual_only && state.rest.is_none() {
             banners.push(("LOADING PHYSICS".into(), WARN));
-        } else if !self.experimental_visual_only && !self.tilt.is_finite() {
+        } else if !self.experimental_visual_only
+            && !self.tilt.is_finite()
+            && !self.gamepad.connected
+        {
             banners.push(("HOLD IPAD IN LANDSCAPE TO STEER".into(), WARN));
         }
         if !self.cockpit_ready && self.camera_label() == "COCKPIT" {

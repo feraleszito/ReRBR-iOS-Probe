@@ -3,6 +3,7 @@
 #import <CoreMotion/CoreMotion.h>
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <GameController/GameController.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -241,6 +242,67 @@ double rerbr_drive_tilt(int enabled) {
     double right = gravity.x-zero.x, up = zero.y-gravity.y;
     if (hypot(right, up) < 0.2) return NAN; // Flat on a table has no reliable gravity roll.
     return atan2(right, -up);
+}
+
+typedef struct {
+    uint8_t connected;
+    uint8_t _pad[3];
+    float left_x;
+    float left_y;
+    float right_x;
+    float right_y;
+    float left_trigger;
+    float right_trigger;
+    uint32_t buttons_mask;
+    char name[64];
+} RerbrGamepadSnapshot;
+
+void rerbr_gamepad_poll(RerbrGamepadSnapshot *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
+    });
+    GCController *active = [GCController current];
+    if (active == nil || active.extendedGamepad == nil) {
+        for (GCController *c in [GCController controllers]) {
+            if (c.extendedGamepad != nil) {
+                active = c;
+                break;
+            }
+        }
+    }
+    if (active == nil) return;
+    GCExtendedGamepad *pad = active.extendedGamepad;
+    if (pad == nil) return;
+    out->connected = 1;
+    out->left_x = pad.leftThumbstick.xAxis.value;
+    out->left_y = pad.leftThumbstick.yAxis.value;
+    out->right_x = pad.rightThumbstick.xAxis.value;
+    out->right_y = pad.rightThumbstick.yAxis.value;
+    out->left_trigger = pad.leftTrigger.value;
+    out->right_trigger = pad.rightTrigger.value;
+    uint32_t mask = 0;
+    if (pad.buttonA.isPressed) mask |= (1u << 0);
+    if (pad.buttonB.isPressed) mask |= (1u << 1);
+    if (pad.buttonX.isPressed) mask |= (1u << 2);
+    if (pad.buttonY.isPressed) mask |= (1u << 3);
+    if (pad.leftShoulder.isPressed) mask |= (1u << 4);
+    if (pad.rightShoulder.isPressed) mask |= (1u << 5);
+    if (pad.dpad.up.isPressed) mask |= (1u << 6);
+    if (pad.dpad.down.isPressed) mask |= (1u << 7);
+    if (pad.dpad.left.isPressed) mask |= (1u << 8);
+    if (pad.dpad.right.isPressed) mask |= (1u << 9);
+    if (pad.buttonMenu.isPressed) mask |= (1u << 10);
+    if (pad.buttonOptions != nil && pad.buttonOptions.isPressed) mask |= (1u << 11);
+    if (pad.leftThumbstickButton != nil && pad.leftThumbstickButton.isPressed) mask |= (1u << 12);
+    if (pad.rightThumbstickButton != nil && pad.rightThumbstickButton.isPressed) mask |= (1u << 13);
+    out->buttons_mask = mask;
+    const char *cname = active.vendorName ? active.vendorName.UTF8String : "Gamepad";
+    if (cname) {
+        strlcpy(out->name, cname, sizeof(out->name));
+    }
 }
 
 int main(int argc, char *argv[]) {
