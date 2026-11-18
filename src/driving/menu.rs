@@ -1834,7 +1834,7 @@ impl Default for Settings {
             diagnostics: false,
             minimal_hud: false,
             invert_pedals: false,
-            clutch_help: false,
+            clutch_help: true,
             volume: 0.8,
             music_volume: 0.70,
             codriver_volume: 0.85,
@@ -2120,14 +2120,14 @@ mod tests {
             Some(Command::ToggleClutchHelp)
         );
         let s = Settings::parse(
-            "sensitivity=NaN\ndead_zone=inf\nvolume=nan\ncamera=9\nfps=true\ninvert_pedals=true\nclutch_help=true",
+            "sensitivity=NaN\ndead_zone=inf\nvolume=nan\ncamera=9\nfps=true\ninvert_pedals=true\nclutch_help=false",
         );
         assert_eq!((s.sensitivity, s.dead_zone, s.volume), (2.0, 0.03, 0.8));
         assert_eq!(s.camera, 2);
         assert!(s.fps);
         assert!(s.invert_pedals);
-        assert!(s.clutch_help);
-        assert!(!Settings::default().clutch_help);
+        assert!(!s.clutch_help);
+        assert!(Settings::default().clutch_help);
         let s = Settings::parse("sensitivity=100\ndead_zone=-4\nvolume=4");
         assert_eq!((s.sensitivity, s.dead_zone, s.volume), (5.0, 0.0, 1.0));
     }

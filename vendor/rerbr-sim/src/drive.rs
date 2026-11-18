@@ -79,7 +79,7 @@ impl Session {
             selection.vehicle.original_slot,
             None,
             selection,
-            BootAids { automatic, clutch_help: false, lesson: None },
+            BootAids { automatic, clutch_help: true, lesson: None },
         )
     }
 
@@ -91,7 +91,7 @@ impl Session {
         pack_path: &std::path::Path,
         automatic: bool,
     ) -> Result<Self, String> {
-        Self::boot_experimental_pack_with_aids(paths, selection, pack_path, automatic, automatic)
+        Self::boot_experimental_pack_with_aids(paths, selection, pack_path, automatic, true)
     }
 
     pub fn boot_experimental_pack_with_aids(

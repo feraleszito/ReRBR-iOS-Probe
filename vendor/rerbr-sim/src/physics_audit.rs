@@ -49,10 +49,13 @@ pub(crate) fn inspect_pack(
     Ok(PhysicsAudit::inspect(&scripts))
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PhysicsAudit {
     pub scripts: Vec<String>,
     pub missing_ngp_keys: Vec<String>,
+    pub car_id: Option<u32>,
+    pub features_ngp: Option<u32>,
+    pub max_torque_ngp: Option<f32>,
 }
 impl PhysicsAudit {
     pub(crate) fn inspect(scripts: &[(String, Vec<Node>)]) -> Self {
@@ -63,25 +66,50 @@ impl PhysicsAudit {
         }
         let missing_ngp_keys =
             required.into_iter().filter(|key| !scripts.iter().any(|(_, nodes)| has_numeric_key(nodes, key))).collect();
-        Self { scripts: scripts.iter().map(|(name, _)| name.clone()).collect(), missing_ngp_keys }
+        let car_id = scripts.iter().rev().find_map(|(_, n)| numeric_key(n, "CarId")).map(|v| v.round() as u32);
+        let features_ngp =
+            scripts.iter().rev().find_map(|(_, n)| numeric_key(n, "Features_NGP")).map(|v| v.round() as u32);
+        let max_torque_ngp = scripts.iter().rev().find_map(|(_, n)| numeric_key(n, "MaxTorque_NGP"));
+        Self {
+            scripts: scripts.iter().map(|(name, _)| name.clone()).collect(),
+            missing_ngp_keys,
+            car_id,
+            features_ngp,
+            max_torque_ngp,
+        }
     }
 
     pub fn summary(&self) -> String {
         if self.missing_ngp_keys.is_empty() {
-            "NGP KEYS PRESENT / CRC AND PHYSICS PARITY UNVERIFIED".into()
+            match (self.car_id, self.max_torque_ngp, self.features_ngp) {
+                (Some(id), Some(tq), feat) => {
+                    format!("NGP PARSED (CarId={id} MaxTq={tq:.0}Nm Feat={}) / CRC UNVERIFIED", feat.unwrap_or(0))
+                }
+                _ => "NGP KEYS PRESENT / CRC AND PHYSICS PARITY UNVERIFIED".into(),
+            }
         } else {
             format!("UNVERIFIED PHYSICS: {} NGP KEYS MISSING / CRC UNCHECKED", self.missing_ngp_keys.len())
         }
     }
 }
 
+fn numeric_key(nodes: &[Node], key: &str) -> Option<f32> {
+    nodes
+        .windows(2)
+        .find_map(|pair| match pair {
+            [Node::Atom(k), Node::Atom(v)] if k == key => v.parse::<f32>().ok().filter(|x| x.is_finite()),
+            _ => None,
+        })
+        .or_else(|| {
+            nodes.iter().find_map(|node| match node {
+                Node::List(children) => numeric_key(children, key),
+                _ => None,
+            })
+        })
+}
+
 fn has_numeric_key(nodes: &[Node], key: &str) -> bool {
-    nodes.windows(2).any(
-        |pair| matches!(pair, [Node::Atom(k), Node::Atom(v)] if k == key && v.parse::<f32>().is_ok_and(f32::is_finite)),
-    ) || nodes.iter().any(|node| match node {
-        Node::List(children) => has_numeric_key(children, key),
-        _ => false,
-    })
+    numeric_key(nodes, key).is_some()
 }
 
 #[cfg(test)]

@@ -7,6 +7,83 @@ use std::{io::Read, path::Path};
 pub const RSF_779_SHA256: &str = "cf351cdf99f880631ed2cb1d9b6b5c9db7d7c233ad905740393c37df967801ec";
 pub const RUNTIME_BLOCKER: &str = "NGP 7.5.779.508 is recognized but NOT enabled: original loaded-value vehicle CRC checks are unported and 7.5 physics parity is unverified; use the read-only ngp-candidate-audit diagnostic. The separate 7.4 regression baseline remains available.";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NgpRuntimeKind {
+    Verified74,
+    Detected75Unverified,
+    UnsupportedBinary,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NgpRuntimeStatus {
+    pub kind: NgpRuntimeKind,
+    pub sha256: Option<String>,
+    pub file_version: Option<String>,
+    pub physics_revision: Option<u32>,
+    pub summary: String,
+}
+
+/// Inspects `Plugins/NGP.dll` and `physics.rbz` (`PhysicsRevision_NGP`) inside `rbr_root` read-only.
+/// Distinguishes certified NGP 7.4.778, detected NGP 7.5.779.508 (tables equal to 7.4, 7.5 CRC unported),
+/// unsupported binaries, and missing installations.
+pub fn inspect_runtime_dir(rbr_root: &Path) -> NgpRuntimeStatus {
+    let physics_revision = rbr_formats::cars::resolve(rbr_root, "physics.rbz")
+        .and_then(|p| ngp::compat::physics_revision(&p).ok().flatten());
+    let Some(dll_path) = rbr_formats::cars::resolve(rbr_root, "Plugins/NGP.dll") else {
+        return NgpRuntimeStatus {
+            kind: NgpRuntimeKind::Missing,
+            sha256: None,
+            file_version: None,
+            physics_revision,
+            summary: "FALTA Plugins/NGP.dll".into(),
+        };
+    };
+    let bytes = match std::fs::read(&dll_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return NgpRuntimeStatus {
+                kind: NgpRuntimeKind::Missing,
+                sha256: None,
+                file_version: None,
+                physics_revision,
+                summary: format!("ERROR Plugins/NGP.dll: {e}"),
+            };
+        }
+    };
+    let id = ngp::compat::identify(&bytes);
+    if ngp::validate(&bytes).is_ok() {
+        let ver = id.file_version.as_deref().unwrap_or("7.4.778.507");
+        let summary = format!("NGP {ver} VERIFICADO (REV {})", physics_revision.unwrap_or(0));
+        return NgpRuntimeStatus {
+            kind: NgpRuntimeKind::Verified74,
+            sha256: Some(id.sha256),
+            file_version: id.file_version,
+            physics_revision,
+            summary,
+        };
+    }
+    if id.sha256 == RSF_779_SHA256 {
+        let ver = id.file_version.as_deref().unwrap_or("7.5.779.508");
+        let summary =
+            format!("NGP {ver} DETECTADO (TABLAS == 7.4 / CRC 7.5 NO PORTADO / REV {})", physics_revision.unwrap_or(0));
+        return NgpRuntimeStatus {
+            kind: NgpRuntimeKind::Detected75Unverified,
+            sha256: Some(id.sha256),
+            file_version: id.file_version,
+            physics_revision,
+            summary,
+        };
+    }
+    NgpRuntimeStatus {
+        kind: NgpRuntimeKind::UnsupportedBinary,
+        sha256: Some(id.sha256),
+        file_version: id.file_version.clone(),
+        physics_revision,
+        summary: format!("NGP.DLL NO CERTIFICADA ({})", id.file_version.as_deref().unwrap_or("DESCONOCIDA")),
+    }
+}
+
 /// Keep upstream's allowlist intact. Recognizing the exact installed binary adds
 /// an actionable diagnostic, not a new supported hash or an execution path.
 pub fn validate_runtime(bytes: &[u8]) -> Result<(), String> {
@@ -260,5 +337,36 @@ mod tests {
         assert!(validate_runtime(b"NGP 7.5.779.508 PhysicsRevision_NGP 779").is_err());
         assert!(validate_runtime(&[]).is_err());
         assert!(RUNTIME_BLOCKER.contains("NOT enabled"));
+    }
+
+    #[test]
+    fn inspect_runtime_dir_distinguishes_74_and_75_if_pc_present() {
+        let dir74 = Path::new(r"C:\Users\adria\Desktop\RBR");
+        if dir74.join("Plugins/NGP.dll").is_file() {
+            let st74 = inspect_runtime_dir(dir74);
+            assert_eq!(st74.kind, NgpRuntimeKind::Verified74);
+            assert!(st74.summary.contains("7.4.778"));
+        }
+        let dir75 = Path::new(r"C:\Richard Burns Rally");
+        if dir75.join("Plugins/NGP.dll").is_file() {
+            let st75 = inspect_runtime_dir(dir75);
+            assert_eq!(st75.kind, NgpRuntimeKind::Detected75Unverified);
+            assert!(st75.summary.contains("7.5.779"));
+        }
+    }
+
+    #[test]
+    #[ignore = "full PE byte-scan comparison between 7.4 and 7.5; run with --release -- --ignored"]
+    fn ngp_75_779_vs_74_778_binary_and_physics_revision_report_if_present() {
+        let dll74 = Path::new(r"C:\Users\adria\Desktop\RBR\Plugins\NGP.dll");
+        let dll75 = Path::new(r"C:\Richard Burns Rally\Plugins\NGP.dll");
+        if !dll74.is_file() || !dll75.is_file() {
+            return;
+        }
+        let report = compare_binaries(dll74, dll75).expect("compare NGP 7.4 vs 7.5");
+        eprintln!("=== NGP 7.4.778 vs 7.5.779 BINARY REPORT ===\n{}", report.render());
+        let rev74 = ngp::compat::physics_revision(Path::new(r"C:\Users\adria\Desktop\RBR\physics.rbz")).unwrap();
+        let rev75 = ngp::compat::physics_revision(Path::new(r"C:\Richard Burns Rally\physics.rbz")).unwrap();
+        eprintln!("physics.rbz PhysicsRevision_NGP: 7.4={rev74:?} vs RSF/7.5={rev75:?}");
     }
 }
