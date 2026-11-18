@@ -42,9 +42,21 @@ pub struct DiagnosticStep {
 pub struct FocusDiagnosticsReport {
     pub vehicle_id: String,
     pub vehicle_name: String,
+    pub selected_pack: Option<String>,
+    pub selected_fmod_bank: String,
+    pub expected_model: String,
+    pub detected_fmod_events: Vec<String>,
     pub pack_path: Option<PathBuf>,
     pub steps: Vec<DiagnosticStep>,
     pub last_session_line: Option<String>,
+    pub loaded_model_path: Option<String>,
+    pub loaded_draw_count: usize,
+    pub loaded_textures: Vec<String>,
+    pub fmod_decoded_samples: usize,
+    pub fmod_total_samples: usize,
+    pub fmod_active_events: Vec<String>,
+    pub fmod_rendered_frames: u64,
+    pub driving_verified: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -67,6 +79,14 @@ pub struct SessionTelemetrySnapshot {
     pub clutch_rx: f32,
     pub clutch_help: bool,
     pub audio_status: String,
+    pub loaded_model_path: Option<String>,
+    pub loaded_draw_count: usize,
+    pub loaded_textures: Vec<String>,
+    pub fmod_bank: Option<String>,
+    pub fmod_decoded_samples: usize,
+    pub fmod_total_samples: usize,
+    pub fmod_active_events: Vec<String>,
+    pub fmod_rendered_frames: u64,
 }
 
 impl SessionTelemetrySnapshot {
@@ -342,8 +362,16 @@ impl FocusDiagnosticsReport {
 
         // 9. AUDIO (FMOD bank / engine bank status — never claims OK from file presence alone)
         let is_fmod_bank = vehicle.audio_index.to_ascii_lowercase().ends_with(".bank");
+        let mut detected_fmod_events = Vec::new();
+        let mut fmod_total_samples = 0usize;
         let audio_report = if is_fmod_bank {
             let rep = super::fmod_audit::inspect_bank_in_documents(doc_root, &vehicle.audio_index);
+            detected_fmod_events = rep
+                .event_names
+                .iter()
+                .map(|e| e.strip_prefix("event:/").unwrap_or(e).to_string())
+                .collect();
+            fmod_total_samples = rep.sample_names.len();
             if rep.is_playable() {
                 (DiagnosticStatus::Pending, rep.summary())
             } else {
@@ -393,9 +421,21 @@ impl FocusDiagnosticsReport {
         Self {
             vehicle_id: vehicle.id.clone(),
             vehicle_name: vehicle.name.clone(),
+            selected_pack: vehicle.rsf_pack.clone(),
+            selected_fmod_bank: vehicle.audio_index.clone(),
+            expected_model: vehicle.model.clone(),
+            detected_fmod_events,
             pack_path,
             steps,
             last_session_line: None,
+            loaded_model_path: None,
+            loaded_draw_count: 0,
+            loaded_textures: Vec::new(),
+            fmod_decoded_samples: 0,
+            fmod_total_samples,
+            fmod_active_events: Vec::new(),
+            fmod_rendered_frames: 0,
+            driving_verified: false,
         }
     }
 
@@ -431,9 +471,21 @@ impl FocusDiagnosticsReport {
         Self {
             vehicle_id: vehicle.id.clone(),
             vehicle_name: vehicle.name.clone(),
+            selected_pack: vehicle.rsf_pack.clone(),
+            selected_fmod_bank: vehicle.audio_index.clone(),
+            expected_model: vehicle.model.clone(),
+            detected_fmod_events: Vec::new(),
             pack_path: None,
             steps,
             last_session_line: None,
+            loaded_model_path: None,
+            loaded_draw_count: 0,
+            loaded_textures: Vec::new(),
+            fmod_decoded_samples: 0,
+            fmod_total_samples: 0,
+            fmod_active_events: Vec::new(),
+            fmod_rendered_frames: 0,
+            driving_verified: false,
         }
     }
 
@@ -564,6 +616,30 @@ impl FocusDiagnosticsReport {
         } else {
             "ÚLTIMA SESIÓN"
         };
+        if snap.loaded_model_path.is_some() {
+            self.loaded_model_path = snap.loaded_model_path.clone();
+            self.loaded_draw_count = snap.loaded_draw_count;
+            self.loaded_textures = snap.loaded_textures.clone();
+            self.set_step(
+                "CAR MODEL",
+                DiagnosticStatus::Ok,
+                format!(
+                    "[{scope}] CARGADO: {} ({} DIBUJOS / {} DDS)",
+                    snap.loaded_model_path.as_deref().unwrap_or(""),
+                    snap.loaded_draw_count,
+                    snap.loaded_textures.len()
+                ),
+            );
+        }
+        if snap.fmod_total_samples > 0 {
+            self.fmod_decoded_samples = snap.fmod_decoded_samples;
+            self.fmod_total_samples = snap.fmod_total_samples;
+            self.fmod_active_events = snap.fmod_active_events.clone();
+            self.fmod_rendered_frames = snap.fmod_rendered_frames;
+        }
+        if snap.had_driving_phase && snap.sim_steps > 0 {
+            self.driving_verified = true;
+        }
         if let Some(err) = &snap.worker_error {
             self.record_physics_failure(err);
         } else if snap.physics_settled {
@@ -634,24 +710,89 @@ impl FocusDiagnosticsReport {
     }
 
     pub fn export_text(&self, extra_lines: &[String]) -> String {
-        let mut lines = Vec::with_capacity(self.steps.len() + extra_lines.len() + 8);
-        lines.push("=== RERBR iOS DIAGNOSTICO RUNTIME (10 ETAPAS) ===".to_string());
+        let mut lines = Vec::with_capacity(self.steps.len() + extra_lines.len() + 18);
+        lines.push("=== RERBR iOS DIAGNOSTICO POR VEHICULO ===".to_string());
         lines.push(format!(
             "VEHICULO INSPECCIONADO: {} ({})",
             self.vehicle_name, self.vehicle_id
         ));
+        lines.push("--- 1. RECURSOS DETECTADOS EN DISCO ---".to_string());
+        lines.push(format!("MODELO 3D ESPERADO: {}", self.expected_model));
         lines.push(format!(
-            "PACK NGP: {}",
+            "PAQUETE NGP SELECCIONADO: {} (RUTA: {})",
+            self.selected_pack.as_deref().unwrap_or("NINGUNO / RETAIL"),
             self.pack_path
                 .as_ref()
-                .map_or_else(|| "NINGUNO / RETAIL".into(), |p| p.display().to_string())
+                .map_or_else(|| "NO ENCONTRADO".into(), |p| p.display().to_string())
+        ));
+        lines.push(format!(
+            "BANCO FMOD SELECCIONADO: {}",
+            self.selected_fmod_bank
+        ));
+        lines.push(format!(
+            "EVENTOS AUDIO EN BANCO: {}",
+            if self.detected_fmod_events.is_empty() {
+                "NO INSPECCIONADOS / AUSENTE".into()
+            } else {
+                self.detected_fmod_events.join(", ")
+            }
+        ));
+        lines.push("--- 2. RECURSOS CARGADOS EN SESION/MEMORIA ---".to_string());
+        lines.push(format!(
+            "MODELO 3D CARGADO REAL: {}",
+            self.loaded_model_path.as_deref().map_or_else(
+                || "NO CARGADO EN SESION DE CONDUCCION AUN".into(),
+                |p| format!("{p} ({} draws)", self.loaded_draw_count)
+            )
+        ));
+        lines.push(format!(
+            "TEXTURAS CARGADAS: {}",
+            if self.loaded_textures.is_empty() {
+                "NO CARGADAS EN SESION DE CONDUCCION AUN".into()
+            } else {
+                format!(
+                    "{} DDS ({})",
+                    self.loaded_textures.len(),
+                    self.loaded_textures.join(", ")
+                )
+            }
+        ));
+        let backend_step = self
+            .steps
+            .iter()
+            .find(|s| s.stage == "NGP BACKEND")
+            .map_or("DESCONOCIDO", |s| s.detail.as_str());
+        lines.push(format!("BACKEND FISICO ACTIVO: {backend_step}"));
+        lines.push(format!(
+            "MUESTRAS FMOD DECODIFICADAS: {}/{}",
+            self.fmod_decoded_samples, self.fmod_total_samples
+        ));
+        lines.push(format!(
+            "EVENTOS AUDIO ACTIVOS EN MOTOR: {}",
+            if self.fmod_active_events.is_empty() {
+                "PENDIENTE DE BOOT AUDIO".into()
+            } else {
+                self.fmod_active_events.join(", ")
+            }
+        ));
+        lines.push("--- 3. VERIFICACION REAL EN CONDUCCION ---".to_string());
+        lines.push(format!(
+            "ESTADO DE CONDUCCION: {}",
+            if self.driving_verified {
+                format!(
+                    "VERIFICADA EN SESION REAL (FRAMES AUDIO EMITIDOS: {})",
+                    self.fmod_rendered_frames
+                )
+            } else {
+                "NO VERIFICADA EN CONDUCCION EN ESTA EJECUCION".into()
+            }
         ));
         if let Some(last) = &self.last_session_line {
             lines.push(format!("ULTIMA SESION REAL: {last}"));
         } else {
             lines.push("ULTIMA SESION REAL: NINGUNA EN ESTA EJECUCIÓN".to_string());
         }
-        lines.push("--- ETAPAS ---".to_string());
+        lines.push("--- ETAPAS (10) ---".to_string());
         for (i, step) in self.steps.iter().enumerate() {
             lines.push(format!(
                 "{:02}. {:<22} [{}] {}",
@@ -985,7 +1126,15 @@ mod tests {
             steering_rx: 0.1,
             clutch_rx: 0.0,
             clutch_help: true,
-            audio_status: "FMOD FSB5 VORBIS".into(),
+            audio_status: "FMOD AUTHENTIC (44/44 · 2048 FRAMES · 7100 RPM)".into(),
+            loaded_model_path: Some(focus.model.clone()),
+            loaded_draw_count: 99,
+            loaded_textures: vec!["cars/ford_focus_2006/textures/focus_wrc06_external.dds".into()],
+            fmod_bank: Some("AudioFMOD/Focus_Mk2_WRC.bank".into()),
+            fmod_decoded_samples: 44,
+            fmod_total_samples: 44,
+            fmod_active_events: vec!["engine_int".into(), "engine_ext".into(), "turbo".into()],
+            fmod_rendered_frames: 2048,
             ..Default::default()
         };
         focus_report.apply_session_snapshot(&focus_snap);
@@ -1003,5 +1152,13 @@ mod tests {
             );
             assert!(step.detail.contains("ÚLTIMA SESIÓN"));
         }
+        let exported_focus = focus_report.export_text(&[]);
+        assert!(exported_focus.contains("1. RECURSOS DETECTADOS EN DISCO"));
+        assert!(exported_focus.contains("2. RECURSOS CARGADOS EN SESION/MEMORIA"));
+        assert!(exported_focus.contains("3. VERIFICACION REAL EN CONDUCCION"));
+        assert!(exported_focus.contains("99 draws"));
+        assert!(exported_focus.contains("44/44"));
+        assert!(exported_focus.contains("engine_int, engine_ext, turbo"));
+        assert!(exported_focus.contains("VERIFICADA EN SESION REAL"));
     }
 }

@@ -187,12 +187,19 @@ fn convert_set(
         }
         let normals = matrix.inverse().transpose();
         let blocks = car_parts::face_blocks(part);
-        if blocks.len() != mesh.faces.len() {
+        if !allow_material_override && blocks.len() != mesh.faces.len() {
             return Err(format!(
                 "CAR FACES: {} has {} mesh faces but {} material bindings",
                 mesh.node.name,
                 mesh.faces.len(),
                 blocks.len()
+            ));
+        }
+        if !mesh.faces.is_empty() && blocks.is_empty() {
+            return Err(format!(
+                "CAR FACES: {} has {} mesh faces but 0 material bindings",
+                mesh.node.name,
+                mesh.faces.len(),
             ));
         }
         let mut remap = HashMap::new();
@@ -205,7 +212,12 @@ fn convert_set(
         } else {
             selection::slot(&mesh.node.name)
         };
-        for (face, block) in mesh.faces.iter().zip(&blocks) {
+        for (face_idx, face) in mesh.faces.iter().enumerate() {
+            let block = blocks
+                .iter()
+                .find(|b| allow_material_override && b.material.eq_ignore_ascii_case(&face.name))
+                .or_else(|| blocks.get(face_idx))
+                .unwrap_or(&blocks[blocks.len() - 1]);
             if !allow_material_override && face.name != block.material {
                 return Err(format!(
                     "CAR MATERIAL: SGC/INI mismatch on {} (sgc='{}' ini='{}')",

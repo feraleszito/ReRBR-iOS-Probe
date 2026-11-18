@@ -13,7 +13,27 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
+
+#[derive(Debug, Clone)]
+pub struct LoadedCarReport {
+    pub vehicle_id: String,
+    pub model_path: String,
+    pub draw_count: usize,
+    pub textures: Vec<String>,
+    pub has_cockpit_interior: bool,
+}
+
+static LAST_LOADED_CAR: OnceLock<Mutex<Option<LoadedCarReport>>> = OnceLock::new();
+
+pub fn last_loaded_report() -> Option<LoadedCarReport> {
+    LAST_LOADED_CAR
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+}
 
 pub struct Car {
     pub vehicle: rerbr_content::VehicleDescriptor,
@@ -57,7 +77,7 @@ pub fn prepare_selected_for_mode(
     #[cfg(feature = "physics-stage")]
     if selection.vehicle.is_ngp_experimental_car() {
         eprintln!(
-            "experimental-ngp AUDIO: {} requires unsupported FMOD bank ({}); silent mode",
+            "experimental-ngp AUDIO: {} configured with FMOD bank ({})",
             selection.vehicle.id, selection.vehicle.audio_index
         );
     } else {
@@ -67,6 +87,15 @@ pub fn prepare_selected_for_mode(
         }
     }
     let car = load_vehicle_for_mode(install, &selection.vehicle, allow_experimental_ngp)?;
+    if let Ok(mut slot) = LAST_LOADED_CAR.get_or_init(|| Mutex::new(None)).lock() {
+        *slot = Some(LoadedCarReport {
+            vehicle_id: selection.vehicle.id.clone(),
+            model_path: selection.vehicle.model.clone(),
+            draw_count: car.geometry.drawn.len(),
+            textures: car.textures.keys().cloned().collect(),
+            has_cockpit_interior: car.cockpit.is_some(),
+        });
+    }
     #[cfg(not(feature = "physics-stage"))]
     let (path, render) = {
         let terrain = crate::harwood::benchmark::load(maps)?;
@@ -230,10 +259,10 @@ pub fn load_vehicle_for_mode(
             .filter(|v| !v.is_ngp_experimental_car())
             .any(|v| rerbr_content::same_path(&v.model, &entry.file_name))
     {
-        eprintln!(
-            "car-chase WARNING: experimental vehicle {} resolved to fallback retail model '{}'",
+        return Err(format!(
+            "CAR ISOLATION: experimental vehicle {} refused fallback retail model '{}'",
             vehicle.id, entry.file_name
-        );
+        ));
     }
     let bytes = read(root, vehicle, &entry.file_name, 32 * 1024 * 1024)?;
     let elements = sgc::parse(&bytes).map_err(|e| format!("CAR SGC: {e}"))?;
@@ -261,7 +290,7 @@ pub fn load_vehicle_for_mode(
         .map(|m| m.path.clone())
         .collect::<BTreeSet<_>>()
     {
-        let bytes = read(root, vehicle, &path, 16 * 1024 * 1024)?;
+        let bytes = read(root, vehicle, &path, 32 * 1024 * 1024)?;
         let plan = upload_plan(&bytes, u32::MAX)?;
         eprintln!(
             "car-chase DDS PASS: {path} {:?}, {} mips",

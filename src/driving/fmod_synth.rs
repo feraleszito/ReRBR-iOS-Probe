@@ -20,6 +20,7 @@ pub struct FmodAudioStats {
     pub total_samples: usize,
     pub decoded_samples: usize,
     pub failed_samples: usize,
+    pub active_events: Vec<String>,
     pub engine_int_layers: usize,
     pub engine_ext_layers: usize,
     pub turbo_layers: usize,
@@ -128,6 +129,7 @@ pub struct FmodVehicleAudio {
     total_samples: usize,
     decoded_samples: usize,
     failed_samples: usize,
+    active_events: Vec<String>,
     engine_int_layers: usize,
     engine_ext_layers: usize,
     turbo_layers: usize,
@@ -231,12 +233,19 @@ impl FmodVehicleAudio {
         let mut engine_int_layers = 0usize;
         let mut engine_ext_layers = 0usize;
         let mut turbo_layers = 0usize;
+        let mut active_events = Vec::new();
         let mut fluctuation_length = 0.28f32;
 
         for ev in &bank.events {
             let Some(role) = classify_event(&ev.name) else {
                 continue;
             };
+            if !ev.layers.is_empty() {
+                let short = ev.name.strip_prefix("event:/").unwrap_or(&ev.name);
+                if !active_events.iter().any(|e| e == short) {
+                    active_events.push(short.to_string());
+                }
+            }
             if matches!(role, EventRole::EngineInt | EventRole::EngineExt) {
                 if let Some(len) = ev.fluctuation_length {
                     if len > 0.02 {
@@ -327,6 +336,7 @@ impl FmodVehicleAudio {
             total_samples,
             decoded_samples,
             failed_samples,
+            active_events,
             engine_int_layers,
             engine_ext_layers,
             turbo_layers,
@@ -407,6 +417,7 @@ impl FmodVehicleAudio {
             total_samples: self.total_samples,
             decoded_samples: self.decoded_samples,
             failed_samples: self.failed_samples,
+            active_events: self.active_events.clone(),
             engine_int_layers: self.engine_int_layers,
             engine_ext_layers: self.engine_ext_layers,
             turbo_layers: self.turbo_layers,
@@ -442,7 +453,7 @@ impl FmodVehicleAudio {
         let pitch_alpha = (1.0 - (-1.0 / (0.015 * sr as f32)).exp()).clamp(0.001, 0.25);
         let view_alpha = (1.0 - (-1.0 / (0.035 * sr as f32)).exp()).clamp(0.001, 0.25);
 
-        let master = volume.clamp(0.0, 2.0) * 0.34;
+        let master = volume.clamp(0.0, 2.0) * 0.42;
 
         for frame in 0..frames {
             self.cockpit_mix += (cockpit_target - self.cockpit_mix) * view_alpha;
@@ -453,7 +464,7 @@ impl FmodVehicleAudio {
                 voice.cooldown_samples = voice.cooldown_samples.saturating_sub(1);
                 let role_gain = match voice.role {
                     EventRole::EngineInt => self.cockpit_mix,
-                    EventRole::EngineExt => 1.0 - self.cockpit_mix,
+                    EventRole::EngineExt => (1.0 - self.cockpit_mix) * 2.0,
                     EventRole::Turbo => 0.55 + 0.35 * self.cockpit_mix,
                     EventRole::Transmission => 0.45 + 0.30 * self.cockpit_mix,
                     _ => 0.0,
@@ -534,7 +545,7 @@ impl FmodVehicleAudio {
                 "wheel_speed" => wheel_kmh,
                 "exhaustpop" => self.exhaustpop_state,
                 "distance" => 1.5,
-                "event cone angle" => 15.0,
+                "event cone angle" => 122.0,
                 "state" | "valve" | "battery" | "startup" => 1.0,
                 "suspension_damage" => 0.0,
                 _ => self.param_values[idx],
@@ -581,11 +592,18 @@ impl FmodVehicleAudio {
 
             for auto in &voice.layer.automations {
                 if let Some(&pval) = self.param_values.get(auto.param) {
-                    let y = evaluate_curve(&auto.points, pval);
+                    let is_distance = self
+                        .param_names_lower
+                        .get(auto.param)
+                        .is_some_and(|n| n == "distance");
                     match auto.property {
-                        Property::VolumeDb => total_db += y,
-                        Property::Gain => linear_gain *= y.clamp(0.0, 2.0),
-                        Property::Semitones => total_semi += y,
+                        Property::VolumeDb => {
+                            total_db += evaluate_volume_curve(&auto.points, pval, !is_distance);
+                        }
+                        Property::Gain => {
+                            linear_gain *= evaluate_curve(&auto.points, pval).clamp(0.0, 2.0);
+                        }
+                        Property::Semitones => total_semi += evaluate_curve(&auto.points, pval),
                         Property::Effect(_) => {}
                     }
                 }
@@ -606,7 +624,11 @@ impl FmodVehicleAudio {
                 for auto in &bus.automations {
                     if let Some(&pval) = self.param_values.get(auto.param) {
                         if auto.property == Property::VolumeDb {
-                            total_db += evaluate_curve(&auto.points, pval);
+                            let is_distance = self
+                                .param_names_lower
+                                .get(auto.param)
+                                .is_some_and(|n| n == "distance");
+                            total_db += evaluate_volume_curve(&auto.points, pval, !is_distance);
                         }
                     }
                 }
@@ -752,7 +774,7 @@ fn default_param_value(name: &str, min: f32, max: f32) -> f32 {
         "rpms" | "rpm" => 1050.0,
         "throttle" | "load" | "brake" | "boost" | "turbo" | "fluctuation" => 0.0,
         "distance" => 1.5,
-        "event cone angle" => 15.0,
+        "event cone angle" => 122.0,
         "state" | "valve" | "battery" | "startup" => 1.0,
         _ => 0.0,
     };
@@ -765,6 +787,45 @@ fn regions_active(layer: &Layer, params: &[f32]) -> bool {
             .get(r.param)
             .is_some_and(|&v| v >= r.start - 1e-4 && v <= r.end + 1e-4)
     })
+}
+
+fn evaluate_volume_curve(points: &[[f32; 2]], x: f32, amplitude_fades: bool) -> f32 {
+    if points.is_empty() {
+        return 0.0;
+    }
+    if x <= points[0][0] {
+        return points[0][1];
+    }
+    let last = points[points.len() - 1];
+    if x >= last[0] {
+        return last[1];
+    }
+    for win in points.windows(2) {
+        let [x0, y0] = win[0];
+        let [x1, y1] = win[1];
+        if x <= x1 {
+            let span = x1 - x0;
+            if span.abs() < 1e-6 {
+                return y1;
+            }
+            let t = ((x - x0) / span).clamp(0.0, 1.0);
+            // FMOD Studio `CURV` stores per-segment shape curvature (e.g. equal-power / amplitude
+            // faders for On/Off-throttle crossfades and cone-angle attenuation). Since rbr-formats
+            // exposes only the endpoints (y in dB), interpolating wide fades (>= 18 dB dropping
+            // below -18 dB) linearly in amplitude prevents a -25 dB mid-throttle dip/silence hole.
+            if amplitude_fades && (y1 - y0).abs() >= 18.0 && y0.min(y1) <= -18.0 {
+                let g0 = db_to_linear(y0);
+                let g1 = db_to_linear(y1);
+                let g = g0 + (g1 - g0) * t;
+                if g <= 1e-4 {
+                    return -80.0;
+                }
+                return 20.0 * g.log10();
+            }
+            return y0 + (y1 - y0) * t;
+        }
+    }
+    last[1]
 }
 
 fn evaluate_curve(points: &[[f32; 2]], x: f32) -> f32 {
@@ -968,5 +1029,79 @@ mod tests {
             load_high_rms,
             final_stats.peak_output
         );
+    }
+
+    #[test]
+    fn focus_2006_fmod_matrix_and_overrun_have_no_silence_zones() {
+        let rbr = Path::new(r"C:\Richard Burns Rally");
+        let focus_bank = rbr.join("AudioFMOD/Focus_Mk2_WRC.bank");
+        if !focus_bank.is_file() {
+            return;
+        }
+        for (bank_name, expected_samples) in [
+            ("AudioFMOD/Focus_Mk2_WRC.bank", 44usize),
+            ("AudioFMOD/306_maxi_B.bank", 67usize),
+        ] {
+            if !rbr.join(bank_name).is_file() {
+                continue;
+            }
+            let mut synth = FmodVehicleAudio::load_from_documents(rbr, bank_name, 44100).unwrap();
+            let stats = synth.stats();
+            assert_eq!(stats.decoded_samples, expected_samples);
+            assert!(!stats.active_events.is_empty());
+
+            let rpms = [2000.0f32, 4000.0, 6000.0];
+            let throttles = [0.0f32, 0.25, 0.50, 0.75, 1.0];
+            for cockpit in [true, false] {
+                for &rpm in &rpms {
+                    for &thr in &throttles {
+                        synth.update_telemetry(FmodTelemetryInput {
+                            rpm,
+                            throttle: thr,
+                            brake: 0.0,
+                            speed_mps: rpm * 0.008,
+                            gear: 3,
+                            wheel_speed_mps: rpm * 0.008,
+                        });
+                        let mut buf = vec![0.0f32; 2048 * 2];
+                        for _ in 0..4 {
+                            buf.fill(0.0);
+                            synth.mix_into(&mut buf, 2048, 1.0, cockpit);
+                        }
+                        let rms =
+                            (buf.iter().map(|v| v * v).sum::<f32>() / buf.len() as f32).sqrt();
+                        assert!(
+                            rms.is_finite() && rms >= 0.012,
+                            "silence dip in {bank_name} cockpit={cockpit} rpm={rpm} thr={thr}: rms={rms:.5}"
+                        );
+                    }
+                }
+            }
+
+            // Continuous acceleration -> throttle release / overrun sweep from 6500 down to 1200 RPM.
+            let mut buf = vec![0.0f32; 1024 * 2];
+            for step in 0..32 {
+                let (rpm, thr) = if step < 12 {
+                    (1800.0 + step as f32 * 400.0, 0.55)
+                } else {
+                    (6500.0 - (step - 12) as f32 * 260.0, 0.0)
+                };
+                synth.update_telemetry(FmodTelemetryInput {
+                    rpm,
+                    throttle: thr,
+                    brake: if thr == 0.0 { 0.3 } else { 0.0 },
+                    speed_mps: rpm * 0.008,
+                    gear: if step > 18 { 2 } else { 3 },
+                    wheel_speed_mps: rpm * 0.008,
+                });
+                buf.fill(0.0);
+                synth.mix_into(&mut buf, 1024, 1.0, true);
+                let rms = (buf.iter().map(|v| v * v).sum::<f32>() / buf.len() as f32).sqrt();
+                assert!(
+                    rms.is_finite() && rms >= 0.010,
+                    "silence dip during ramp/overrun step {step} (rpm={rpm}, thr={thr}) in {bank_name}: rms={rms:.5}"
+                );
+            }
+        }
     }
 }

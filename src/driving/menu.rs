@@ -490,19 +490,25 @@ impl Menu {
                 let inspected = entry.map(|e| &e.descriptor).unwrap_or(vehicle);
                 let state = entry.map_or(vehicle_state, |e| e.state);
                 let is_ngp_car = inspected.is_ngp_experimental_car();
+                let incomplete_rsf = entry.is_some_and(|e| {
+                    e.using_fallback_model
+                        || e.model_missing
+                        || (ctx.content.inspected && !e.files.missing.is_empty())
+                });
                 let supported = if is_ngp_car {
-                    ctx.ngp_experimental
+                    ctx.ngp_experimental && !incomplete_rsf
                 } else {
                     inspected.validate_current_backend().is_ok()
                 };
                 let mut rows = Vec::new();
                 if is_ngp_car {
                     let class_text = entry.map(|e| e.classification.badge()).unwrap_or("RSF NGP");
-                    let fb_warn = if entry.is_some_and(|e| e.using_fallback_model) {
-                        " [MODELO FALLBACK!]"
-                    } else {
-                        ""
-                    };
+                    let fb_warn =
+                        if entry.is_some_and(|e| e.using_fallback_model || e.model_missing) {
+                            " [FALTA MODELO PROPIO]"
+                        } else {
+                            ""
+                        };
                     rows.push(Row::info(
                         "CLASIFICACIÓN",
                         if ctx.ngp_experimental {
@@ -525,6 +531,10 @@ impl Menu {
                 if let Some(cat) = inspected.category.as_deref() {
                     rows.push(Row::info("CATEGORÍA", cat));
                 }
+                rows.push(Row::info("MODELO 3D", inspected.model.clone()));
+                if let Some(pack) = inspected.rsf_pack.as_deref() {
+                    rows.push(Row::info("PACK NGP", pack));
+                }
                 if state == EntryState::Selected {
                     rows.push(Row::info("SELECCIÓN", "SELECCIONADO"));
                 } else {
@@ -535,6 +545,8 @@ impl Menu {
                             } else {
                                 "SELECCIONAR COCHE".into()
                             }
+                        } else if incomplete_rsf {
+                            "INCOMPLETO (FALTAN ARCHIVOS PROPIOS)".into()
                         } else {
                             "NO DISPONIBLE / ACTIVA MODO NGP".into()
                         },
@@ -1221,11 +1233,11 @@ impl Menu {
                     Row::action("EXPORTAR DIAGNÓSTICO (TXT)", Command::ExportDiagnostics),
                     Row {
                         label: if pack_ready {
-                            "INICIAR PRUEBA NGP FOCUS (SILENCIO FMOD)".into()
+                            "INICIAR PRUEBA NGP + AUDIO FMOD".into()
                         } else if visual_ready {
-                            "INSPECCIÓN VISUAL FOCUS (SIN FÍSICA NGP)".into()
+                            "INSPECCIÓN VISUAL (SIN FÍSICA NGP)".into()
                         } else {
-                            "PRUEBA FOCUS BLOQUEADA (REVISAR CAR FILES)".into()
+                            "PRUEBA BLOQUEADA (REVISAR ARCHIVOS)".into()
                         },
                         kind: RowKind::Action {
                             command: Command::StartFocusVisualInspection,

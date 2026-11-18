@@ -260,7 +260,9 @@ fn run(
                 return Err("nonfinite physical pose".into());
             }
             let noise = session.engine_noise(500.0);
-            super::audio::update_engine_state(&noise, sample.gear);
+            if !selection.vehicle.is_ngp_experimental_car() {
+                super::audio::update_engine_state(&noise, sample.gear);
+            }
             let surface_kind = if selection.stage.surface() == "Tarmac" {
                 super::audio::SurfaceKind::Tarmac
             } else {

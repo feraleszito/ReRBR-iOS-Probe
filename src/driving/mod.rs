@@ -343,6 +343,9 @@ impl Runtime {
         if !has_data {
             return;
         }
+        let loaded_report =
+            crate::car::last_loaded_report().filter(|r| r.vehicle_id == self.selection.vehicle.id);
+        let fmod_snap = audio::fmod_runtime_snapshot();
         self.last_session_snapshot = Some(ngp_experimental::SessionTelemetrySnapshot {
             vehicle_id: self.selection.vehicle.id.clone(),
             vehicle_name: self.selection.vehicle.name.clone(),
@@ -365,6 +368,16 @@ impl Runtime {
             clutch_rx: latest.map_or(0.0, |s| s.payload_clutch),
             clutch_help: self.clutch_help,
             audio_status: audio::status(),
+            loaded_model_path: loaded_report.as_ref().map(|r| r.model_path.clone()),
+            loaded_draw_count: loaded_report.as_ref().map_or(0, |r| r.draw_count),
+            loaded_textures: loaded_report.map_or_else(Vec::new, |r| r.textures),
+            fmod_bank: fmod_snap.as_ref().map(|f| f.bank_path.clone()),
+            fmod_decoded_samples: fmod_snap.as_ref().map_or(0, |f| f.decoded_samples),
+            fmod_total_samples: fmod_snap.as_ref().map_or(0, |f| f.total_samples),
+            fmod_active_events: fmod_snap
+                .as_ref()
+                .map_or_else(Vec::new, |f| f.active_events.clone()),
+            fmod_rendered_frames: fmod_snap.as_ref().map_or(0, |f| f.rendered_frames),
         });
     }
     fn refresh_focus_diagnostics(&mut self) {
@@ -383,7 +396,21 @@ impl Runtime {
             .and_then(|snap| self.content.vehicle(&snap.vehicle_id))
             .map(|e| &e.descriptor)
             .filter(|v| v.is_ngp_experimental_car());
-        let target = if self.selection.vehicle.is_ngp_experimental_car() {
+        let prefer_inspected = matches!(
+            self.menu.page,
+            menu::Page::GarageDetail | menu::Page::NgpExperimental
+        );
+        let target = if prefer_inspected {
+            if let Some(v) = inspected {
+                v.clone()
+            } else if self.selection.vehicle.is_ngp_experimental_car() {
+                self.selection.vehicle.clone()
+            } else if let Some(v) = last_ngp {
+                v.clone()
+            } else {
+                rerbr_content::VehicleDescriptor::ford_focus_2006()
+            }
+        } else if self.selection.vehicle.is_ngp_experimental_car() {
             self.selection.vehicle.clone()
         } else if let Some(v) = inspected {
             v.clone()
@@ -990,12 +1017,22 @@ impl Runtime {
                 self.menu.open(menu::Page::GarageDetail);
             }
             SelectVehicle(index) => {
-                let candidate = self
-                    .content
-                    .vehicles
-                    .get(index)
-                    .map(|e| e.descriptor.clone())
-                    .ok_or_else(|| "UNKNOWN VEHICLE".to_string());
+                let candidate = match self.content.vehicles.get(index) {
+                    None => Err("UNKNOWN VEHICLE".to_string()),
+                    Some(entry) if entry.using_fallback_model || entry.model_missing => {
+                        Err(format!(
+                            "MODELO 3D PROPIO AUSENTE PARA {} (SIN FALLBACK)",
+                            entry.descriptor.name
+                        ))
+                    }
+                    Some(entry) if self.content.inspected && !entry.files.missing.is_empty() => {
+                        Err(entry
+                            .files
+                            .missing_label()
+                            .unwrap_or_else(|| "MISSING VEHICLE FILES".into()))
+                    }
+                    Some(entry) => Ok(entry.descriptor.clone()),
+                };
                 let result = candidate.and_then(|vehicle| {
                     self.configure_selection(rerbr_content::Selection {
                         vehicle,

@@ -72,6 +72,7 @@ pub struct VehicleEntry {
     pub drivetrain: Option<String>,
     pub fmod_bank: Option<String>,
     pub using_fallback_model: bool,
+    pub model_missing: bool,
     pub notes: Vec<String>,
 }
 #[derive(Debug, Clone)]
@@ -115,6 +116,7 @@ impl Catalog {
                     drivetrain: None,
                     fmod_bank: None,
                     using_fallback_model: false,
+                    model_missing: false,
                     notes: Vec::new(),
                 }
             })
@@ -139,6 +141,7 @@ impl Catalog {
                     drivetrain: None,
                     fmod_bank: None,
                     using_fallback_model: false,
+                    model_missing: false,
                     notes: Vec::new(),
                 },
             );
@@ -228,8 +231,9 @@ impl Catalog {
                 let preset_own_model_exists =
                     rerbr_sim::rbr_formats::cars::resolve(&rbr_root, &existing.descriptor.model)
                         .is_some();
-                if item.using_fallback_model && preset_own_model_exists {
+                if (item.using_fallback_model || item.model_missing) && preset_own_model_exists {
                     existing.using_fallback_model = false;
+                    existing.model_missing = false;
                 } else {
                     let prev_optional = existing.descriptor.optional_textures.clone();
                     let prev_audio = existing.descriptor.audio_index.clone();
@@ -238,15 +242,20 @@ impl Catalog {
                     {
                         existing.descriptor.optional_textures = prev_optional;
                     }
-                    if existing.descriptor.audio_index == "Audio/Cars/Cars.ini"
+                    if (existing.descriptor.audio_index == "Audio/Cars/Cars.ini"
+                        || existing.descriptor.audio_index == "AudioFMOD/SIN_BANCO_FMOD.bank")
                         && prev_audio.to_ascii_lowercase().ends_with(".bank")
+                        && !prev_audio.contains("SIN_BANCO_FMOD")
                     {
                         existing.descriptor.audio_index = prev_audio;
                     }
                     existing.using_fallback_model = item.using_fallback_model;
+                    existing.model_missing = item.model_missing;
                 }
                 let files = audit_vehicle(root, &existing.descriptor);
-                let supported = existing.descriptor.validate_experimental_ngp().is_ok();
+                let supported = existing.descriptor.validate_experimental_ngp().is_ok()
+                    && !existing.using_fallback_model
+                    && !existing.model_missing;
                 let state = state_of(
                     &existing.descriptor.id,
                     &selection.vehicle.id,
@@ -262,7 +271,9 @@ impl Catalog {
                 existing.state = state;
             } else {
                 let files = audit_vehicle(root, &item.descriptor);
-                let supported = item.descriptor.validate_experimental_ngp().is_ok();
+                let supported = item.descriptor.validate_experimental_ngp().is_ok()
+                    && !item.using_fallback_model
+                    && !item.model_missing;
                 let state = state_of(
                     &item.descriptor.id,
                     &selection.vehicle.id,
@@ -278,6 +289,7 @@ impl Catalog {
                     drivetrain: item.drivetrain,
                     fmod_bank: item.fmod_bank,
                     using_fallback_model: item.using_fallback_model,
+                    model_missing: item.model_missing,
                     notes: item.notes,
                 });
             }

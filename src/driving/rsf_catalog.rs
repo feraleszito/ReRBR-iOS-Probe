@@ -26,6 +26,7 @@ pub struct DiscoveredRsfVehicle {
     pub fmod_bank: Option<String>,
     pub fmod_present: bool,
     pub using_fallback_model: bool,
+    pub model_missing: bool,
     pub notes: Vec<String>,
 }
 
@@ -143,7 +144,7 @@ fn try_preset_or_folder_entry(
         .name
         .to_ascii_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|t| t.len() >= 4)
+        .filter(|t| t.len() >= 3)
         .map(str::to_string)
         .collect();
     if let Ok(entries) = std::fs::read_dir(&cars_dir) {
@@ -375,50 +376,89 @@ fn resolve_pack_in(packs_root: &Path, pack: &str) -> Option<PathBuf> {
     cars::resolve(packs_root, pack).or_else(|| cars::resolve(packs_root, &format!("{pack}.zip")))
 }
 
+fn expected_own_model_entry(install: Option<&rsf::Install>, car: &rsf::Car) -> CarEntry {
+    if let Some(inst) = install {
+        if let Some(cm) = inst.models.iter().find(|m| m.id == car.model) {
+            return car_pack::model_entry(&cm.path, &cm.filename);
+        }
+    }
+    let slug = car.pack.trim_end_matches("_ngp6").trim_end_matches("_ngp7");
+    car_pack::model_entry(slug, slug)
+}
+
+struct ResolvedModel {
+    entry: CarEntry,
+    model_missing: bool,
+    audio_hint: Option<String>,
+}
+
 fn resolve_model_entry(
     rbr_root: &Path,
     install: Option<&rsf::Install>,
     car: &rsf::Car,
     retail: &[CarEntry],
-    using_fallback_model: &mut bool,
-    fallback_audio_hint: &mut Option<String>,
     notes: &mut Vec<String>,
-) -> Result<CarEntry, String> {
+) -> ResolvedModel {
     if let Some(inst) = install {
         match inst.model_entry(car, retail) {
-            Ok(m) if m.fallback.is_none() => return Ok(m.entry),
+            Ok(m) if m.fallback.is_none() => {
+                return ResolvedModel {
+                    entry: m.entry,
+                    model_missing: false,
+                    audio_hint: None,
+                };
+            }
             Ok(m) => {
                 if let Some((direct_entry, audio_hint)) = try_preset_or_folder_entry(rbr_root, car)
                 {
-                    *fallback_audio_hint = audio_hint;
-                    return Ok(direct_entry);
+                    return ResolvedModel {
+                        entry: direct_entry,
+                        model_missing: false,
+                        audio_hint,
+                    };
                 }
                 if let Some(reason) = m.fallback {
-                    *using_fallback_model = true;
-                    notes.push(format!("MODELO FALLBACK: {reason}"));
+                    notes.push(format!(
+                        "MODELO 3D PROPIO AUSENTE (BLOQUEADO SIN FALLBACK): {reason}"
+                    ));
                 }
-                return Ok(m.entry);
+                return ResolvedModel {
+                    entry: expected_own_model_entry(Some(inst), car),
+                    model_missing: true,
+                    audio_hint: None,
+                };
             }
             Err(e) => {
                 if let Some((direct_entry, audio_hint)) = try_preset_or_folder_entry(rbr_root, car)
                 {
-                    *fallback_audio_hint = audio_hint;
-                    return Ok(direct_entry);
+                    return ResolvedModel {
+                        entry: direct_entry,
+                        model_missing: false,
+                        audio_hint,
+                    };
                 }
-                return Err(e);
+                notes.push(format!("MODELO 3D PROPIO AUSENTE (BLOQUEADO): {e}"));
+                return ResolvedModel {
+                    entry: expected_own_model_entry(Some(inst), car),
+                    model_missing: true,
+                    audio_hint: None,
+                };
             }
         }
     }
     if let Some((direct_entry, audio_hint)) = try_preset_or_folder_entry(rbr_root, car) {
-        *fallback_audio_hint = audio_hint;
-        return Ok(direct_entry);
+        return ResolvedModel {
+            entry: direct_entry,
+            model_missing: false,
+            audio_hint,
+        };
     }
-    if let Some(retail_slot5) = retail.iter().find(|c| c.index == car_pack::SLOT as usize) {
-        *using_fallback_model = true;
-        notes.push("MODELO FALLBACK SLOT 5 (SIN carmodels.json)".into());
-        return Ok(retail_slot5.clone());
+    notes.push("SIN MODELO 3D PROPIO EN Cars/ (BLOQUEADO SIN FALLBACK)".into());
+    ResolvedModel {
+        entry: expected_own_model_entry(None, car),
+        model_missing: true,
+        audio_hint: None,
     }
-    Err("SIN MODELO 3D".into())
 }
 
 fn build_rsf_entry(
@@ -445,17 +485,12 @@ fn build_rsf_entry(
         Err(e) => Err(e),
     };
 
-    let mut using_fallback_model = false;
-    let mut fallback_audio_hint = None;
-    let model_entry = resolve_model_entry(
-        rbr_root,
-        install,
-        car,
-        retail,
-        &mut using_fallback_model,
-        &mut fallback_audio_hint,
-        &mut notes,
-    );
+    let using_fallback_model = false;
+    let ResolvedModel {
+        entry,
+        model_missing,
+        audio_hint: fallback_audio_hint,
+    } = resolve_model_entry(rbr_root, install, car, retail, &mut notes);
 
     let fmod_bank = car
         .audio
@@ -467,8 +502,13 @@ fn build_rsf_entry(
         .as_deref()
         .and_then(|p| cars::resolve(rbr_root, p))
         .is_some();
-    if fmod_bank.is_none() || !fmod_present {
-        notes.push("SIN BANCO FMOD".into());
+    if fmod_bank.is_none() {
+        notes.push("SIN BANCO FMOD ASIGNADO EN cars.json (NO USA AUDIO RETAIL)".into());
+    } else if !fmod_present {
+        notes.push(format!(
+            "FALTA BANCO FMOD {}",
+            fmod_bank.as_deref().unwrap_or("")
+        ));
     }
 
     let is_ngp7_pack = car.pack.to_ascii_lowercase().ends_with("_ngp7");
@@ -481,16 +521,13 @@ fn build_rsf_entry(
     if let Err(ref e) = pack_readable {
         notes.push(e.clone());
     }
-    if let Err(ref e) = model_entry {
-        notes.push(e.clone());
-    }
 
-    let classification = match (&pack_readable, &ngp_err, &model_entry) {
-        (Err(_), _, Ok(_)) | (Ok(_), Some(_), Ok(_)) => VehicleClassification::VisualInspectionOnly,
-        (Ok(_), None, Ok(_)) if !using_fallback_model && !is_ngp7_pack => {
+    let own_model_ok = !model_missing && !using_fallback_model;
+    let classification = match (&pack_readable, own_model_ok) {
+        (Ok(_), true) if !is_ngp7_pack && fmod_present && ngp_err.is_none() => {
             VehicleClassification::RsfNgpVerified
         }
-        (Ok(_), None, Ok(_)) => VehicleClassification::RsfNgpPartial,
+        (Ok(_), true) => VehicleClassification::RsfNgpPartial,
         _ => VehicleClassification::VisualInspectionOnly,
     };
 
@@ -504,15 +541,9 @@ fn build_rsf_entry(
         .unwrap_or_else(|| car.name.clone());
     let id = slugify_id(&display_name);
 
-    let entry = model_entry.unwrap_or_else(|_| {
-        using_fallback_model = true;
-        let (f, _) = focus_2006_preset_entry();
-        f
-    });
-
     let audio_index = fmod_bank
         .clone()
-        .unwrap_or_else(|| "Audio/Cars/Cars.ini".into());
+        .unwrap_or_else(|| "AudioFMOD/SIN_BANCO_FMOD.bank".into());
     let descriptor = descriptor_from_entry(
         rbr_root,
         DescriptorMeta {
@@ -541,6 +572,7 @@ fn build_rsf_entry(
         fmod_bank,
         fmod_present,
         using_fallback_model,
+        model_missing,
         notes,
     }
 }
@@ -712,5 +744,143 @@ mod tests {
                 d.notes
             );
         }
+    }
+
+    #[test]
+    fn audits_and_boots_all_installed_rsf_cars_if_pc_present() {
+        let rbr_root = Path::new(r"C:\Richard Burns Rally");
+        if !rbr_root.join("rsfdata/cache/cars.json").is_file() {
+            return;
+        }
+        let discovered = discover(rbr_root);
+        let paths = rerbr_sim::inputs::Paths {
+            install: rbr_root.to_path_buf(),
+            overlay: None,
+            maps: rbr_root.join("Maps"),
+        };
+        let pack_root = rbr_root.join("rsfdata/cars");
+
+        for d in &discovered {
+            let model_res = crate::car::load_vehicle_for_mode(rbr_root, &d.descriptor, true);
+            let fmod_res = d.fmod_bank.as_deref().map(|bank_rel| {
+                super::super::fmod_synth::FmodVehicleAudio::load_from_documents(
+                    rbr_root, bank_rel, 44100,
+                )
+            });
+            let pack_name = d.descriptor.rsf_pack.as_deref().unwrap_or("");
+            let pack_dir = pack_root.join(pack_name);
+            let sel = rerbr_content::Selection {
+                vehicle: d.descriptor.clone(),
+                stage: rerbr_content::StageDescriptor::harwood_forest(),
+            };
+            let sim_res = if pack_dir.is_dir() {
+                Some(rerbr_sim::drive::Session::boot_experimental_pack(
+                    &paths, &sel, &pack_dir, false,
+                ))
+            } else {
+                None
+            };
+            let (model_str, tex_count) = match &model_res {
+                Ok(car) => (
+                    format!("OK({} draws)", car.geometry.drawn.len()),
+                    car.textures.len(),
+                ),
+                Err(e) => (format!("ERR({e})"), 0),
+            };
+            let fmod_str = match &fmod_res {
+                Some(Ok(synth)) => {
+                    let st = synth.stats();
+                    format!("OK({}/{} decoded)", st.decoded_samples, st.total_samples)
+                }
+                Some(Err(e)) => format!("ERR({e})"),
+                None => "NONE".into(),
+            };
+            let sim_str = match &sim_res {
+                Some(Ok(_)) => "BOOT OK".into(),
+                Some(Err(e)) => format!("BOOT ERR({e})"),
+                None => "NO PACK DIR".into(),
+            };
+            eprintln!(
+                "RSF FULL AUDIT [{}]: model={}({}) tex={} fmod={} sim={} fallback={}",
+                d.descriptor.id,
+                d.descriptor.model,
+                model_str,
+                tex_count,
+                fmod_str,
+                sim_str,
+                d.using_fallback_model
+            );
+        }
+    }
+
+    #[test]
+    fn imported_rsf_car_never_silently_substitutes_model_or_retail_audio_when_incomplete() {
+        let root =
+            std::env::temp_dir().join(format!("rerbr-rsf-no-silent-fb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_synthetic_focus_install(&root);
+
+        let cache = root.join("RBR/rsfdata/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("cars.json"),
+            r#"[
+                {"id":"55","name":"Ford Focus Mk II RS WRC 2006","path":"Ford_Focus_Mk_II_RS_WRC_2006_ngp6","carmodel_id":"17","audio":"Focus_Mk2_WRC"},
+                {"id":"99","name":"Peugeot 306 Maxi Kit Car","path":"Peugeot_306_Maxi_Kit_Car_ngp6","carmodel_id":"48","audio":"306_maxi_B"},
+                {"id":"100","name":"Citroen DS3 WRC","path":"Citroen_DS3_WRC_ngp6","carmodel_id":"78","audio":null}
+            ]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cache.join("carmodels.json"),
+            r#"[
+                {"id":"17","name":"Ford Focus","path":"FORD_FOCUS_2006","filename":"focus06","fallback":"5"},
+                {"id":"48","name":"Peugeot 306 Maxi","path":"p306maxi","filename":"p306maxi","fallback":"5"},
+                {"id":"78","name":"Citroen DS3 WRC","path":"DS3_WRC","filename":"ds3_wrc","fallback":"5"}
+            ]"#,
+        )
+        .unwrap();
+
+        let maxi_pack = root.join("RBR/rsfdata/cars/Peugeot_306_Maxi_Kit_Car_ngp6");
+        std::fs::create_dir_all(&maxi_pack).unwrap();
+        std::fs::write(
+            maxi_pack.join("common.lsp"),
+            b"CarName = Peugeot 306 Maxi\n",
+        )
+        .unwrap();
+        std::fs::write(maxi_pack.join("gravel.lsp"), b"NumberOfGears = 6\n").unwrap();
+        // Deliberately omit Cars/p306maxi -> must NOT substitute impreza03 or focus06!
+
+        let ds3_pack = root.join("RBR/rsfdata/cars/Citroen_DS3_WRC_ngp6");
+        std::fs::create_dir_all(&ds3_pack).unwrap();
+        std::fs::write(ds3_pack.join("common.lsp"), b"CarName = DS3\n").unwrap();
+        std::fs::write(ds3_pack.join("gravel.lsp"), b"NumberOfGears = 6\n").unwrap();
+        std::fs::create_dir_all(root.join("RBR/Cars/DS3_WRC")).unwrap();
+        std::fs::write(root.join("RBR/Cars/DS3_WRC/ds3_wrc.sgc"), b"ds3").unwrap();
+
+        let catalog = super::super::content_manager::Catalog::scan_root(
+            &root,
+            &rerbr_content::Selection::default(),
+        );
+        let maxi = catalog.vehicle("rsf-peugeot-306-maxi-kit-car").unwrap();
+        assert_eq!(maxi.descriptor.model, "Cars/p306maxi/p306maxi.sgc");
+        assert!(maxi.model_missing);
+        assert!(!maxi.using_fallback_model);
+        assert!(!maxi.files.missing.is_empty());
+        assert_eq!(
+            maxi.state,
+            super::super::content_manager::EntryState::Unsupported
+        );
+
+        let ds3 = catalog.vehicle("rsf-citroen-ds3-wrc").unwrap();
+        assert_eq!(ds3.descriptor.model, "Cars/DS3_WRC/ds3_wrc.sgc");
+        assert!(!ds3.model_missing);
+        assert!(
+            !ds3.descriptor.audio_index.contains("Cars.ini"),
+            "RSF car without audio bank must never fall back to retail Cars.ini: {}",
+            ds3.descriptor.audio_index
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
