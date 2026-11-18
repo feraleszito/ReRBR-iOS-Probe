@@ -81,12 +81,10 @@ impl GamepadSnapshot {
 }
 
 #[cfg(target_os = "ios")]
-unsafe extern "C" {
-    fn rerbr_gamepad_poll(out: *mut GamepadSnapshot);
-}
-
-#[cfg(target_os = "ios")]
 pub fn poll_system_gamepad() -> GamepadSnapshot {
+    extern "C" {
+        fn rerbr_gamepad_poll(out: *mut GamepadSnapshot);
+    }
     let mut snap = GamepadSnapshot::default();
     unsafe {
         rerbr_gamepad_poll(&mut snap);
