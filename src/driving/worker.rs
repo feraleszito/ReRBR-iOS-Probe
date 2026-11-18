@@ -164,7 +164,9 @@ fn run(
     if stop.load(Ordering::Relaxed) {
         return Ok(());
     }
-    if !selection.vehicle.is_ngp_experimental_car() {
+    if selection.vehicle.is_ngp_experimental_car() {
+        super::audio::init_rsf_fmod(doc_path, &selection.vehicle, 44100);
+    } else {
         super::audio::init(doc_path, &selection.vehicle, 44100);
     }
     let mut previous = session.sample();
@@ -217,6 +219,20 @@ fn run(
             }
             let noise = session.engine_noise(500.0);
             super::audio::update_engine_state(&noise, sample.gear);
+            let surface_kind = if selection.stage.surface() == "Tarmac" {
+                super::audio::SurfaceKind::Tarmac
+            } else {
+                super::audio::SurfaceKind::Gravel
+            };
+            let grounded = sample.wheel_ground.iter().filter(|&&g| g != 0).count();
+            let speed = sample.speed() as f32;
+            let max_wheel_speed = sample
+                .wheel_spin
+                .iter()
+                .map(|w| w.abs() * 0.315)
+                .fold(0.0f32, f32::max);
+            let slip = ((max_wheel_speed - speed).abs() / speed.max(3.0)).clamp(0.0, 1.0);
+            super::audio::update_surface_state(surface_kind, speed, slip, grounded);
             if cfg!(debug_assertions) && sample.step % 720 == 0 {
                 eprintln!("physics-drive STEP {}: pos={:?} velocity={:?} rpm={:.0} gear={} input=({:.2},{:.2},{:.2}) ground={:?} strut={:?}",sample.step,sample.position,sample.velocity,sample.rpm,sample.gear,input.throttle,input.brake,input.steering,sample.wheel_ground,sample.wheel_travel);
             }

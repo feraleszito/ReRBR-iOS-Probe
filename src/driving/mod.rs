@@ -4,6 +4,7 @@ pub mod cameras;
 pub mod codriver;
 pub mod content_manager;
 pub mod controls;
+pub mod fmod_audit;
 pub mod gamepad;
 pub mod layout;
 pub(crate) mod loading;

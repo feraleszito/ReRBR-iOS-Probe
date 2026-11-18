@@ -122,8 +122,90 @@ impl MenuMusicTrack {
 }
 
 /// State of the audio runtime.
+/// Terrain surface classification for modular surface & tyre skid feedback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SurfaceKind {
+    #[default]
+    Gravel,
+    Tarmac,
+}
+
+/// Real-time allocation-free surface tyre rolling & slip synthesizer driven by 720 Hz telemetry.
+#[derive(Clone, Copy, Debug)]
+struct SurfaceAudio {
+    surface: SurfaceKind,
+    speed_mps: f32,
+    slip: f32,
+    grounded_wheels: usize,
+    rng: u32,
+    lp_state: f32,
+    gravel_pulse: f32,
+}
+
+impl Default for SurfaceAudio {
+    fn default() -> Self {
+        Self {
+            surface: SurfaceKind::Gravel,
+            speed_mps: 0.0,
+            slip: 0.0,
+            grounded_wheels: 4,
+            rng: 0x1357_9bdf,
+            lp_state: 0.0,
+            gravel_pulse: 0.0,
+        }
+    }
+}
+
+impl SurfaceAudio {
+    #[inline]
+    fn next_noise(&mut self) -> f32 {
+        // xorshift32 in [-1.0, 1.0]
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = if x == 0 { 0x6d2b_79f5 } else { x };
+        (self.rng as i32) as f32 / i32::MAX as f32
+    }
+
+    fn mix_into(&mut self, out: &mut [f32], frames: usize, volume: f32, is_cockpit: bool) {
+        if volume <= 0.0 || self.grounded_wheels == 0 || self.speed_mps < 1.0 {
+            return;
+        }
+        let ground_scale = (self.grounded_wheels as f32 / 4.0).clamp(0.25, 1.0);
+        let cockpit_atten = if is_cockpit { 0.55 } else { 0.90 };
+        let rolling = (self.speed_mps / 45.0).clamp(0.0, 1.0);
+        let slip = self.slip.clamp(0.0, 1.0);
+        let alpha = match self.surface {
+            SurfaceKind::Gravel => 0.14 + rolling * 0.10,
+            SurfaceKind::Tarmac => 0.06 + slip * 0.18,
+        };
+        let level = (0.04 * rolling + 0.11 * slip) * volume * ground_scale * cockpit_atten;
+        for i in 0..frames {
+            let n = self.next_noise();
+            self.lp_state += alpha * (n - self.lp_state);
+            let sample = match self.surface {
+                SurfaceKind::Gravel => {
+                    // Sparse pebble impacts modulated cleanly by speed + slip
+                    if self.rng & 0x1ff == 0 {
+                        self.gravel_pulse = 0.6 + rolling * 0.4;
+                    }
+                    self.gravel_pulse *= 0.992;
+                    (self.lp_state * 0.75 + n * self.gravel_pulse * 0.45) * level
+                }
+                SurfaceKind::Tarmac => (self.lp_state * (0.45 + slip * 0.75)) * level,
+            };
+            if i * 2 + 1 < out.len() {
+                out[i * 2] = (out[i * 2] + sample).clamp(-1.0, 1.0);
+                out[i * 2 + 1] = (out[i * 2 + 1] + sample).clamp(-1.0, 1.0);
+            }
+        }
+    }
+}
+
 struct AudioRuntime {
     car_audio: Option<CarAudio>,
+    surface_audio: SurfaceAudio,
     status: String,
     volume: f32,
     music_volume: f32,
@@ -145,6 +227,7 @@ impl AudioRuntime {
     fn new(volume: f32) -> Self {
         Self {
             car_audio: None,
+            surface_audio: SurfaceAudio::default(),
             status: "AUDIO UNINITIALIZED".into(),
             volume: volume.clamp(0.0, 1.0),
             music_volume: 0.70,
@@ -216,6 +299,47 @@ pub fn init(documents: &Path, vehicle: &rerbr_content::VehicleDescriptor, sample
         eprintln!("AUDIO INIT: running in silent fallback mode: {last_error}");
         lock.status = format!("AUDIO SILENT: {last_error}");
         lock.car_audio = None;
+    }
+}
+
+/// Inspects an RSF/NGP vehicle's FMOD bank without substituting retail `.eng` sounds.
+/// Preserves co-driver voice and modular surface feedback even when FSB5 Vorbis is muted.
+pub fn init_rsf_fmod(
+    documents: &Path,
+    vehicle: &rerbr_content::VehicleDescriptor,
+    sample_rate: u32,
+) -> String {
+    let report = super::fmod_audit::inspect_bank(&documents.join("RBR"), &vehicle.audio_index);
+    let summary = report.summary();
+    let rt = runtime();
+    if let Ok(mut lock) = rt.lock() {
+        lock.sample_rate = sample_rate;
+        lock.car_audio = None;
+        lock.status = summary.clone();
+    }
+    summary
+}
+
+/// Update live surface, speed, slip, and ground contact telemetry for the modular surface channel.
+pub fn update_surface_state(
+    surface: SurfaceKind,
+    speed_mps: f32,
+    wheel_slip: f32,
+    grounded_wheels: usize,
+) {
+    if let Ok(mut lock) = runtime().try_lock() {
+        lock.surface_audio.surface = surface;
+        lock.surface_audio.speed_mps = if speed_mps.is_finite() {
+            speed_mps.max(0.0)
+        } else {
+            0.0
+        };
+        lock.surface_audio.slip = if wheel_slip.is_finite() {
+            wheel_slip.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        lock.surface_audio.grounded_wheels = grounded_wheels;
     }
 }
 
@@ -583,6 +707,11 @@ pub fn render(out: &mut [f32], frames: usize, sample_rate: u32) {
         if let Some(track) = lock.menu_music.as_mut() {
             track.mix_into(out, frames, sample_rate, music_vol);
         }
+    }
+    if !lock.paused && lock.volume > 0.0 {
+        let vol = lock.volume;
+        let is_cockpit = lock.is_cockpit;
+        lock.surface_audio.mix_into(out, frames, vol, is_cockpit);
     }
     if !lock.paused && lock.codriver_volume > 0.0 {
         let codriver_vol = lock.codriver_volume;
