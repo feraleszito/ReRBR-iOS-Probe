@@ -103,6 +103,7 @@ pub struct Runtime {
     pub ngp_experimental: bool,
     pub focus_diagnostics: Option<ngp_experimental::FocusDiagnosticsReport>,
     pub experimental_visual_only: bool,
+    pub experimental_physics_reason: Option<String>,
     pub visual_start_pose: Option<(Vec3, Vec3)>,
     pub gamepad: gamepad::GamepadRuntime,
     gamepad_started: Instant,
@@ -209,6 +210,7 @@ impl Runtime {
             ngp_experimental: settings.ngp_experimental,
             focus_diagnostics: None,
             experimental_visual_only: false,
+            experimental_physics_reason: None,
             visual_start_pose: None,
             gamepad: gamepad::GamepadRuntime::load(),
             gamepad_started: Instant::now(),
@@ -425,6 +427,21 @@ impl Runtime {
         }
         self.focus_diagnostics = Some(report);
     }
+    /// Always inspects the currently selected vehicle (used by StartRally / Restart so
+    /// an unrelated `inspected_vehicle` index in Garage can never override the active car).
+    fn refresh_diagnostics_for_selected(&mut self) {
+        let doc = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from);
+        let active_now = !matches!(self.race.phase, race::Phase::Idle | race::Phase::Finished);
+        self.capture_session_snapshot(active_now);
+        let mut report = ngp_experimental::FocusDiagnosticsReport::inspect(
+            doc.as_deref(),
+            &self.selection.vehicle,
+        );
+        if let Some(snap) = &self.last_session_snapshot {
+            report.apply_session_snapshot(snap);
+        }
+        self.focus_diagnostics = Some(report);
+    }
     pub fn selection(&self) -> &rerbr_content::Selection {
         &self.selection
     }
@@ -437,6 +454,7 @@ impl Runtime {
         self.cockpit_ready = false;
         self.cockpit_error = None;
         self.experimental_visual_only = false;
+        self.experimental_physics_reason = None;
         self.visual_start_pose = None;
         self.steering_angle = 0.0;
         self.controls.clear();
@@ -581,19 +599,28 @@ impl Runtime {
                 if let Err(error) = result {
                     self.message = Some(error);
                 } else if self.selection.vehicle.is_ngp_experimental_car() {
-                    self.refresh_focus_diagnostics();
+                    self.refresh_diagnostics_for_selected();
                     let can_visual = self
                         .focus_diagnostics
                         .as_ref()
                         .is_some_and(|r| r.can_enter_visual_mode());
                     if !can_visual {
-                        self.message = Some("FOCUS NGP BLOQUEADO - REVISA EL DIAGNÓSTICO".into());
+                        let reason = self
+                            .focus_diagnostics
+                            .as_ref()
+                            .and_then(|r| r.boot_blocker_reason())
+                            .unwrap_or_else(|| "REVISA EL DIAGNÓSTICO".into());
+                        self.message = Some(format!("NGP BLOQUEADO ({reason})"));
                         self.menu.open(menu::Page::NgpExperimental);
                     } else {
                         let pack_path = self
                             .focus_diagnostics
                             .as_ref()
                             .and_then(|r| r.can_boot_ngp_pack().cloned());
+                        let blocker_reason = self
+                            .focus_diagnostics
+                            .as_ref()
+                            .and_then(|r| r.boot_blocker_reason());
                         audio::set_menu_music_active(false);
                         audio::set_paused(true);
                         audio::set_codriver_active(false);
@@ -619,6 +646,12 @@ impl Runtime {
                         self.school_incident_banner = None;
                         if let Some(pack) = pack_path {
                             self.experimental_visual_only = false;
+                            self.experimental_physics_reason = None;
+                            eprintln!(
+                                "experimental-ngp BOOT: {} pack={}",
+                                self.selection.vehicle.id,
+                                pack.display()
+                            );
                             self.worker = worker::Worker::new_experimental_pack_with_aids(
                                 self.selection.clone(),
                                 pack,
@@ -626,7 +659,14 @@ impl Runtime {
                                 self.clutch_help,
                             );
                         } else {
+                            let reason = blocker_reason
+                                .unwrap_or_else(|| "PAQUETE NGP O BACKEND NO DISPONIBLE".into());
+                            eprintln!(
+                                "experimental-ngp VISUAL-ONLY: {} reason={reason}",
+                                self.selection.vehicle.id
+                            );
                             self.experimental_visual_only = true;
+                            self.experimental_physics_reason = Some(reason);
                             self.worker = worker::Worker::idle();
                         }
                         self.pending_scene_action = Some(SceneAction::Load {
@@ -701,13 +741,14 @@ impl Runtime {
                 self.active_school_result = None;
                 self.school_incident_banner = None;
                 if self.selection.vehicle.is_ngp_experimental_car() {
-                    self.refresh_focus_diagnostics();
+                    self.refresh_diagnostics_for_selected();
                     if let Some(pack) = self
                         .focus_diagnostics
                         .as_ref()
                         .and_then(|r| r.can_boot_ngp_pack().cloned())
                     {
                         self.experimental_visual_only = false;
+                        self.experimental_physics_reason = None;
                         self.worker = worker::Worker::new_experimental_pack_with_aids(
                             self.selection.clone(),
                             pack,
@@ -715,7 +756,13 @@ impl Runtime {
                             self.clutch_help,
                         );
                     } else {
+                        let reason = self
+                            .focus_diagnostics
+                            .as_ref()
+                            .and_then(|r| r.boot_blocker_reason())
+                            .unwrap_or_else(|| "PAQUETE NGP O BACKEND NO DISPONIBLE".into());
                         self.experimental_visual_only = true;
+                        self.experimental_physics_reason = Some(reason);
                         self.worker = worker::Worker::idle();
                     }
                 } else if let Some(lesson_idx) = self.active_school_lesson {
@@ -1478,8 +1525,16 @@ impl Runtime {
                                 self.selection.stage.id
                             ),
                             format!(
-                                "OPCIONES: clutch_help={} ngp_experimental={}",
-                                self.clutch_help, self.ngp_experimental
+                                "OPCIONES: clutch_help={} ngp_experimental={} visual_only={}",
+                                self.clutch_help,
+                                self.ngp_experimental,
+                                self.experimental_visual_only
+                            ),
+                            format!(
+                                "ESTADO FÍSICA NGP: {}",
+                                self.experimental_physics_reason
+                                    .as_deref()
+                                    .unwrap_or("SIN SESIÓN EXPERIMENTAL ACTIVA")
                             ),
                             format!("AUDIO STATUS: {}", audio::status()),
                             format!("MUSIC STATUS: {}", audio::menu_music_status()),
@@ -1663,9 +1718,16 @@ impl Runtime {
                 if let Some(diag) = &mut self.focus_diagnostics {
                     diag.record_physics_failure(&err);
                 }
+                let reason = format!("FALLO BACKEND NGP: {err}");
+                eprintln!(
+                    "experimental-ngp RUNTIME FAILURE: {} -> {reason}",
+                    self.selection.vehicle.id
+                );
                 self.experimental_visual_only = true;
-                self.message = Some(format!("SIN FÍSICA NGP ({err}) -> MODO VISUAL"));
+                self.experimental_physics_reason = Some(reason.clone());
+                self.message = Some(format!("{reason} -> MODO VISUAL"));
             } else if !self.experimental_visual_only && state.rest.is_some() {
+                self.experimental_physics_reason = Some("FÍSICA NGP CARGADA CORRECTAMENTE".into());
                 if let Some(diag) = &mut self.focus_diagnostics {
                     diag.record_physics_ready();
                 }
@@ -2593,14 +2655,21 @@ impl Runtime {
             banners.push(("FALSE START +10s".into(), BAD));
         }
         if self.experimental_visual_only {
-            banners.push((
-                "MODO VISUAL EXPERIMENTAL — SIN FÍSICA NGP (FMOD SILENCIADO)".into(),
-                BAD,
-            ));
+            let detail = self
+                .experimental_physics_reason
+                .as_deref()
+                .unwrap_or("SIN FÍSICA NGP");
+            banners.push((format!("MODO VISUAL EXPERIMENTAL — {detail}"), BAD));
         } else if self.selection.vehicle.is_ngp_experimental_car() {
+            let fmod_tag = if audio::fmod_runtime_snapshot().is_some_and(|s| s.decoded_samples > 0)
+            {
+                "FMOD ACTIVO"
+            } else {
+                "SIN FMOD"
+            };
             banners.push((
                 format!(
-                    "RSF NGP 7.4 ACTIVO: {} (FMOD SILENCIADO)",
+                    "RSF NGP 7.4 ACTIVO: {} ({fmod_tag})",
                     self.selection.vehicle.name
                 ),
                 WARN,
@@ -3537,6 +3606,72 @@ mod reload_tests {
         assert!(
             !app.draws_interior(),
             "exterior replay cameras must never hide bumpers or wheels behind CockpitFallback"
+        );
+    }
+
+    #[test]
+    fn start_rally_from_ngp_page_diagnoses_selected_vehicle_and_preserves_visual_only_reason() {
+        let mut app = Runtime::new();
+        app.worker.shutdown();
+        app.worker = worker::Worker::idle();
+        app.ngp_experimental = true;
+
+        let mut yaris = rerbr_content::VehicleDescriptor::ford_focus_2006();
+        yaris.id = "rsf-toyota-gr-yaris-rally2".into();
+        yaris.name = "Toyota GR Yaris Rally2".into();
+        yaris.model = "Cars/yaris_rally2/yaris_rally2.sgc".into();
+        yaris.rsf_pack = Some("Toyota_GR_Yaris_Rally2_ngp7".into());
+
+        app.configure_selection(rerbr_content::Selection {
+            vehicle: yaris.clone(),
+            ..app.selection.clone()
+        })
+        .unwrap();
+
+        // Simulate being on NgpExperimental while inspected_vehicle points to index 0 (Corolla),
+        // not the selected Yaris.
+        app.menu.page = menu::Page::NgpExperimental;
+        app.menu.inspected_vehicle = 0;
+
+        app.apply_command(menu::Command::StartRally);
+        assert_eq!(
+            app.focus_diagnostics
+                .as_ref()
+                .map(|r| r.vehicle_id.as_str()),
+            Some("rsf-toyota-gr-yaris-rally2"),
+            "StartRally must diagnose selection.vehicle, never menu.inspected_vehicle"
+        );
+        // Without RERBR_PROBE_DOCUMENTS, StartRally blocks cleanly with an explicit reason
+        // instead of silently substituting another vehicle.
+        assert!(
+            app.message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("NGP BLOQUEADO")),
+            "expected explicit NGP BLOQUEADO message, got {:?}",
+            app.message
+        );
+
+        // Simulate runtime NGP boot error during Loading: sync_race_state must enter
+        // visual-only mode AND preserve the exact error in experimental_physics_reason
+        // across Loading -> Driving (never wiping it).
+        app.menu.show(menu::Page::Loading);
+        app.experimental_visual_only = false;
+        app.experimental_physics_reason = None;
+        {
+            let mut st = app.worker.state.lock().unwrap();
+            st.error = Some("CAR PACK: PAQUETE PRESENTE PERO INCOMPLETO".into());
+        }
+        let layout = DrivingLayout::default();
+        app.install_pivots([Vec3::ZERO; 4]);
+        app.sync_race_state(Instant::now(), 1.0 / 60.0, &layout, true);
+        assert_eq!(app.menu.page, menu::Page::Driving);
+        assert!(app.experimental_visual_only);
+        assert!(
+            app.experimental_physics_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("INCOMPLETO")),
+            "Loading -> Driving must preserve experimental_physics_reason, got {:?}",
+            app.experimental_physics_reason
         );
     }
 }

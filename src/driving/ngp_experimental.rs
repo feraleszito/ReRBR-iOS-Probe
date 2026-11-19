@@ -248,42 +248,48 @@ impl FocusDiagnosticsReport {
             false
         };
 
-        // 3. CAR PACK (rsfdata/cars/<pack> or Ford_Focus_*_ngp6)
-        let pack_path = find_pack_for(&rbr_root, vehicle);
+        // 3. CAR PACK (rsfdata/cars/<pack> with nested iPadOS unzip & .zip support)
+        let pack_state = inspect_pack_state(&rbr_root, vehicle);
+        let mut pack_path: Option<PathBuf> = None;
         let mut car_pack_ok = false;
-        if let Some(ref p) = pack_path {
-            match Pack::open(p).and_then(|pack| {
-                pack.read("common.lsp")?;
-                pack.read("gravel.lsp")?;
-                Ok(())
-            }) {
-                Ok(()) => {
-                    car_pack_ok = true;
-                    let summary = ngp_proto::inspect_pack_path(p)
-                        .or_else(|| ngp_proto::inspect_vehicle_in_documents(doc_root, vehicle))
-                        .map(|s| format!("{} | {:.0}KG", s.physics_summary(), s.mass_kg))
-                        .unwrap_or_else(|| "PACK NGP LEGIBLE".into());
-                    steps.push(DiagnosticStep {
-                        stage: "CAR PACK",
-                        status: DiagnosticStatus::Ok,
-                        detail: summary,
-                    });
-                }
-                Err(err) => {
-                    steps.push(DiagnosticStep {
-                        stage: "CAR PACK",
-                        status: DiagnosticStatus::Blocked,
-                        detail: err,
-                    });
-                }
+        match &pack_state {
+            PackAuditState::Ready { path } => {
+                car_pack_ok = true;
+                pack_path = Some(path.clone());
+                let summary = ngp_proto::inspect_pack_path(path)
+                    .or_else(|| ngp_proto::inspect_vehicle_in_documents(doc_root, vehicle))
+                    .map(|s| format!("{} | {:.0}KG", s.physics_summary(), s.mass_kg))
+                    .unwrap_or_else(|| "PACK NGP LEGIBLE".into());
+                steps.push(DiagnosticStep {
+                    stage: "CAR PACK",
+                    status: DiagnosticStatus::Ok,
+                    detail: summary,
+                });
             }
-        } else {
-            let expected = vehicle.rsf_pack.as_deref().unwrap_or("Ford_Focus_*_ngp6");
-            steps.push(DiagnosticStep {
-                stage: "CAR PACK",
-                status: DiagnosticStatus::Blocked,
-                detail: format!("NO ENCONTRADO rsfdata/cars/{expected}"),
-            });
+            PackAuditState::Missing { expected } => {
+                steps.push(DiagnosticStep {
+                    stage: "CAR PACK",
+                    status: DiagnosticStatus::Blocked,
+                    detail: format!("PAQUETE NGP AUSENTE: rsfdata/cars/{expected}"),
+                });
+            }
+            PackAuditState::Incomplete { missing_files, .. } => {
+                steps.push(DiagnosticStep {
+                    stage: "CAR PACK",
+                    status: DiagnosticStatus::Blocked,
+                    detail: format!(
+                        "PAQUETE PRESENTE PERO INCOMPLETO (FALTA {})",
+                        missing_files.join(", ")
+                    ),
+                });
+            }
+            PackAuditState::Incompatible { reason, .. } => {
+                steps.push(DiagnosticStep {
+                    stage: "CAR PACK",
+                    status: DiagnosticStatus::Blocked,
+                    detail: format!("PAQUETE PRESENTE PERO INCOMPATIBLE ({reason})"),
+                });
+            }
         }
 
         // 4. NGP DATA (Plugins/NGP.dll + physics.rbz revision)
@@ -861,26 +867,192 @@ impl FocusDiagnosticsReport {
             None
         }
     }
+
+    /// Concise root-cause summary explaining why NGP physics could not boot (or why visual-only mode activated).
+    pub fn boot_blocker_reason(&self) -> Option<String> {
+        if self.can_boot_ngp_pack().is_some() {
+            return None;
+        }
+        for stage in [
+            "CAR PACK",
+            "NGP DATA",
+            "NGP BACKEND",
+            "CAR FILES",
+            "CAR MODEL",
+        ] {
+            if let Some(step) = self.steps.iter().find(|s| s.stage == stage) {
+                if step.status != DiagnosticStatus::Ok {
+                    return Some(format!("{stage}: {}", step.detail));
+                }
+            }
+        }
+        Some("BACKEND NGP NO DISPONIBLE".into())
+    }
+}
+
+/// 4-way pre-boot NGP pack status (paired with runtime backend errors and loaded state for full 5-way reporting).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackAuditState {
+    Missing {
+        expected: String,
+    },
+    Incomplete {
+        path: PathBuf,
+        missing_files: Vec<&'static str>,
+    },
+    Incompatible {
+        path: PathBuf,
+        reason: String,
+    },
+    Ready {
+        path: PathBuf,
+    },
+}
+
+const REQUIRED_PACK_FILES: [&str; 4] = [
+    "common.lsp",
+    "gravel.lsp",
+    "r_gravel.lsp",
+    "setups/d_gravel.lsp",
+];
+
+fn validate_pack_candidate(path: &Path) -> PackAuditState {
+    let pack = match Pack::open(path) {
+        Ok(p) => p,
+        Err(reason) => {
+            return PackAuditState::Incompatible {
+                path: path.to_path_buf(),
+                reason,
+            };
+        }
+    };
+    let mut missing = Vec::new();
+    for rel in REQUIRED_PACK_FILES {
+        match pack.read(rel) {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                if rerbr_sim::rbr_formats::lsp::parse(&text).is_err() {
+                    return PackAuditState::Incompatible {
+                        path: path.to_path_buf(),
+                        reason: format!("{rel}: sintaxis LSP no válida"),
+                    };
+                }
+            }
+            Err(err) if err.contains("RSF-encrypted") => {
+                return PackAuditState::Incompatible {
+                    path: path.to_path_buf(),
+                    reason: err,
+                };
+            }
+            Err(_) => {
+                missing.push(rel);
+            }
+        }
+    }
+    if missing.is_empty() {
+        PackAuditState::Ready {
+            path: path.to_path_buf(),
+        }
+    } else {
+        PackAuditState::Incomplete {
+            path: path.to_path_buf(),
+            missing_files: missing,
+        }
+    }
+}
+
+/// Expands a directory candidate to also probe 1-level nested subdirectories (classic iPadOS Files unzip layout
+/// where `Pack.zip` containing `Pack/common.lsp` unpacks into `Pack/Pack/common.lsp`).
+fn expand_candidate_paths(resolved: PathBuf, expected_name: &str) -> Vec<PathBuf> {
+    let mut out = vec![resolved.clone()];
+    if resolved.is_dir() {
+        if let Some(same_child) = cars::resolve(&resolved, expected_name) {
+            if same_child.is_dir() {
+                out.push(same_child);
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&resolved) {
+            let subdirs: Vec<PathBuf> = entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| !n.eq_ignore_ascii_case("setups") && !n.starts_with('.'))
+                })
+                .collect();
+            for sub in subdirs {
+                if !out.contains(&sub) {
+                    out.push(sub);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Resolves and audits an RSF NGP pack by name under `Documents/RBR`, distinguishing:
+/// missing pack, incomplete pack, incompatible pack, and valid ready pack (including nested iPadOS folders & `.zip`).
+pub fn resolve_named_pack_state(rbr_root: &Path, pack_name: &str) -> PackAuditState {
+    let mut best_problem: Option<PackAuditState> = None;
+    let rels = [
+        format!("rsfdata/cars/{pack_name}"),
+        format!("rsfdata/cars/{pack_name}.zip"),
+        format!("cars/{pack_name}"),
+        format!("cars/{pack_name}.zip"),
+    ];
+    for rel in rels {
+        let Some(resolved) = cars::resolve(rbr_root, &rel) else {
+            continue;
+        };
+        for candidate in expand_candidate_paths(resolved, pack_name) {
+            match validate_pack_candidate(&candidate) {
+                ready @ PackAuditState::Ready { .. } => return ready,
+                other => {
+                    if best_problem.is_none()
+                        || matches!(other, PackAuditState::Incompatible { .. })
+                    {
+                        best_problem = Some(other);
+                    }
+                }
+            }
+        }
+    }
+    best_problem.unwrap_or_else(|| PackAuditState::Missing {
+        expected: pack_name.to_string(),
+    })
+}
+
+/// Audits the NGP pack for a specific vehicle descriptor.
+pub fn inspect_pack_state(rbr_root: &Path, vehicle: &VehicleDescriptor) -> PackAuditState {
+    if let Some(pack_name) = vehicle.rsf_pack.as_deref() {
+        let state = resolve_named_pack_state(rbr_root, pack_name);
+        if matches!(state, PackAuditState::Ready { .. }) || vehicle.id != "ford-focus-rs-wrc-2006" {
+            return state;
+        }
+    }
+    if vehicle.id == "ford-focus-rs-wrc-2006" {
+        if let Some(path) = find_focus_pack(rbr_root) {
+            return validate_pack_candidate(&path);
+        }
+    }
+    PackAuditState::Missing {
+        expected: vehicle
+            .rsf_pack
+            .clone()
+            .unwrap_or_else(|| "Ford_Focus_*_ngp6".into()),
+    }
 }
 
 /// Discover NGP physics pack folder or zip for a specific RSF vehicle under `Documents/RBR`.
 pub fn find_pack_for(rbr_root: &Path, vehicle: &VehicleDescriptor) -> Option<PathBuf> {
-    if let Some(pack_name) = vehicle.rsf_pack.as_deref() {
-        for rel in [
-            format!("rsfdata/cars/{pack_name}"),
-            format!("rsfdata/cars/{pack_name}.zip"),
-            format!("cars/{pack_name}"),
-            format!("cars/{pack_name}.zip"),
-        ] {
-            if let Some(resolved) = cars::resolve(rbr_root, &rel) {
-                return Some(resolved);
-            }
-        }
+    match inspect_pack_state(rbr_root, vehicle) {
+        PackAuditState::Ready { path }
+        | PackAuditState::Incomplete { path, .. }
+        | PackAuditState::Incompatible { path, .. } => Some(path),
+        PackAuditState::Missing { .. } => None,
     }
-    if vehicle.id == "ford-focus-rs-wrc-2006" {
-        return find_focus_pack(rbr_root);
-    }
-    None
 }
 
 /// Discover optional Ford Focus 2006 NGP pack directory or zip in `Documents/RBR`.

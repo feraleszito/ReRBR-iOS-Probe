@@ -326,18 +326,10 @@ pub fn inspect_vehicle_in_documents(
     if let Some(pack_name) = vehicle.rsf_pack.as_deref().or_else(|| {
         (vehicle.id == "ford-focus-rs-wrc-2006").then_some("Ford_Focus_Mk_II_RS_WRC_2006_ngp6")
     }) {
-        let pack_candidates = [
-            install.join("rsfdata/cars").join(pack_name),
-            install
-                .join("rsfdata/cars")
-                .join(format!("{pack_name}.zip")),
-            install.join("cars").join(pack_name),
-            install.join("cars").join(format!("{pack_name}.zip")),
-        ];
-        for path in pack_candidates {
-            if let Some(sheet) = inspect_pack_path(&path) {
-                return Some(sheet);
-            }
+        if let super::ngp_experimental::PackAuditState::Ready { path } =
+            super::ngp_experimental::resolve_named_pack_state(&install, pack_name)
+        {
+            return inspect_pack_path(&path);
         }
         return None;
     }

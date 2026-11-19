@@ -164,7 +164,7 @@ impl Session {
             .model
             .rsplit(['\\', '/'])
             .next()
-            .and_then(|s| s.strip_suffix(".sgc"))
+            .and_then(|s| s.strip_suffix(".sgc").or_else(|| s.strip_suffix(".SGC")))
             .unwrap_or("focus06");
         let entry = rbr_formats::car_pack::model_entry(folder, stem);
         let data = base_data.with_car(paths.install.clone(), entry);
@@ -342,7 +342,11 @@ impl Session {
         pure::set_app_state(&mut playback.pure.mem.clone(), stage.state().value());
         let ratios = diagnostics::gear_ratios(&playback)?;
         if ratios.len() != selection.vehicle.forward_gears as usize + 2 {
-            return Err("selected vehicle descriptor disagrees with original gearbox gear count".into());
+            return Err(format!(
+                "selected vehicle descriptor disagrees with original gearbox gear count (descriptor={} + 2, physics={})",
+                selection.vehicle.forward_gears,
+                ratios.len()
+            ));
         }
         if aids.automatic {
             let audit = diagnostics::gearbox_audit(&playback);
@@ -1115,6 +1119,187 @@ mod surface_tests {
                 st.target_distance
             );
             assert!(session.sample().rpm > 800.0, "lesson {idx} engine stalled");
+        }
+    }
+
+    #[test]
+    fn toyota_yaris_rally2_and_wrc18_boot_components_audit() {
+        use rbr_formats::{car_pack::Pack, lsp, sgc};
+        use rbr_physics::load::car_grids;
+        use std::path::Path;
+
+        let rbr = Path::new(r"C:\Richard Burns Rally");
+        if !rbr.is_dir() {
+            return;
+        }
+        // 1. Check collision meshes + node animation tables for both Toyotas
+        for (label, rel) in [
+            ("Focus 2006", "Cars/FORD_FOCUS_2006/focus06.sgc"),
+            ("Yaris Rally2", "Cars/yaris_rally2/yaris_rally2.sgc"),
+            ("Yaris WRC 2018", "Cars/YARIS_WRC18/yaris_wrc.sgc"),
+        ] {
+            let path = rbr.join(rel);
+            if !path.is_file() {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let elems = sgc::parse(&bytes).unwrap_or_else(|e| panic!("{label} sgc::parse failed: {e}"));
+            let bodies: Vec<sgc::Collision> = elems
+                .into_iter()
+                .filter_map(|e| match e {
+                    sgc::Element::Collision(c) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            let col_names: Vec<&str> = bodies.iter().map(|b| b.node.name.as_str()).collect();
+            let meshes = car_grids::car_meshes(&bodies);
+            let nodes = crate::handles::CarNodes::new(&bytes);
+            let mut mem = rbr_physics::mem::Mem::default();
+            for (at, size) in rbr_formats::exe_data::SECTIONS {
+                mem.map(at, &vec![0; size as usize]);
+            }
+            for &(at, words) in rbr_formats::exe_data::RUNS {
+                mem.map(at, &words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>());
+            }
+            let handle_results: Vec<String> = match &nodes {
+                Ok(n) => crate::boot::CAR_PARTS
+                    .iter()
+                    .filter_map(|p| {
+                        let node_name = p.node?;
+                        match n.handle(&mem, node_name, 4, 1) {
+                            Ok(h) => Some(format!("{node_name}={h}")),
+                            Err(e) => Some(format!("{node_name}=ERR({e})")),
+                        }
+                    })
+                    .collect(),
+                Err(e) => vec![format!("NODES_ERR({e})")],
+            };
+            eprintln!(
+                "BOOT MODEL AUDIT [{label}]: collision_bodies={:?} car_meshes_ok={} car_meshes_len={:?} handles={:?}",
+                col_names,
+                meshes.is_some(),
+                meshes.as_ref().map(Vec::len),
+                handle_results,
+            );
+        }
+
+        // 2. Check Toyota_GR_Yaris_Rally2_ngp7 AND Yaris WRC 2018 (rsfdata/Physics/t_coroll)
+        // through real rbr_physics::load (physics_file, setup_file, options_file, select_drive_options, etc.)!
+        let physics_rbz = rbr.join("physics.rbz");
+        let misc_rbz = rbr.join("misc.rbz");
+        for (label, pack_dir) in [
+            ("Focus 2006 NGP6", rbr.join("rsfdata/cars/Ford_Focus_Mk_II_RS_WRC_2006_ngp6")),
+            ("Yaris Rally2 NGP7", rbr.join("rsfdata/cars/Toyota_GR_Yaris_Rally2_ngp7")),
+            ("Yaris WRC 2018 NGP6", rbr.join("rsfdata/cars/Toyota_Yaris_WRC_2018_ngp6")),
+        ] {
+            if !pack_dir.is_dir() || !physics_rbz.is_file() || !misc_rbz.is_file() {
+                continue;
+            }
+            let pack = Pack::open(&pack_dir).unwrap();
+            for surface in ["gravel", "tarmac", "snow"] {
+                let audit = crate::physics_audit::inspect_pack(&physics_rbz, &pack, surface);
+                eprintln!("PACK AUDIT [{label}] ({surface}): {audit:?}");
+
+                // Run real rbr_physics::load!
+                let mut mem = rbr_physics::mem::Mem::default();
+                for (at, size) in rbr_formats::exe_data::SECTIONS {
+                    mem.map(at, &vec![0; size as usize]);
+                }
+                for &(at, words) in rbr_formats::exe_data::RUNS {
+                    mem.map(at, &words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>());
+                }
+                let next = std::rc::Rc::new(std::cell::Cell::new(0x2000_0000u32));
+                struct SimpleFiles(std::rc::Rc<std::cell::Cell<u32>>);
+                impl SimpleFiles {
+                    fn take(&mut self, mem: &mut rbr_physics::mem::Mem, size: u32) -> u32 {
+                        let at = self.0.get();
+                        let aligned = (size.max(1) + 0xfff) & !0xfff;
+                        mem.map(at, &vec![0; aligned as usize]);
+                        self.0.set(at + aligned);
+                        at
+                    }
+                }
+                impl rbr_physics::ntweak::ApplyHost for SimpleFiles {
+                    fn alloc_name(&mut self, mem: &mut rbr_physics::mem::Mem, len: u32) -> u32 {
+                        self.take(mem, len)
+                    }
+                    fn after_parse(&mut self, _: &mut rbr_physics::mem::Mem, _: u32) {}
+                    fn def_index(&mut self, _: &rbr_physics::mem::Mem, _: &str) -> Option<u32> {
+                        None
+                    }
+                    fn define(
+                        &mut self,
+                        _: &mut rbr_physics::mem::Mem,
+                        _: &str,
+                        _: u32,
+                        _: &str,
+                        _: &[lsp::Node],
+                    ) -> Result<(), rbr_physics::ntweak::Unsupported> {
+                        unreachable!()
+                    }
+                }
+                impl rbr_physics::physics_core::layout::construct::Heap for SimpleFiles {
+                    fn alloc(&mut self, mem: &mut rbr_physics::mem::Mem, size: u32) -> u32 {
+                        self.take(mem, size)
+                    }
+                }
+                let mut files = SimpleFiles(next.clone());
+                let mut registry = rbr_physics::load::Registry::default();
+                let def = rbr_physics::load::new_physics_def(&mut mem, &mut files);
+                let read_rbz = |archive: &Path, entry: &str| -> Vec<lsp::Node> {
+                    use std::io::Read;
+                    let mut z = rbr_formats::rbz::open(archive).unwrap();
+                    let mut s = String::new();
+                    rbr_formats::rbz::by_name(&mut z, entry).unwrap().read_to_string(&mut s).unwrap();
+                    rbr_physics::load::root(&lsp::parse(&s).unwrap()).unwrap().to_vec()
+                };
+                let read_pack = |entry: &str| -> Vec<lsp::Node> {
+                    let b = pack.read(entry).unwrap();
+                    let s = String::from_utf8_lossy(&b);
+                    rbr_physics::load::root(&lsp::parse(&s).unwrap()).unwrap().to_vec()
+                };
+                let prime = read_rbz(&misc_rbz, "Misc/prime.lsp");
+                let phys_lsp = read_rbz(&physics_rbz, "Physics/physics.lsp");
+                let common = read_pack("common.lsp");
+                let surf = read_pack(&format!("{surface}.lsp"));
+                let setup = read_pack(&format!("setups/d_{surface}.lsp"));
+                let tyres = read_rbz(&physics_rbz, "Physics/pirelli/tyres.lsp");
+                let opts = read_pack(&format!("r_{surface}.lsp"));
+
+                let r_prime = rbr_physics::load::physics_file(&mut mem, &mut files, &mut registry, def, &prime);
+                let r_phys = rbr_physics::load::physics_file(&mut mem, &mut files, &mut registry, def, &phys_lsp);
+                let r_common = rbr_physics::load::physics_file(&mut mem, &mut files, &mut registry, def, &common);
+                let r_surf = rbr_physics::load::physics_file(&mut mem, &mut files, &mut registry, def, &surf);
+
+                let complete = files.take(&mut mem, rbr_physics::load::layout::COMPLETE_SETUP_SIZE);
+                let options = files.take(&mut mem, rbr_physics::load::layout::SETUP_OPTIONS_SIZE);
+                rbr_physics::load::construct_complete_setup(&mut mem, complete);
+                rbr_physics::load::construct_setup_options(&mut mem, options);
+                let r_setup = rbr_physics::load::setup_file(&mut mem, &mut files, complete, &setup);
+                let r_tyres = rbr_physics::load::options_file(&mut mem, &mut files, options, &tyres);
+                let r_opts = rbr_physics::load::options_file(&mut mem, &mut files, options, &opts);
+                let setups = rbr_physics::load::setups(complete);
+                let tyre_idx = crate::boot::default_tyre(surface);
+                rbr_physics::load::select_tyre_type(&mut mem, &setups, rbr_physics::load::tyre_type(options, tyre_idx));
+                rbr_physics::load::select_drive_options(
+                    &mut mem,
+                    setups.drive,
+                    rbr_physics::load::drive_options(options),
+                );
+                rbr_physics::load::select_top_mounts(&mut mem, &setups, options);
+                eprintln!(
+                    "LOAD [{label}] ({surface}): prime={r_prime:?} phys={r_phys:?} common={r_common:?} surf={r_surf:?} setup={r_setup:?} tyres={r_tyres:?} opts={r_opts:?}"
+                );
+                assert!(
+                    r_prime.is_ok()
+                        && r_phys.is_ok()
+                        && r_common.is_ok()
+                        && r_surf.is_ok()
+                        && r_setup.is_ok()
+                        && r_tyres.is_ok()
+                        && r_opts.is_ok()
+                );
+            }
         }
     }
 }

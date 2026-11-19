@@ -5,6 +5,7 @@
 //! correlates each pack with its 3D model, gearbox, FMOD audio bank, and NGP runtime compatibility,
 //! and emits validated descriptors without hardcoding individual RSF cars.
 
+use super::ngp_experimental::{resolve_named_pack_state, PackAuditState};
 use super::ngp_proto::{inspect_pack_path_result, VehicleTechSheet};
 use rerbr_content::{VehicleClassification, VehicleDescriptor};
 use rerbr_sim::rbr_formats::{
@@ -13,7 +14,7 @@ use rerbr_sim::rbr_formats::{
     cars::{self, CarEntry},
     ini, rsf,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -281,6 +282,7 @@ pub fn discover(rbr_root: &Path) -> Vec<DiscoveredRsfVehicle> {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| cars::parse(&t).ok())
         .unwrap_or_default();
+    let audiobanks = load_audiobank_map(rbr_root);
 
     let mut out = Vec::new();
     let mut seen_packs: BTreeSet<String> = BTreeSet::new();
@@ -288,30 +290,37 @@ pub fn discover(rbr_root: &Path) -> Vec<DiscoveredRsfVehicle> {
 
     if let Ok(install) = rsf::Install::open(rbr_root) {
         for car in &install.cars {
-            let mut item = if let Some(pack_path) = resolve_pack_in(&packs_root, &car.pack) {
-                seen_packs.insert(car.pack.to_ascii_lowercase());
-                build_rsf_entry(
-                    rbr_root,
-                    Some(&install),
-                    car,
-                    &pack_path,
-                    &retail,
-                    ngp_runtime.as_ref().err().cloned(),
-                )
-            } else {
-                // If NGP pack is absent on disk, surface the car honestly ONLY when its own 3D model
-                // exists in Cars/ (never fabricate physics or hide what is installed vs missing).
-                let Some(partial) = build_missing_pack_entry(
-                    rbr_root,
-                    &install,
-                    car,
-                    &retail,
-                    ngp_runtime.as_ref().err().cloned(),
-                ) else {
-                    continue;
-                };
-                seen_packs.insert(car.pack.to_ascii_lowercase());
-                partial
+            let mut item = match resolve_named_pack_state(rbr_root, &car.pack) {
+                PackAuditState::Ready { path }
+                | PackAuditState::Incomplete { path, .. }
+                | PackAuditState::Incompatible { path, .. } => {
+                    seen_packs.insert(car.pack.to_ascii_lowercase());
+                    build_rsf_entry(
+                        rbr_root,
+                        Some(&install),
+                        car,
+                        &path,
+                        &retail,
+                        &audiobanks,
+                        ngp_runtime.as_ref().err().cloned(),
+                    )
+                }
+                PackAuditState::Missing { .. } => {
+                    // If NGP pack is absent on disk, surface the car honestly ONLY when its own 3D model
+                    // exists in Cars/ (never fabricate physics or hide what is installed vs missing).
+                    let Some(partial) = build_missing_pack_entry(
+                        rbr_root,
+                        &install,
+                        car,
+                        &retail,
+                        &audiobanks,
+                        ngp_runtime.as_ref().err().cloned(),
+                    ) else {
+                        continue;
+                    };
+                    seen_packs.insert(car.pack.to_ascii_lowercase());
+                    partial
+                }
             };
             dedup_id(&mut item.descriptor.id, &mut seen_ids);
             if item.descriptor.validate_schema().is_ok() {
@@ -339,9 +348,12 @@ pub fn discover(rbr_root: &Path) -> Vec<DiscoveredRsfVehicle> {
             if !path.is_dir() && !raw_name.to_ascii_lowercase().ends_with(".zip") {
                 continue;
             }
-            if Pack::open(&path).is_err() {
-                continue;
-            }
+            let resolved_pack = match resolve_named_pack_state(rbr_root, &pack_name) {
+                PackAuditState::Ready { path: p }
+                | PackAuditState::Incomplete { path: p, .. }
+                | PackAuditState::Incompatible { path: p, .. } => p,
+                PackAuditState::Missing { .. } => continue,
+            };
             seen_packs.insert(pack_name.to_ascii_lowercase());
             let synthetic_car = rsf::Car {
                 id: 0,
@@ -358,8 +370,9 @@ pub fn discover(rbr_root: &Path) -> Vec<DiscoveredRsfVehicle> {
                 rbr_root,
                 None,
                 &synthetic_car,
-                &path,
+                &resolved_pack,
                 &retail,
+                &audiobanks,
                 ngp_runtime.as_ref().err().cloned(),
             );
             dedup_id(&mut item.descriptor.id, &mut seen_ids);
@@ -373,6 +386,42 @@ pub fn discover(rbr_root: &Path) -> Vec<DiscoveredRsfVehicle> {
     out
 }
 
+/// Parses RSF's official `rsfdata/cache/audiobank.ini` (`[Car<id>]` -> `audiobank = <bank>`),
+/// which RSF uses to assign FMOD banks to vehicles whose `cars.json` `"audio"` field is `null`
+/// (e.g., Toyota Yaris WRC 2018 `[Car16]` -> `Fiesta_2019_WRC`).
+fn load_audiobank_map(rbr_root: &Path) -> BTreeMap<u32, String> {
+    let mut map = BTreeMap::new();
+    let Some(path) = cars::resolve(rbr_root, "rsfdata/cache/audiobank.ini") else {
+        return map;
+    };
+    let Ok(bytes) = std::fs::read(path) else {
+        return map;
+    };
+    let Ok(sections) = ini::parse(&String::from_utf8_lossy(&bytes)) else {
+        return map;
+    };
+    for sec in sections {
+        let Some(rest) = sec
+            .name
+            .strip_prefix("Car")
+            .or_else(|| sec.name.strip_prefix("car"))
+        else {
+            continue;
+        };
+        let Ok(id) = rest.trim().parse::<u32>() else {
+            continue;
+        };
+        if let Some(bank) = sec
+            .get("audiobank")
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+        {
+            map.insert(id, bank.to_string());
+        }
+    }
+    map
+}
+
 fn dedup_id(id: &mut String, seen: &mut BTreeSet<String>) {
     if seen.insert(id.clone()) {
         return;
@@ -384,10 +433,6 @@ fn dedup_id(id: &mut String, seen: &mut BTreeSet<String>) {
             return;
         }
     }
-}
-
-fn resolve_pack_in(packs_root: &Path, pack: &str) -> Option<PathBuf> {
-    cars::resolve(packs_root, pack).or_else(|| cars::resolve(packs_root, &format!("{pack}.zip")))
 }
 
 fn expected_own_model_entry(install: Option<&rsf::Install>, car: &rsf::Car) -> CarEntry {
@@ -481,6 +526,7 @@ fn build_rsf_entry(
     car: &rsf::Car,
     pack_path: &Path,
     retail: &[CarEntry],
+    audiobanks: &BTreeMap<u32, String>,
     ngp_err: Option<String>,
 ) -> DiscoveredRsfVehicle {
     let mut notes = Vec::new();
@@ -509,6 +555,7 @@ fn build_rsf_entry(
     let fmod_bank = car
         .audio
         .as_deref()
+        .or_else(|| audiobanks.get(&car.id).map(String::as_str))
         .map(|a| format!("AudioFMOD/{a}.bank"))
         .filter(|p| rerbr_content::validate_relative_path(p).is_ok())
         .or(fallback_audio_hint);
@@ -517,7 +564,9 @@ fn build_rsf_entry(
         .and_then(|p| cars::resolve(rbr_root, p))
         .is_some();
     if fmod_bank.is_none() {
-        notes.push("SIN BANCO FMOD ASIGNADO EN cars.json (NO USA AUDIO RETAIL)".into());
+        notes.push(
+            "SIN BANCO FMOD ASIGNADO EN cars.json / audiobank.ini (NO USA AUDIO RETAIL)".into(),
+        );
     } else if !fmod_present {
         notes.push(format!(
             "FALTA BANCO FMOD {}",
@@ -587,7 +636,7 @@ fn build_rsf_entry(
         fmod_present,
         using_fallback_model,
         model_missing,
-        pack_missing: false,
+        pack_missing: pack_readable.is_err(),
         notes,
     }
 }
@@ -597,6 +646,7 @@ fn build_missing_pack_entry(
     install: &rsf::Install,
     car: &rsf::Car,
     retail: &[CarEntry],
+    audiobanks: &BTreeMap<u32, String>,
     ngp_err: Option<String>,
 ) -> Option<DiscoveredRsfVehicle> {
     let mut notes = Vec::new();
@@ -614,6 +664,7 @@ fn build_missing_pack_entry(
     let fmod_bank = car
         .audio
         .as_deref()
+        .or_else(|| audiobanks.get(&car.id).map(String::as_str))
         .map(|a| format!("AudioFMOD/{a}.bank"))
         .filter(|p| rerbr_content::validate_relative_path(p).is_ok())
         .or(resolved.audio_hint);
@@ -705,9 +756,19 @@ mod tests {
         }
 
         let pack = rbr.join("rsfdata/cars/Ford_Focus_Mk_II_RS_WRC_2006_ngp6");
-        std::fs::create_dir_all(&pack).unwrap();
-        std::fs::write(pack.join("common.lsp"), b"CarName = Ford Focus\n").unwrap();
-        std::fs::write(pack.join("gravel.lsp"), b"NumberOfGears = 5\n").unwrap();
+        std::fs::create_dir_all(pack.join("setups")).unwrap();
+        for f in [
+            "common.lsp",
+            "gravel.lsp",
+            "r_gravel.lsp",
+            "setups/d_gravel.lsp",
+        ] {
+            std::fs::write(
+                pack.join(f),
+                b"((\"Car\" (\"CAR_ROOT\" NumberOfGears 7 InverseMass 0.000698)))",
+            )
+            .unwrap();
+        }
     }
 
     #[test]
@@ -845,7 +906,8 @@ mod tests {
         };
         let pack_root = rbr_root.join("rsfdata/cars");
 
-        for d in &discovered {
+        let installed_packs: Vec<_> = discovered.iter().filter(|d| !d.pack_missing).collect();
+        for d in &installed_packs {
             let model_res = crate::car::load_vehicle_for_mode(rbr_root, &d.descriptor, true);
             let fmod_res = d.fmod_bank.as_deref().map(|bank_rel| {
                 super::super::fmod_synth::FmodVehicleAudio::load_from_documents(
@@ -895,6 +957,18 @@ mod tests {
                 sim_str,
                 d.using_fallback_model
             );
+            assert!(
+                model_res.is_ok(),
+                "RSF installed car {} failed 3D model load: {model_str}",
+                d.descriptor.id
+            );
+            if d.fmod_present {
+                assert!(
+                    matches!(&fmod_res, Some(Ok(s)) if s.stats().decoded_samples > 0),
+                    "RSF installed car {} failed FMOD decode: {fmod_str}",
+                    d.descriptor.id
+                );
+            }
         }
     }
 
@@ -1025,6 +1099,119 @@ mod tests {
             .iter()
             .any(|n| n.contains("Toyota_Yaris_WRC_2018_ngp6")));
         assert!(!yaris.descriptor.audio_index.contains("Cars.ini"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolves_audiobank_ini_for_yaris_wrc_2018_and_nested_ipados_ngp7_pack() {
+        let root = std::env::temp_dir().join(format!(
+            "rerbr-toyota-audiobank-nested-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let rbr = root.join("RBR");
+        let cache = rbr.join("rsfdata/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("cars.json"),
+            r#"[
+                {"id":"16","name":"Toyota Yaris WRC 2018","path":"Toyota_Yaris_WRC_2018_ngp6","carmodel_id":"227","audio":null},
+                {"id":"107","name":"Toyota GR Yaris Rally2","path":"Toyota_GR_Yaris_Rally2_ngp7","carmodel_id":"264","audio":"Peugeot_208_Rally4"}
+            ]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cache.join("carmodels.json"),
+            r#"[
+                {"id":"227","name":"Toyota Yaris WRC 2018","path":"YARIS_WRC18","filename":"yaris_wrc","fallback":"5"},
+                {"id":"264","name":"Toyota GR Yaris Rally2","path":"yaris_rally2","filename":"yaris_rally2","fallback":"5"}
+            ]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cache.join("audiobank.ini"),
+            "[Car16]\r\naudiobank = Fiesta_2019_WRC\r\n[Car107]\r\naudiobank = Peugeot_208_Rally4\r\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(rbr.join("AudioFMOD")).unwrap();
+        std::fs::write(rbr.join("AudioFMOD/Fiesta_2019_WRC.bank"), b"RIFF").unwrap();
+        std::fs::write(rbr.join("AudioFMOD/Peugeot_208_Rally4.bank"), b"RIFF").unwrap();
+
+        // Yaris WRC 2018: normal flat NGP6 pack
+        let wrc_pack = rbr.join("rsfdata/cars/Toyota_Yaris_WRC_2018_ngp6");
+        std::fs::create_dir_all(wrc_pack.join("setups")).unwrap();
+        for f in [
+            "common.lsp",
+            "gravel.lsp",
+            "r_gravel.lsp",
+            "setups/d_gravel.lsp",
+        ] {
+            std::fs::write(
+                wrc_pack.join(f),
+                b"((\"Car\" (\"CAR_ROOT\" NumberOfGears 8 InverseMass 0.000719)))",
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(rbr.join("Cars/YARIS_WRC18")).unwrap();
+        std::fs::write(rbr.join("Cars/YARIS_WRC18/yaris_wrc.sgc"), b"yaris18").unwrap();
+
+        // Yaris Rally2: double-nested folder as produced when unzipping on iPadOS Files
+        let rally2_nested =
+            rbr.join("rsfdata/cars/Toyota_GR_Yaris_Rally2_ngp7/Toyota_GR_Yaris_Rally2_ngp7");
+        std::fs::create_dir_all(rally2_nested.join("setups")).unwrap();
+        for f in [
+            "common.lsp",
+            "gravel.lsp",
+            "r_gravel.lsp",
+            "setups/d_gravel.lsp",
+        ] {
+            std::fs::write(
+                rally2_nested.join(f),
+                b"((\"Car\" (\"CAR_ROOT\" NumberOfGears 7 InverseMass 0.000699)))",
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(rbr.join("Cars/yaris_rally2")).unwrap();
+        std::fs::write(rbr.join("Cars/yaris_rally2/yaris_rally2.sgc"), b"rally2").unwrap();
+
+        let discovered = discover(&rbr);
+        let wrc = discovered
+            .iter()
+            .find(|d| d.descriptor.id == "rsf-toyota-yaris-wrc-2018")
+            .expect("Yaris WRC 2018 discovered");
+        assert!(!wrc.pack_missing);
+        assert_eq!(wrc.descriptor.forward_gears, 6);
+        assert_eq!(
+            wrc.fmod_bank.as_deref(),
+            Some("AudioFMOD/Fiesta_2019_WRC.bank"),
+            "audiobank.ini must resolve FMOD bank when cars.json audio is null"
+        );
+        assert!(wrc.fmod_present);
+
+        let rally2 = discovered
+            .iter()
+            .find(|d| d.descriptor.id == "rsf-toyota-gr-yaris-rally2")
+            .expect("Yaris Rally2 discovered through nested iPadOS folder");
+        assert!(!rally2.pack_missing);
+        assert_eq!(rally2.descriptor.forward_gears, 5);
+        assert!(matches!(
+            resolve_named_pack_state(&rbr, "Toyota_GR_Yaris_Rally2_ngp7"),
+            PackAuditState::Ready { path } if path == rally2_nested
+        ));
+
+        // Verify incomplete pack detection explicitly
+        let incomplete_dir = rbr.join("rsfdata/cars/Incomplete_Test_ngp6");
+        std::fs::create_dir_all(&incomplete_dir).unwrap();
+        std::fs::write(incomplete_dir.join("common.lsp"), b"((\"Car\"))").unwrap();
+        assert!(matches!(
+            resolve_named_pack_state(&rbr, "Incomplete_Test_ngp6"),
+            PackAuditState::Incomplete { missing_files, .. } if missing_files.contains(&"gravel.lsp")
+        ));
+        assert!(matches!(
+            resolve_named_pack_state(&rbr, "NonExistent_ngp6"),
+            PackAuditState::Missing { .. }
+        ));
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

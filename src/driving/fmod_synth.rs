@@ -1042,13 +1042,19 @@ mod tests {
             ("AudioFMOD/Focus_Mk2_WRC.bank", 44usize),
             ("AudioFMOD/306_maxi_B.bank", 67usize),
             ("AudioFMOD/Peugeot_208_Rally4.bank", 48usize),
+            ("AudioFMOD/Fiesta_2019_WRC.bank", 0usize),
         ] {
             if !rbr.join(bank_name).is_file() {
                 continue;
             }
             let mut synth = FmodVehicleAudio::load_from_documents(rbr, bank_name, 44100).unwrap();
             let stats = synth.stats();
-            assert_eq!(stats.decoded_samples, expected_samples);
+            if expected_samples > 0 {
+                assert_eq!(stats.decoded_samples, expected_samples);
+            } else {
+                assert!(stats.decoded_samples > 0);
+                assert_eq!(stats.decoded_samples, stats.total_samples);
+            }
             assert!(!stats.active_events.is_empty());
 
             let rpms = [2000.0f32, 4000.0, 6000.0];
