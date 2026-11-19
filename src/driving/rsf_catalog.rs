@@ -27,6 +27,7 @@ pub struct DiscoveredRsfVehicle {
     pub fmod_present: bool,
     pub using_fallback_model: bool,
     pub model_missing: bool,
+    pub pack_missing: bool,
     pub notes: Vec<String>,
 }
 
@@ -287,18 +288,31 @@ pub fn discover(rbr_root: &Path) -> Vec<DiscoveredRsfVehicle> {
 
     if let Ok(install) = rsf::Install::open(rbr_root) {
         for car in &install.cars {
-            let Some(pack_path) = resolve_pack_in(&packs_root, &car.pack) else {
-                continue;
+            let mut item = if let Some(pack_path) = resolve_pack_in(&packs_root, &car.pack) {
+                seen_packs.insert(car.pack.to_ascii_lowercase());
+                build_rsf_entry(
+                    rbr_root,
+                    Some(&install),
+                    car,
+                    &pack_path,
+                    &retail,
+                    ngp_runtime.as_ref().err().cloned(),
+                )
+            } else {
+                // If NGP pack is absent on disk, surface the car honestly ONLY when its own 3D model
+                // exists in Cars/ (never fabricate physics or hide what is installed vs missing).
+                let Some(partial) = build_missing_pack_entry(
+                    rbr_root,
+                    &install,
+                    car,
+                    &retail,
+                    ngp_runtime.as_ref().err().cloned(),
+                ) else {
+                    continue;
+                };
+                seen_packs.insert(car.pack.to_ascii_lowercase());
+                partial
             };
-            seen_packs.insert(car.pack.to_ascii_lowercase());
-            let mut item = build_rsf_entry(
-                rbr_root,
-                Some(&install),
-                car,
-                &pack_path,
-                &retail,
-                ngp_runtime.as_ref().err().cloned(),
-            );
             dedup_id(&mut item.descriptor.id, &mut seen_ids);
             if item.descriptor.validate_schema().is_ok() {
                 out.push(item);
@@ -573,8 +587,79 @@ fn build_rsf_entry(
         fmod_present,
         using_fallback_model,
         model_missing,
+        pack_missing: false,
         notes,
     }
+}
+
+fn build_missing_pack_entry(
+    rbr_root: &Path,
+    install: &rsf::Install,
+    car: &rsf::Car,
+    retail: &[CarEntry],
+    ngp_err: Option<String>,
+) -> Option<DiscoveredRsfVehicle> {
+    let mut notes = Vec::new();
+    let resolved = resolve_model_entry(rbr_root, Some(install), car, retail, &mut notes);
+    if resolved.model_missing {
+        return None;
+    }
+    notes.insert(
+        0,
+        format!(
+            "FALTA PACK NGP rsfdata/cars/{} (MODELO 3D PROPIO PRESENTE)",
+            car.pack
+        ),
+    );
+    let fmod_bank = car
+        .audio
+        .as_deref()
+        .map(|a| format!("AudioFMOD/{a}.bank"))
+        .filter(|p| rerbr_content::validate_relative_path(p).is_ok())
+        .or(resolved.audio_hint);
+    let fmod_present = fmod_bank
+        .as_deref()
+        .and_then(|p| cars::resolve(rbr_root, p))
+        .is_some();
+    if fmod_bank.is_none() {
+        notes.push("SIN BANCO FMOD ASIGNADO EN cars.json (audio=null)".into());
+    } else if !fmod_present {
+        notes.push(format!(
+            "FALTA BANCO FMOD {}",
+            fmod_bank.as_deref().unwrap_or("")
+        ));
+    }
+    if let Some(err) = ngp_err {
+        notes.push(err);
+    }
+    let audio_index = fmod_bank
+        .clone()
+        .unwrap_or_else(|| "AudioFMOD/SIN_BANCO_FMOD.bank".into());
+    let descriptor = descriptor_from_entry(
+        rbr_root,
+        DescriptorMeta {
+            id: slugify_id(&car.name),
+            name: car.name.clone(),
+            category: car.group.clone(),
+            pack_name: car.pack.clone(),
+            forward_gears: 6,
+            audio_index: &audio_index,
+        },
+        &resolved.entry,
+    );
+    Some(DiscoveredRsfVehicle {
+        descriptor,
+        classification: VehicleClassification::VisualInspectionOnly,
+        tech_sheet: None,
+        drivetrain: car.drive_train.clone(),
+        year: car.year,
+        fmod_bank,
+        fmod_present,
+        using_fallback_model: false,
+        model_missing: false,
+        pack_missing: true,
+        notes,
+    })
 }
 
 #[cfg(test)]
@@ -881,6 +966,65 @@ mod tests {
             ds3.descriptor.audio_index
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rsf_car_with_own_model_but_missing_ngp_pack_is_surfaced_as_missing_files_without_fallback() {
+        let root = std::env::temp_dir().join(format!(
+            "rerbr-yaris-wrc-missing-pack-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        write_synthetic_focus_install(&root);
+
+        let cache = root.join("RBR/rsfdata/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("cars.json"),
+            r#"[
+                {"id":"55","name":"Ford Focus Mk II RS WRC 2006","path":"Ford_Focus_Mk_II_RS_WRC_2006_ngp6","carmodel_id":"17","audio":"Focus_Mk2_WRC"},
+                {"id":"16","name":"Toyota Yaris WRC 2018","path":"Toyota_Yaris_WRC_2018_ngp6","carmodel_id":"227","audio":null}
+            ]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cache.join("carmodels.json"),
+            r#"[
+                {"id":"17","name":"Ford Focus","path":"FORD_FOCUS_2006","filename":"focus06","fallback":"5"},
+                {"id":"227","name":"Toyota Yaris WRC 2018","path":"YARIS_WRC18","filename":"yaris_wrc","fallback":"5"}
+            ]"#,
+        )
+        .unwrap();
+
+        // Install Toyota Yaris WRC 2018 3D folder cleanly, but deliberately omit rsfdata/cars/Toyota_Yaris_WRC_2018_ngp6
+        std::fs::create_dir_all(root.join("RBR/Cars/YARIS_WRC18")).unwrap();
+        std::fs::write(root.join("RBR/Cars/YARIS_WRC18/yaris_wrc.sgc"), b"yaris18").unwrap();
+
+        let catalog = super::super::content_manager::Catalog::scan_root(
+            &root,
+            &rerbr_content::Selection::default(),
+        );
+        let yaris = catalog
+            .vehicle("rsf-toyota-yaris-wrc-2018")
+            .expect("Yaris WRC 2018 with own 3D model must be surfaced honestly");
+        assert_eq!(yaris.descriptor.model, "Cars/YARIS_WRC18/yaris_wrc.sgc");
+        assert!(!yaris.model_missing);
+        assert!(!yaris.using_fallback_model);
+        assert_eq!(
+            yaris.classification,
+            rerbr_content::VehicleClassification::VisualInspectionOnly
+        );
+        assert!(yaris
+            .files
+            .missing
+            .iter()
+            .any(|m| m == "rsfdata/cars/Toyota_Yaris_WRC_2018_ngp6"));
+        assert!(yaris
+            .notes
+            .iter()
+            .any(|n| n.contains("Toyota_Yaris_WRC_2018_ngp6")));
+        assert!(!yaris.descriptor.audio_index.contains("Cars.ini"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -33,6 +33,7 @@ pub struct Frame {
     pub max_wheel_travel: f32,
     pub min_wheel_clearance: f32,
     pub boom: f32,
+    pub interior: bool,
 }
 pub struct ChasePath {
     route: Option<Route>,
@@ -214,6 +215,7 @@ impl ChasePath {
             max_wheel_travel,
             min_wheel_clearance,
             boom,
+            interior: false,
         })
     }
     pub(crate) fn chase_camera(

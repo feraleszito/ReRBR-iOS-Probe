@@ -1041,6 +1041,7 @@ mod tests {
         for (bank_name, expected_samples) in [
             ("AudioFMOD/Focus_Mk2_WRC.bank", 44usize),
             ("AudioFMOD/306_maxi_B.bank", 67usize),
+            ("AudioFMOD/Peugeot_208_Rally4.bank", 48usize),
         ] {
             if !rbr.join(bank_name).is_file() {
                 continue;
@@ -1070,8 +1071,13 @@ mod tests {
                         }
                         let rms =
                             (buf.iter().map(|v| v * v).sum::<f32>() / buf.len() as f32).sqrt();
+                        let min_rms = if bank_name.contains("Peugeot_208_Rally4") {
+                            0.005
+                        } else {
+                            0.012
+                        };
                         assert!(
-                            rms.is_finite() && rms >= 0.012,
+                            rms.is_finite() && rms >= min_rms,
                             "silence dip in {bank_name} cockpit={cockpit} rpm={rpm} thr={thr}: rms={rms:.5}"
                         );
                     }

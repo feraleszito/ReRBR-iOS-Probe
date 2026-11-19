@@ -19,7 +19,14 @@ impl ReplayFrame {
     }
 
     /// Interpolates between frame `self` and frame `other` by fraction `t` in [0.0, 1.0].
+    /// Without pivots, interpolates matrix translations directly (valid for origin-centered parts).
     pub fn lerp(&self, other: &Self, t: f32) -> Self {
+        self.lerp_with_pivots(other, t, None)
+    }
+
+    /// Interpolates between frame `self` and frame `other` while keeping wheel hubs centered
+    /// at their car-local pivots so high-speed wheel rotation never orbits around the chassis.
+    pub fn lerp_with_pivots(&self, other: &Self, t: f32, pivots: Option<[Vec3; 4]>) -> Self {
         let t = t.clamp(0.0, 1.0);
         let time = self.time + (other.time - self.time) * t;
         let driveline_distance =
@@ -29,15 +36,31 @@ impl ReplayFrame {
         let gear = if t < 0.5 { self.gear } else { other.gear };
 
         let mut models = [Mat4::IDENTITY; 5];
-        for (model, (m0, m1)) in models.iter_mut().zip(self.models.iter().zip(&other.models)) {
+        for (slot, (model, (m0, m1))) in models
+            .iter_mut()
+            .zip(self.models.iter().zip(&other.models))
+            .enumerate()
+        {
+            let q0 = Quat::from_mat4(m0).normalize();
+            let q1 = Quat::from_mat4(m1).normalize();
+            let q = q0.slerp(q1, t);
+
+            if slot > 0 {
+                if let Some(pivots) = pivots {
+                    let pivot = pivots[slot - 1];
+                    let hub0 = m0.transform_point3(pivot);
+                    let hub1 = m1.transform_point3(pivot);
+                    let hub = hub0.lerp(hub1, t);
+                    *model = Mat4::from_translation(hub)
+                        * Mat4::from_quat(q)
+                        * Mat4::from_translation(-pivot);
+                    continue;
+                }
+            }
+
             let p0 = m0.w_axis.truncate();
             let p1 = m1.w_axis.truncate();
             let p = p0.lerp(p1, t);
-
-            let q0 = Quat::from_mat4(m0);
-            let q1 = Quat::from_mat4(m1);
-            let q = q0.normalize().slerp(q1.normalize(), t);
-
             *model = Mat4::from_rotation_translation(q, p);
         }
 
@@ -57,6 +80,7 @@ impl ReplayFrame {
 pub struct Replay {
     pub frames: Vec<ReplayFrame>,
     pub total_duration: f32,
+    pub pivots: Option<[Vec3; 4]>,
 }
 
 impl Replay {
@@ -70,6 +94,15 @@ impl Replay {
 
     /// Samples the replay stream at timestamp `time` using sub-frame interpolation.
     pub fn sample_at(&self, time: f32) -> Option<ReplayFrame> {
+        self.sample_at_with_pivots(time, self.pivots)
+    }
+
+    /// Samples the replay stream using explicit fallback wheel pivots if none were saved on `Replay`.
+    pub fn sample_at_with_pivots(
+        &self,
+        time: f32,
+        fallback_pivots: Option<[Vec3; 4]>,
+    ) -> Option<ReplayFrame> {
         if self.frames.is_empty() {
             return None;
         }
@@ -95,7 +128,7 @@ impl Replay {
         } else {
             0.0
         };
-        Some(f0.lerp(f1, t))
+        Some(f0.lerp_with_pivots(f1, t, self.pivots.or(fallback_pivots)))
     }
 }
 
@@ -104,6 +137,7 @@ impl Replay {
 pub struct ReplayRecorder {
     frames: Vec<ReplayFrame>,
     last_record_time: f32,
+    pivots: Option<[Vec3; 4]>,
 }
 
 impl Default for ReplayRecorder {
@@ -111,6 +145,7 @@ impl Default for ReplayRecorder {
         Self {
             frames: Vec::new(),
             last_record_time: -1.0,
+            pivots: None,
         }
     }
 }
@@ -120,12 +155,17 @@ impl ReplayRecorder {
         Self::default()
     }
 
+    pub fn set_pivots(&mut self, pivots: [Vec3; 4]) {
+        self.pivots = Some(pivots);
+    }
+
     pub fn clear(&mut self) {
         self.frames.clear();
         self.last_record_time = -1.0;
+        self.pivots = None;
     }
 
-    /// Records a frame if at least 1/60th of a second has elapsed since the last recorded frame.
+    /// Records a frame if at least ~1/120th of a second has elapsed since the last recorded frame.
     pub fn record(
         &mut self,
         time: f32,
@@ -138,8 +178,8 @@ impl ReplayRecorder {
         if time < 0.0 {
             return;
         }
-        // Throttle to maximum ~60 FPS recording rate to conserve memory
-        if self.last_record_time >= 0.0 && (time - self.last_record_time) < (1.0 / 65.0) {
+        // Keep sub-180 deg wheel rotation resolution even past 220 km/h on high-refresh displays.
+        if self.last_record_time >= 0.0 && (time - self.last_record_time) < (1.0 / 125.0) {
             return;
         }
         self.last_record_time = time;
@@ -161,6 +201,7 @@ impl ReplayRecorder {
         Some(Replay {
             frames: std::mem::take(&mut self.frames),
             total_duration,
+            pivots: self.pivots.take(),
         })
     }
 }
@@ -361,6 +402,7 @@ pub enum PlaybackState {
 pub struct ReplayPlayer {
     pub replay: Option<Replay>,
     pub stage_cameras: Option<StageCameras>,
+    pub pivots: Option<[Vec3; 4]>,
     pub current_time: f32,
     pub state: PlaybackState,
     pub camera_mode: ReplayCameraMode,
@@ -368,9 +410,27 @@ pub struct ReplayPlayer {
 
 impl ReplayPlayer {
     pub fn new(replay: Replay, stage_cameras: Option<StageCameras>) -> Self {
+        let pivots = replay.pivots;
         Self {
             replay: Some(replay),
             stage_cameras,
+            pivots,
+            current_time: 0.0,
+            state: PlaybackState::Playing,
+            camera_mode: ReplayCameraMode::StageTV,
+        }
+    }
+
+    pub fn with_pivots(
+        replay: Replay,
+        stage_cameras: Option<StageCameras>,
+        pivots: Option<[Vec3; 4]>,
+    ) -> Self {
+        let pivots = replay.pivots.or(pivots);
+        Self {
+            replay: Some(replay),
+            stage_cameras,
+            pivots,
             current_time: 0.0,
             state: PlaybackState::Playing,
             camera_mode: ReplayCameraMode::StageTV,
@@ -437,7 +497,7 @@ impl ReplayPlayer {
     pub fn current_frame(&self) -> Option<ReplayFrame> {
         self.replay
             .as_ref()
-            .and_then(|r| r.sample_at(self.current_time))
+            .and_then(|r| r.sample_at_with_pivots(self.current_time, self.pivots))
     }
 
     /// Evaluates the active replay camera perspective.
@@ -533,5 +593,84 @@ mod tests {
         assert_eq!(mode.cycle(), ReplayCameraMode::Chase);
         assert_eq!(mode.cycle().cycle(), ReplayCameraMode::Bonnet);
         assert_eq!(mode.cycle().cycle().cycle(), ReplayCameraMode::StageTV);
+    }
+
+    #[test]
+    fn high_speed_wheel_interpolation_preserves_hub_center_without_orbiting() {
+        // Representative Focus 2006 / Peugeot 306 Maxi wheel pivots in car-local space.
+        let pivots = [
+            Vec3::new(-0.78, 0.33, -1.29),
+            Vec3::new(0.78, 0.33, -1.29),
+            Vec3::new(-0.78, 0.33, 1.31),
+            Vec3::new(0.78, 0.33, 1.31),
+        ];
+        let compose_wheel = |car_pos: Vec3, hub_local: Vec3, steer: f32, roll: f32, pivot: Vec3| {
+            Mat4::from_translation(car_pos + hub_local)
+                * Mat4::from_rotation_y(steer)
+                * Mat4::from_axis_angle(Vec3::NEG_X, roll)
+                * Mat4::from_translation(-pivot)
+        };
+
+        // Simulate 50 m/s (180 km/h) across one 1/60 s frame: roll advances ~2.6 rad (~149 deg).
+        let hub0 = [
+            Vec3::new(-0.78, 0.33, -1.29),
+            Vec3::new(0.78, 0.33, -1.29),
+            Vec3::new(-0.78, 0.33, 1.31),
+            Vec3::new(0.78, 0.33, 1.31),
+        ];
+        let hub1 = [
+            Vec3::new(-0.78, 0.39, -1.29),
+            Vec3::new(0.78, 0.36, -1.29),
+            Vec3::new(-0.78, 0.31, 1.31),
+            Vec3::new(0.78, 0.34, 1.31),
+        ];
+        let car0 = Vec3::new(10.0, 2.0, -50.0);
+        let car1 = Vec3::new(10.2, 2.05, -50.833);
+        let roll0 = 0.2_f32;
+        let roll1 = 2.8_f32;
+        let steer0 = 0.15_f32;
+        let steer1 = 0.22_f32;
+
+        let m0 = [
+            Mat4::from_translation(car0),
+            compose_wheel(car0, hub0[0], steer0, roll0, pivots[0]),
+            compose_wheel(car0, hub0[1], steer0, roll0, pivots[1]),
+            compose_wheel(car0, hub0[2], 0.0, roll0, pivots[2]),
+            compose_wheel(car0, hub0[3], 0.0, roll0, pivots[3]),
+        ];
+        let m1 = [
+            Mat4::from_translation(car1),
+            compose_wheel(car1, hub1[0], steer1, roll1, pivots[0]),
+            compose_wheel(car1, hub1[1], steer1, roll1, pivots[1]),
+            compose_wheel(car1, hub1[2], 0.0, roll1, pivots[2]),
+            compose_wheel(car1, hub1[3], 0.0, roll1, pivots[3]),
+        ];
+
+        let mut recorder = ReplayRecorder::new();
+        recorder.set_pivots(pivots);
+        recorder.record(0.0, m0, 0.0, 50.0, 6500.0, 5);
+        recorder.record(1.0 / 60.0, m1, 0.833, 50.0, 6500.0, 5);
+        let replay = recorder.finish().expect("finish high-speed replay");
+        let player = ReplayPlayer::new(replay, None);
+
+        // Verify at t = 0.5 (mid-frame) that wheel hubs lie on the exact straight chord between frames.
+        let mut p = player;
+        p.seek(0.5 / 60.0);
+        let mid = p.current_frame().expect("mid frame");
+        for k in 0..4 {
+            let expected_hub = (car0 + hub0[k]).lerp(car1 + hub1[k], 0.5);
+            let actual_hub = mid.models[k + 1].transform_point3(pivots[k]);
+            let err = actual_hub.distance(expected_hub);
+            assert!(
+                err < 1e-4,
+                "wheel {k} hub drifted/orbited by {err} m at high speed"
+            );
+            // Also verify rotation continues spinning smoothly (distinct from both endpoints).
+            let q_mid = Quat::from_mat4(&mid.models[k + 1]).normalize();
+            let q0 = Quat::from_mat4(&m0[k + 1]).normalize();
+            let q1 = Quat::from_mat4(&m1[k + 1]).normalize();
+            assert!(q_mid.angle_between(q0) > 0.5);
+            assert!(q_mid.angle_between(q1) > 0.5);
+        }
     }
 }

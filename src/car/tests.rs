@@ -514,3 +514,82 @@ fn focus_2006_loads_own_synthetic_sgc_and_textures_never_impreza() {
         .any(|k| k.contains("focus_wrc06_external.dds")));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[cfg(feature = "physics-stage")]
+#[test]
+fn real_pc_toyota_models_and_cockpits_load_without_fallback() {
+    let rbr = Path::new(r"C:\Richard Burns Rally");
+    if !rbr.is_dir() {
+        return;
+    }
+
+    // 1. Toyota GR Yaris Rally2 (exterior + cockpit material resolution)
+    if rbr.join("Cars/yaris_rally2/yaris_rally2.sgc").is_file() {
+        let mut yaris_r2 = rerbr_content::VehicleDescriptor::ford_focus_2006();
+        yaris_r2.id = "rsf-toyota-gr-yaris-rally2".into();
+        yaris_r2.name = "Toyota GR Yaris Rally2".into();
+        yaris_r2.model = "Cars/yaris_rally2/yaris_rally2.sgc".into();
+        yaris_r2.parts = "Cars/yaris_rally2/yaris_rally2.ini".into();
+        yaris_r2.shaders = "Cars/yaris_rally2/yaris_rally2_shaders.ini".into();
+        yaris_r2.shader_settings =
+            "Cars/yaris_rally2/yaris_rally2_shader_settings_clear.ini".into();
+        yaris_r2.required_textures.clear();
+        yaris_r2.optional_textures.clear();
+        yaris_r2.audio_index = "AudioFMOD/Peugeot_208_Rally4.bank".into();
+        yaris_r2.rsf_pack = Some("Toyota_GR_Yaris_Rally2_ngp7".into());
+
+        let car = load_vehicle_for_mode(rbr, &yaris_r2, true)
+            .expect("Toyota GR Yaris Rally2 model must load cleanly");
+        assert!(
+            car.cockpit_error.is_none(),
+            "Yaris Rally2 cockpit must load cleanly: {:?}",
+            car.cockpit_error
+        );
+        assert!(
+            car.cockpit.is_some(),
+            "Yaris Rally2 must have steering node"
+        );
+        assert!(car.geometry.pivots.iter().all(|p| p.length() > 0.5));
+        eprintln!(
+            "YARIS RALLY2 3D PASS: draws={} textures={} cockpit={} pivots={:?}",
+            car.geometry.drawn.len(),
+            car.textures.len(),
+            car.cockpit.is_some(),
+            car.geometry.pivots
+        );
+    }
+
+    // 2. Toyota Yaris WRC 2018 (exterior + cockpit if present on PC)
+    if rbr.join("Cars/YARIS_WRC18/yaris_wrc.sgc").is_file() {
+        let mut yaris_wrc = rerbr_content::VehicleDescriptor::ford_focus_2006();
+        yaris_wrc.id = "rsf-toyota-yaris-wrc-2018".into();
+        yaris_wrc.name = "Toyota Yaris WRC 2018".into();
+        yaris_wrc.model = "Cars/YARIS_WRC18/yaris_wrc.sgc".into();
+        yaris_wrc.parts = "Cars/YARIS_WRC18/yaris_wrc.ini".into();
+        yaris_wrc.shaders = "Cars/YARIS_WRC18/yaris_wrc_shaders.ini".into();
+        yaris_wrc.shader_settings = "Cars/YARIS_WRC18/yaris_wrc_shader_settings_clear.ini".into();
+        yaris_wrc.required_textures.clear();
+        yaris_wrc.optional_textures.clear();
+        yaris_wrc.audio_index = "AudioFMOD/SIN_BANCO_FMOD.bank".into();
+        yaris_wrc.rsf_pack = Some("Toyota_Yaris_WRC_2018_ngp6".into());
+
+        let car = load_vehicle_for_mode(rbr, &yaris_wrc, true)
+            .expect("Toyota Yaris WRC 2018 model must load cleanly");
+        assert!(
+            car.cockpit_error.is_none(),
+            "Yaris WRC 2018 cockpit error: {:?}",
+            car.cockpit_error
+        );
+        assert!(
+            car.cockpit.is_some(),
+            "Yaris WRC 2018 must have steering node"
+        );
+        eprintln!(
+            "YARIS WRC 2018 3D PASS: draws={} textures={} cockpit={} pivots={:?}",
+            car.geometry.drawn.len(),
+            car.textures.len(),
+            car.cockpit.is_some(),
+            car.geometry.pivots
+        );
+    }
+}

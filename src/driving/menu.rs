@@ -587,8 +587,13 @@ impl Menu {
                 if let Some(bank) = entry.and_then(|e| e.fmod_bank.as_deref()) {
                     rows.push(Row::info("AUDIO FMOD", bank));
                 }
-                if let Some(note) = entry.and_then(|e| e.notes.first()) {
-                    rows.push(Row::info("ESTADO", note.clone()));
+                if let Some(entry) = entry {
+                    for (idx, note) in entry.notes.iter().enumerate() {
+                        rows.push(Row::info(
+                            if idx == 0 { "ESTADO" } else { "DETALLE" },
+                            note.clone(),
+                        ));
+                    }
                 }
                 if let Some(missing) = entry.and_then(|e| e.files.missing_label()) {
                     rows.push(Row::info("FILES", missing));
@@ -729,9 +734,11 @@ impl Menu {
                     Row::info(
                         "BACKEND ACTIVO",
                         if ctx.ngp_experimental {
-                            "MODO NGP EXPERIMENTAL (FOCUS 2006)"
+                            format!("MODO NGP EXPERIMENTAL ({})", vehicle.name)
                         } else {
-                            super::ngp_proto::PhysicsBackend::OriginalRetail.label()
+                            super::ngp_proto::PhysicsBackend::OriginalRetail
+                                .label()
+                                .into()
                         },
                     ),
                     Row::action(

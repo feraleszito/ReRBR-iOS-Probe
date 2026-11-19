@@ -270,10 +270,20 @@ impl Catalog {
                 existing.notes = item.notes;
                 existing.state = state;
             } else {
-                let files = audit_vehicle(root, &item.descriptor);
+                let mut files = audit_vehicle(root, &item.descriptor);
+                if item.pack_missing {
+                    if let Some(pack) = item.descriptor.rsf_pack.as_deref() {
+                        let rel = format!("rsfdata/cars/{pack}");
+                        if !files.missing.iter().any(|m| m.eq_ignore_ascii_case(&rel)) {
+                            files.missing.push(rel);
+                        }
+                        files.total += 1;
+                    }
+                }
                 let supported = item.descriptor.validate_experimental_ngp().is_ok()
                     && !item.using_fallback_model
-                    && !item.model_missing;
+                    && !item.model_missing
+                    && !item.pack_missing;
                 let state = state_of(
                     &item.descriptor.id,
                     &selection.vehicle.id,

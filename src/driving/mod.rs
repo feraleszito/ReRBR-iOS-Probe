@@ -765,8 +765,11 @@ impl Runtime {
                             );
                         }
                     }
-                    let mut player =
-                        replay::ReplayPlayer::new(replay.clone(), self.stage_cameras.clone());
+                    let mut player = replay::ReplayPlayer::with_pivots(
+                        replay.clone(),
+                        self.stage_cameras.clone(),
+                        self.pivots,
+                    );
                     player.restart();
                     self.replay_player = Some(player);
                     self.menu.show(menu::Page::Replay);
@@ -1857,6 +1860,7 @@ impl Runtime {
                     boom: 0.0,
                     max_wheel_travel: 0.0,
                     min_wheel_clearance: 0.0,
+                    interior: false,
                 });
             }
         }
@@ -1874,21 +1878,35 @@ impl Runtime {
                 } else {
                     None
                 };
-                if let Some(f) = frame {
-                    #[cfg(feature = "physics-stage")]
-                    let mut f = f;
-                    #[cfg(feature = "physics-stage")]
-                    if let Some(base) = self.mounts.and_then(|m| {
-                        m.camera_with_cockpit(self.view, f.models[0], self.cockpit_node)
-                    }) {
-                        let ov = self.camera_overrides.for_view(self.view);
-                        let edited = ov.apply(base, f.models[0]);
-                        if path.camera_clear(edited, ov.fov_degrees, self.drawable_size) {
-                            f.camera = edited;
-                            self.effective_fov = ov.fov_degrees;
-                        } else if path.camera_clear(base, 65.0, self.drawable_size) {
-                            f.camera = base;
-                            self.effective_fov = 65.0;
+                if let Some(mut f) = frame {
+                    let car_forward = Vec3::new(-f.models[0].z_axis.x, 0.0, -f.models[0].z_axis.z)
+                        .normalize_or(Vec3::NEG_Z);
+                    if let Some(progress) = self.race.presentation_progress() {
+                        let target = f.models[0].w_axis.truncate() + Vec3::Y * 0.5;
+                        let cinematic =
+                            cameras::presentation_camera(target, car_forward, progress, f.camera);
+                        f.camera =
+                            safe_presentation_camera(path, cinematic, f.camera, self.drawable_size);
+                        f.interior = false;
+                        self.effective_fov = 65.0;
+                    } else {
+                        #[cfg(feature = "physics-stage")]
+                        if let Some(base) = self.mounts.and_then(|m| {
+                            m.camera_with_cockpit(self.view, f.models[0], self.cockpit_node)
+                        }) {
+                            let ov = self.camera_overrides.for_view(self.view);
+                            let edited = ov.apply(base, f.models[0]);
+                            if path.camera_clear(edited, ov.fov_degrees, self.drawable_size) {
+                                f.camera = edited;
+                                f.interior = self.view == cameras::View::CockpitFallback
+                                    && self.cockpit_ready;
+                                self.effective_fov = ov.fov_degrees;
+                            } else if path.camera_clear(base, 65.0, self.drawable_size) {
+                                f.camera = base;
+                                f.interior = self.view == cameras::View::CockpitFallback
+                                    && self.cockpit_ready;
+                                self.effective_fov = 65.0;
+                            }
                         }
                     }
                     let _ = pivots;
@@ -1919,6 +1937,7 @@ impl Runtime {
             let speed_mps = Vec3::from(b.velocity).length();
             let replay_time =
                 self.race.raw_seconds().unwrap_or(0.0) + self.race.rollout_elapsed_secs(now);
+            self.replay_recorder.set_pivots(pivots);
             self.replay_recorder.record(
                 replay_time as f32,
                 models,
@@ -1968,9 +1987,7 @@ impl Runtime {
                 .lerp(target, (1.0 - (-seconds / 0.06).exp()) as f32)
         });
         #[cfg(feature = "physics-stage")]
-        audio::set_view_is_cockpit(
-            self.view == cameras::View::CockpitFallback && self.cockpit_ready,
-        );
+        audio::set_view_is_cockpit(self.draws_interior());
         #[cfg(feature = "physics-stage")]
         if self.race.phase != race::Phase::Presentation {
             if let Some(base) = self
@@ -1998,6 +2015,7 @@ impl Runtime {
                             .map(|x| x.abs())
                             .fold(0.0, f32::max),
                         min_wheel_clearance: 0.0,
+                        interior: self.draws_interior(),
                     });
                 }
                 // Keep physics running and use the checked chase view if a mount is underground.
@@ -2027,6 +2045,8 @@ impl Runtime {
                 if let Some(progress) = self.race.presentation_progress() {
                     let cinematic =
                         cameras::presentation_camera(target, car_forward, progress, camera);
+                    let cinematic =
+                        safe_presentation_camera(path, cinematic, camera, self.drawable_size);
                     return Some(Frame {
                         models,
                         camera: cinematic,
@@ -2037,6 +2057,7 @@ impl Runtime {
                             .map(|x| x.abs())
                             .fold(0.0, f32::max),
                         min_wheel_clearance: 0.0,
+                        interior: false,
                     });
                 }
                 Some(Frame {
@@ -2045,6 +2066,7 @@ impl Runtime {
                     boom,
                     max_wheel_travel: b.wheel_travel.iter().map(|x| x.abs()).fold(0.0, f32::max),
                     min_wheel_clearance: 0.0,
+                    interior: false,
                 })
             }
             Err(e) => {
@@ -2058,6 +2080,25 @@ impl Runtime {
     }
     pub fn submitted(&mut self, cpu: Duration) {
         self.cpu_ms = cpu.as_secs_f64() * 1000.0;
+    }
+    /// Interior cockpit geometry is valid only when rendering from inside an active cockpit view.
+    /// Exterior presentation cinematics, chase/bonnet cameras, and exterior replays must always
+    /// render complete exterior bodywork, bumpers, and all four wheels.
+    pub fn draws_interior(&self) -> bool {
+        if self.menu.page == menu::Page::Replay {
+            return false;
+        }
+        #[cfg(feature = "physics-stage")]
+        {
+            self.race.phase != race::Phase::Presentation
+                && self.view == cameras::View::CockpitFallback
+                && self.cockpit_ready
+                && self.mounts.is_some()
+        }
+        #[cfg(not(feature = "physics-stage"))]
+        {
+            false
+        }
     }
     fn context(&self) -> menu::Context<'_> {
         #[cfg(feature = "physics-stage")]
@@ -2716,6 +2757,47 @@ fn draw_control(canvas: &mut Canvas, rect: Rect, label: &str, level: f32, opacit
             0.6,
             ui::with_alpha(ACCENT, opacity),
         );
+    }
+}
+/// Ensures the presentation sweep eye stays clear of nearby embankments/terrain so bumpers and wheels
+/// are never occluded on the starting grid.
+#[cfg_attr(not(feature = "physics-stage"), allow(unused_variables))]
+fn safe_presentation_camera(
+    path: &ChasePath,
+    cinematic: Camera,
+    fallback: Camera,
+    size: (u32, u32),
+) -> Camera {
+    #[cfg(feature = "physics-stage")]
+    {
+        if path.camera_clear(cinematic, 65.0, size) {
+            return cinematic;
+        }
+        for lift in [0.4_f32, 0.9, 1.5] {
+            let raised = Camera {
+                eye: cinematic.eye + Vec3::Y * lift,
+                ..cinematic
+            };
+            if path.camera_clear(raised, 65.0, size) {
+                return raised;
+            }
+        }
+        for blend in [0.35_f32, 0.7] {
+            let mixed = Camera {
+                eye: cinematic.eye.lerp(fallback.eye, blend),
+                target: cinematic.target.lerp(fallback.target, blend),
+                up: cinematic.up.lerp(fallback.up, blend).normalize_or(Vec3::Y),
+            };
+            if path.camera_clear(mixed, 65.0, size) {
+                return mixed;
+            }
+        }
+        fallback
+    }
+    #[cfg(not(feature = "physics-stage"))]
+    {
+        let _ = (path, fallback, size);
+        cinematic
     }
 }
 /// Same mirror/pose/model composition as reRBR playback/frames.rs and playback::model_to_stage.
@@ -3418,5 +3500,43 @@ mod reload_tests {
         assert!(export.contains("ÚLTIMA SESIÓN"));
         assert!(export.contains("STEP 1440"));
         assert!(export.contains(&focus.model));
+    }
+
+    #[cfg(feature = "physics-stage")]
+    #[test]
+    fn presentation_cinematic_never_forces_cockpit_interior_geometry() {
+        let mut app = Runtime::new();
+        app.worker.shutdown();
+        app.worker = worker::Worker::idle();
+        app.view = cameras::View::CockpitFallback;
+        app.cockpit_ready = true;
+        app.mounts = Some(cameras::Mounts {
+            bonnet: cameras::Mount {
+                eye: Vec3::new(0.0, 1.0, 0.2),
+                target: Vec3::new(0.0, 1.0, -3.0),
+            },
+            cockpit: cameras::Mount {
+                eye: Vec3::new(-0.35, 1.0, 0.1),
+                target: Vec3::new(-0.35, 1.0, -3.0),
+            },
+        });
+        app.menu.page = menu::Page::Driving;
+        app.race.start_presentation(Instant::now());
+        assert!(
+            !app.draws_interior(),
+            "exterior presentation cinematic must render full exterior car (bumpers + wheels)"
+        );
+
+        app.race.ready(Instant::now());
+        assert!(
+            app.draws_interior(),
+            "once countdown/driving begins in CockpitFallback with loaded cockpit, interior renders"
+        );
+
+        app.menu.page = menu::Page::Replay;
+        assert!(
+            !app.draws_interior(),
+            "exterior replay cameras must never hide bumpers or wheels behind CockpitFallback"
+        );
     }
 }

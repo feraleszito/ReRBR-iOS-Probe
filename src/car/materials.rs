@@ -45,6 +45,31 @@ pub struct Material {
     pub pass: Pass,
     pub list: u8,
 }
+fn resolved_diffuse_and_opacity<'a>(shaders: &'a [Section], name: &str) -> Option<(&'a str, bool)> {
+    if let Some(path) = car_parts::diffuse_path(shaders, name) {
+        return Some((path, car_parts::opacity_channel(shaders, name)));
+    }
+    let (scope, sub) = name.split_once("::")?;
+    for alt_scope in [scope.replace(' ', "_"), scope.replace('_', " ")] {
+        let candidate = format!("{alt_scope}::{sub}");
+        if let Some(path) = car_parts::diffuse_path(shaders, &candidate) {
+            return Some((path, car_parts::opacity_channel(shaders, &candidate)));
+        }
+    }
+    let set_name = car_parts::section(shaders, "TextureSets")?.get("TextureSet0")?;
+    let norm_scope = scope.trim().to_ascii_lowercase().replace(' ', "_");
+    let norm_sub = sub.trim().to_ascii_lowercase().replace(' ', "_");
+    let suffix = format!("_{norm_scope}_{norm_sub}.dds");
+    let path = shaders
+        .iter()
+        .filter(|s| s.name.eq_ignore_ascii_case(set_name))
+        .flat_map(|s| s.entries.iter())
+        .find_map(|(file, path)| {
+            let file_norm = file.trim().to_ascii_lowercase().replace(' ', "_");
+            file_norm.ends_with(&suffix).then_some(path.as_str())
+        })?;
+    Some((path, car_parts::opacity_channel(shaders, name)))
+}
 pub fn resolve(
     shaders: &[Section],
     settings: &[Section],
@@ -54,9 +79,8 @@ pub fn resolve(
     if car_parts::section(settings, shader).is_none() {
         return Err(format!("CAR MATERIAL: unknown shader class {shader}"));
     }
-    let path = car_parts::diffuse_path(shaders, name)
+    let (path, opacity) = resolved_diffuse_and_opacity(shaders, name)
         .ok_or_else(|| format!("CAR MATERIAL: no diffuse for {name}"))?;
-    let opacity = car_parts::opacity_channel(shaders, name);
     Ok(Material {
         shader: shader.into(),
         name: name.into(),
@@ -64,4 +88,41 @@ pub fn resolve(
         pass: pass_for(shader, opacity),
         list: list_for(shader, opacity),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rerbr_asset_formats::ini;
+
+    #[test]
+    fn resolves_scope_separator_and_declared_texture_set_correspondence() {
+        let shaders = ini::parse(
+            "[TextureSets]\r\nTextureSet0 = TSDefault\r\n[TSDefault]\r\n\
+            yaris_rally2_internal_parts.dds = cars\\yaris_rally2\\textures\\yaris_rally2_internal_parts.dds\r\n\
+            yaris_rally2_internal_body.dds = cars\\yaris_rally2\\textures\\yaris_rally2_internal_body.dds\r\n\
+            [internal_parts::tire_diffuse_bitmap]\r\nFilename = yaris_rally2_internal_parts.dds\r\n",
+        )
+        .unwrap();
+        let settings = ini::parse("[CarTextureNoDirt]\r\n[CarTire]\r\n").unwrap();
+
+        let parts = resolve(
+            &shaders,
+            &settings,
+            "CarTextureNoDirt",
+            "internal parts::tire",
+        )
+        .expect("space/underscore scope should resolve from car's own shader bitmap");
+        assert_eq!(
+            parts.path,
+            "cars\\yaris_rally2\\textures\\yaris_rally2_internal_parts.dds"
+        );
+
+        let body = resolve(&shaders, &settings, "CarTire", "internal::body")
+            .expect("declared TextureSet0 internal_body.dds should resolve without fallback");
+        assert_eq!(
+            body.path,
+            "cars\\yaris_rally2\\textures\\yaris_rally2_internal_body.dds"
+        );
+    }
 }

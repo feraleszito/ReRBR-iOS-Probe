@@ -281,10 +281,6 @@ impl Runtime {
         size: (u32, u32),
         format: wgpu::TextureFormat,
     ) {
-        #[cfg(feature = "physics-stage")]
-        let interior = self.driving.view == crate::driving::cameras::View::CockpitFallback;
-        #[cfg(not(feature = "physics-stage"))]
-        let interior = false;
         #[cfg(feature = "physics-drive")]
         let steering = self.driving.steering_angle;
         #[cfg(not(feature = "physics-drive"))]
@@ -295,6 +291,7 @@ impl Runtime {
         let fov = None;
         if self.comparison.car_visible && !self.fatal {
             if let (Some(gpu), Some(frame)) = (&self.car, &self.frame) {
+                let interior = cfg!(feature = "physics-stage") && frame.interior;
                 gpu.draw_with_fov(
                     queue, encoder, target, depth, size, format, frame, interior, steering, fov,
                 );

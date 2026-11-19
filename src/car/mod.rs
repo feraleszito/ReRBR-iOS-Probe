@@ -264,7 +264,7 @@ pub fn load_vehicle_for_mode(
             vehicle.id, entry.file_name
         ));
     }
-    let bytes = read(root, vehicle, &entry.file_name, 32 * 1024 * 1024)?;
+    let bytes = read(root, vehicle, &entry.file_name, 128 * 1024 * 1024)?;
     let elements = sgc::parse(&bytes).map_err(|e| format!("CAR SGC: {e}"))?;
     eprintln!(
         "car-chase READ PASS: {}, {} bytes, {} decoded records",
@@ -290,7 +290,7 @@ pub fn load_vehicle_for_mode(
         .map(|m| m.path.clone())
         .collect::<BTreeSet<_>>()
     {
-        let bytes = read(root, vehicle, &path, 32 * 1024 * 1024)?;
+        let bytes = read(root, vehicle, &path, 64 * 1024 * 1024)?;
         let plan = upload_plan(&bytes, u32::MAX)?;
         eprintln!(
             "car-chase DDS PASS: {path} {:?}, {} mips",

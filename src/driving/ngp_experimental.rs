@@ -210,11 +210,18 @@ impl FocusDiagnosticsReport {
                             ),
                         });
                     } else {
+                        let cockpit_tag = if car.cockpit.is_some() {
+                            "COCKPIT OK".into()
+                        } else if let Some(err) = &car.cockpit_error {
+                            format!("SIN COCKPIT ({err})")
+                        } else {
+                            "SIN COCKPIT".into()
+                        };
                         steps.push(DiagnosticStep {
                             stage: "CAR MODEL",
                             status: DiagnosticStatus::Ok,
                             detail: format!(
-                                "{} -> {} DIBUJOS / {} DDS",
+                                "{} -> {} DIBUJOS / {} DDS ({cockpit_tag})",
                                 vehicle.model,
                                 car.geometry.drawn.len(),
                                 car.textures.len()
@@ -303,6 +310,10 @@ impl FocusDiagnosticsReport {
 
         // 5. NGP BACKEND
         let backend_ok = car_pack_ok && ngp_74_verified;
+        let is_ngp7_pack = vehicle
+            .rsf_pack
+            .as_deref()
+            .is_some_and(|p| p.to_ascii_lowercase().ends_with("_ngp7"));
         steps.push(DiagnosticStep {
             stage: "NGP BACKEND",
             status: if backend_ok {
@@ -310,7 +321,9 @@ impl FocusDiagnosticsReport {
             } else {
                 DiagnosticStatus::Blocked
             },
-            detail: if backend_ok {
+            detail: if backend_ok && is_ngp7_pack {
+                "NGP7 PACK SOBRE NGP 7.4 EXPERIMENTAL (NO CERTIFICADO)".into()
+            } else if backend_ok {
                 "NGP 7.4 EXPERIMENTAL (PACK)".into()
             } else if car_model_ok {
                 format!("SIN BACKEND ACTIVO ({})", ngp_rt.summary)

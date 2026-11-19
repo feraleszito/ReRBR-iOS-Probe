@@ -61,7 +61,7 @@ pub fn install(
             if car.textures.contains_key(path) {
                 continue;
             }
-            let bytes = super::read(root, &car.vehicle, path, 16 * 1024 * 1024)?;
+            let bytes = super::read(root, &car.vehicle, path, 64 * 1024 * 1024)?;
             let plan = upload_plan(&bytes, u32::MAX)?;
             let first = plan.mips.first().ok_or("COCKPIT DDS: missing mips")?;
             let info = TextureInfo {
