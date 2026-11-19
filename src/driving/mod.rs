@@ -18,6 +18,7 @@ pub mod pacenote_icons;
 #[cfg(test)]
 mod private_tests;
 mod race;
+pub mod records;
 pub mod replay;
 pub mod rsf_catalog;
 pub mod school;
@@ -119,6 +120,10 @@ pub struct Runtime {
     pub active_school_result: Option<school::SchoolRunResult>,
     school_incident_banner: Option<(String, Instant)>,
     last_session_snapshot: Option<ngp_experimental::SessionTelemetrySnapshot>,
+    pub records: records::RecordStore,
+    pub last_record_outcome: Option<records::RecordOutcome>,
+    last_finish_splits_ms: Vec<u64>,
+    last_finish_crossed_forward: bool,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -226,6 +231,10 @@ impl Runtime {
             active_school_result: None,
             school_incident_banner: None,
             last_session_snapshot: None,
+            records: records::RecordStore::load(),
+            last_record_outcome: None,
+            last_finish_splits_ms: Vec::new(),
+            last_finish_crossed_forward: false,
         }
     }
     pub fn process_gamepad_snapshot(&mut self, snap: &gamepad::GamepadSnapshot, now_secs: f64) {
@@ -317,6 +326,30 @@ impl Runtime {
     }
     fn stage_elapsed_secs(&self) -> Option<f64> {
         self.race.seconds()
+    }
+    fn active_record_key(&self, stage: &rerbr_content::StageDescriptor) -> records::RecordKey {
+        let ngp_rt = self.focus_diagnostics.as_ref().and_then(|d| {
+            d.steps.iter().find(|s| s.stage == "NGP DATA").map(|s| {
+                if s.detail.contains("7.4.778.507") {
+                    "ngp-7.4.778.507"
+                } else if s.detail.contains("7.5") {
+                    "ngp-7.5"
+                } else {
+                    "ngp-7.4.778"
+                }
+            })
+        });
+        let physics_version = records::physics_version_for(&self.selection.vehicle, ngp_rt);
+        records::RecordKey::from_parts(
+            &self.selection.vehicle,
+            stage,
+            physics_version,
+            self.clutch_help,
+        )
+    }
+    fn personal_best_for_stage(&self, stage: &rerbr_content::StageDescriptor) -> Option<u64> {
+        let key = self.active_record_key(stage);
+        self.records.get(&key).map(|pb| pb.best_total_ms)
     }
     pub fn install(&mut self, geometry: &Geometry) {
         self.install_pivots(geometry.pivots);
@@ -644,6 +677,9 @@ impl Runtime {
                         self.active_school_lesson = None;
                         self.active_school_result = None;
                         self.school_incident_banner = None;
+                        self.last_record_outcome = None;
+                        self.last_finish_splits_ms.clear();
+                        self.last_finish_crossed_forward = false;
                         if let Some(pack) = pack_path {
                             self.experimental_visual_only = false;
                             self.experimental_physics_reason = None;
@@ -700,6 +736,9 @@ impl Runtime {
                     self.active_school_lesson = None;
                     self.active_school_result = None;
                     self.school_incident_banner = None;
+                    self.last_record_outcome = None;
+                    self.last_finish_splits_ms.clear();
+                    self.last_finish_crossed_forward = false;
                     self.worker = worker::Worker::new_selected_with_aids(
                         self.selection.clone(),
                         false,
@@ -740,6 +779,9 @@ impl Runtime {
                 self.worker.shutdown();
                 self.active_school_result = None;
                 self.school_incident_banner = None;
+                self.last_record_outcome = None;
+                self.last_finish_splits_ms.clear();
+                self.last_finish_crossed_forward = false;
                 if self.selection.vehicle.is_ngp_experimental_car() {
                     self.refresh_diagnostics_for_selected();
                     if let Some(pack) = self
@@ -1681,6 +1723,28 @@ impl Runtime {
                     res.false_start,
                 );
             }
+            let submission = records::RunSubmission {
+                key: self.active_record_key(&self.selection.stage),
+                car_name: self.selection.vehicle.name.clone(),
+                stage_name: self.selection.stage.name.clone(),
+                driving_ms: res.driving_ms,
+                penalty_ms: res.penalty_ms,
+                false_start: res.false_start,
+                splits_ms: self.last_finish_splits_ms.clone(),
+                splits_passed: res.splits_passed,
+                splits_total: res.splits_total,
+                finished: true,
+                finish_crossed_forward: self.last_finish_crossed_forward,
+                visual_only: self.experimental_visual_only,
+                is_school: self.active_school_lesson.is_some(),
+            };
+            let outcome = self.records.submit(&submission);
+            if outcome.valid {
+                if let Err(err) = self.records.save() {
+                    eprintln!("records SAVE ERROR: {err}");
+                }
+            }
+            self.last_record_outcome = Some(outcome);
         }
         self.saved_replay = self.replay_recorder.finish();
         self.controls.clear();
@@ -1756,6 +1820,10 @@ impl Runtime {
             && steering_ready
             && healthy;
         self.race.tick(now, active);
+        if active && state.timing.sim_elapsed_seconds > 0.0 {
+            self.race
+                .sync_simulation_time(state.timing.sim_elapsed_seconds);
+        }
         if self.active_school_lesson.is_some() {
             let drained = std::mem::take(&mut state.school_events);
             let school_snapshot = state.school_state.clone();
@@ -1784,11 +1852,22 @@ impl Runtime {
                 && state.timing.finished
                 && state.timing.finish_crossed_forward
             {
-                self.race.begin_finish_rollout(
+                self.last_finish_splits_ms = state
+                    .timing
+                    .split_times
+                    .iter()
+                    .filter_map(|t| {
+                        t.filter(|v| v.is_finite() && *v > 0.0)
+                            .map(|v| (v * 1000.0).round() as u64)
+                    })
+                    .collect();
+                self.last_finish_crossed_forward = state.timing.finish_crossed_forward;
+                self.race.begin_finish_rollout_with_sim_time(
                     now,
                     state.timing.splits_passed,
                     state.timing.splits_total,
                     state.timing.finish_distance,
+                    state.timing.official_finish_seconds,
                 );
             }
             if self
@@ -2206,6 +2285,13 @@ impl Runtime {
             school: Some(&self.school),
             active_school_lesson: self.active_school_lesson,
             school_result: self.active_school_result.as_ref(),
+            personal_best_ms: self.personal_best_for_stage(&self.selection.stage),
+            inspected_stage_pb_ms: self
+                .content
+                .stages
+                .get(self.menu.inspected_stage)
+                .and_then(|e| self.personal_best_for_stage(&e.descriptor)),
+            record_outcome: self.last_record_outcome.as_ref(),
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
@@ -2526,10 +2612,33 @@ impl Runtime {
             ui::text_center(canvas, rect, "GO!", 2.2, ui::GOOD);
         }
         if let Some(secs) = self.stage_elapsed_secs() {
-            let timer = menu::format_stage_time(secs);
-            let r = Rect::new(0.43, 0.015, 0.14, 0.055);
+            let cur_ms = (secs.max(0.0) * 1000.0).round() as u64;
+            let timer = records::format_time_ms(cur_ms);
+            let r = Rect::new(0.415, 0.015, 0.17, 0.055);
             ui::panel(canvas, r, PANEL_DEEP, LINE);
             ui::text_center(canvas, r, &timer, 0.85, TEXT);
+
+            if self.active_school_lesson.is_none() {
+                if let Some(pb_ms) = self.personal_best_for_stage(&self.selection.stage) {
+                    let delta_ms = (cur_ms as i64) - (pb_ms as i64);
+                    let pb_label = if matches!(
+                        self.race.phase,
+                        race::Phase::Finishing | race::Phase::Finished
+                    ) {
+                        format!(
+                            "PB {} ({})",
+                            records::format_time_ms(pb_ms),
+                            records::format_delta_ms(delta_ms)
+                        )
+                    } else {
+                        format!("PB {}", records::format_time_ms(pb_ms))
+                    };
+                    let pb_color = if delta_ms <= 0 { ui::GOOD } else { WARN };
+                    let pb_rect = Rect::new(0.415, 0.074, 0.17, 0.032);
+                    ui::panel(canvas, pb_rect, PANEL_DEEP, pb_color);
+                    ui::text_center(canvas, pb_rect, &pb_label, 0.56, pb_color);
+                }
+            }
         }
     }
     fn draw_top_bar(&self, canvas: &mut Canvas, layout: &DrivingLayout) {
@@ -3234,6 +3343,7 @@ mod reload_tests {
                 split_times: vec![Some(45.0), Some(90.0)],
                 finished: true,
                 finish_crossed_forward: false,
+                ..Default::default()
             };
         }
         let t_drive = t_go + Duration::from_secs(120);
@@ -3329,7 +3439,7 @@ mod reload_tests {
         assert_eq!(app.selection.vehicle.id, "toyota-corolla-wrc");
 
         // 2. Stage selection & missing files gate
-        assert_eq!(app.content.stages.len(), 30);
+        assert_eq!(app.content.stages.len(), 36);
         app.apply_command(menu::Command::SelectStage(0));
         assert_eq!(app.selection.stage.id, "harwood-forest");
 
@@ -3369,6 +3479,8 @@ mod reload_tests {
                 split_times: vec![Some(45.0), Some(90.0)],
                 finished: true,
                 finish_crossed_forward: true,
+                sim_elapsed_seconds: 135.420,
+                official_finish_seconds: Some(135.420),
             };
         }
         let layout = DrivingLayout::default();

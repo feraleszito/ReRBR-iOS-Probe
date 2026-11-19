@@ -27,6 +27,9 @@ pub struct StageResult {
     pub driving_seconds: f64,
     pub penalty_seconds: f64,
     pub total_seconds: f64,
+    pub driving_ms: u64,
+    pub penalty_ms: u64,
+    pub total_ms: u64,
     pub false_start: bool,
     pub splits_passed: usize,
     pub splits_total: usize,
@@ -46,6 +49,10 @@ pub struct Clock {
     finish_rollout_target_dist: Option<f32>,
     finish_rollout_started: Option<Instant>,
     finish_rollout_until: Option<Instant>,
+    /// Simulation-time anchor captured at the exact transition into `Phase::Driving`.
+    sim_driving_origin: Option<f64>,
+    /// Deterministic driving time derived strictly from 720 Hz simulation steps (never render FPS).
+    sim_driving_elapsed: Option<f64>,
     result: Option<StageResult>,
 }
 
@@ -70,6 +77,8 @@ impl Clock {
         self.finish_rollout_target_dist = None;
         self.finish_rollout_started = None;
         self.finish_rollout_until = None;
+        self.sim_driving_origin = None;
+        self.sim_driving_elapsed = None;
         self.result = None;
     }
 
@@ -85,6 +94,8 @@ impl Clock {
         self.phase = Phase::Countdown;
         self.elapsed = Duration::ZERO;
         self.last = Some(now);
+        self.sim_driving_origin = None;
+        self.sim_driving_elapsed = None;
         self.result = None;
     }
 
@@ -102,7 +113,22 @@ impl Clock {
         self.finish_rollout_target_dist = None;
         self.finish_rollout_started = None;
         self.finish_rollout_until = None;
+        self.sim_driving_origin = None;
+        self.sim_driving_elapsed = None;
         self.result = None;
+    }
+
+    /// Anchors and advances the driving stopwatch from deterministic 720 Hz simulation time
+    /// (`StageTiming::sim_elapsed_seconds`), ensuring timing never depends on render FPS.
+    pub fn sync_simulation_time(&mut self, sim_elapsed_seconds: f64) {
+        if self.phase != Phase::Driving
+            || !sim_elapsed_seconds.is_finite()
+            || sim_elapsed_seconds < 0.0
+        {
+            return;
+        }
+        let origin = *self.sim_driving_origin.get_or_insert(sim_elapsed_seconds);
+        self.sim_driving_elapsed = Some((sim_elapsed_seconds - origin).max(0.0));
     }
 
     /// Freezes the race clock when a Rally School exercise concludes (`ModeEnd::Finished` / `Retired`).
@@ -119,6 +145,7 @@ impl Clock {
 
     /// Concepto A: freezes the official race stopwatch once at the exact instant of finish crossing,
     /// while allowing the car to roll through the visible finish line (`Phase::Finishing`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn begin_finish_rollout(
         &mut self,
         now: Instant,
@@ -126,15 +153,43 @@ impl Clock {
         splits_total: usize,
         finish_distance: f32,
     ) -> bool {
+        self.begin_finish_rollout_with_sim_time(
+            now,
+            splits_passed,
+            splits_total,
+            finish_distance,
+            None,
+        )
+    }
+
+    /// Simulation-authoritative finish freeze: prefers authentic `CTimeKeeper` finish time or
+    /// 720 Hz simulation step elapsed time, never render-thread FPS.
+    pub fn begin_finish_rollout_with_sim_time(
+        &mut self,
+        now: Instant,
+        splits_passed: usize,
+        splits_total: usize,
+        finish_distance: f32,
+        official_finish_seconds: Option<f64>,
+    ) -> bool {
         if self.phase != Phase::Driving || self.result.is_some() {
             return false;
         }
-        let driving_seconds = self.elapsed.as_secs_f64();
+        let driving_seconds = official_finish_seconds
+            .filter(|t| t.is_finite() && *t > 0.0)
+            .or(self.sim_driving_elapsed)
+            .unwrap_or(self.elapsed.as_secs_f64());
         let penalty_seconds = self.penalty.as_secs_f64();
+        let driving_ms = (driving_seconds * 1000.0).round().max(0.0) as u64;
+        let penalty_ms = (penalty_seconds * 1000.0).round().max(0.0) as u64;
+        let total_ms = driving_ms.saturating_add(penalty_ms);
         self.result = Some(StageResult {
             driving_seconds,
             penalty_seconds,
             total_seconds: driving_seconds + penalty_seconds,
+            driving_ms,
+            penalty_ms,
+            total_ms,
             false_start: self.false_start,
             splits_passed,
             splits_total,
@@ -262,7 +317,11 @@ impl Clock {
     /// Official elapsed race time including any jump-start penalty.
     pub fn seconds(&self) -> Option<f64> {
         match self.phase {
-            Phase::Driving => Some(self.elapsed.as_secs_f64() + self.penalty.as_secs_f64()),
+            Phase::Driving => Some(
+                self.sim_driving_elapsed
+                    .unwrap_or(self.elapsed.as_secs_f64())
+                    + self.penalty.as_secs_f64(),
+            ),
             Phase::Finishing | Phase::Finished => self.result.map(|r| r.total_seconds),
             _ => None,
         }
@@ -272,7 +331,10 @@ impl Clock {
     #[allow(dead_code)]
     pub fn raw_seconds(&self) -> Option<f64> {
         match self.phase {
-            Phase::Driving => Some(self.elapsed.as_secs_f64()),
+            Phase::Driving => Some(
+                self.sim_driving_elapsed
+                    .unwrap_or(self.elapsed.as_secs_f64()),
+            ),
             Phase::Finishing | Phase::Finished => self.result.map(|r| r.driving_seconds),
             _ => None,
         }
@@ -477,5 +539,45 @@ mod tests {
         assert!(slow.rollout_complete(t_cross + Duration::from_millis(450), 1000.5));
         assert!(slow.complete_finish());
         assert_eq!(slow.phase, Phase::Finished);
+    }
+
+    #[test]
+    fn simulation_clock_is_independent_of_render_fps() {
+        let t0 = Instant::now();
+        let mut low_fps = Clock::default();
+        low_fps.ready(t0);
+        low_fps.tick(t0 + Duration::from_secs(5), true);
+        low_fps.sync_simulation_time(5.0);
+        // Simulate severe render stall (wall clock +90s, but simulation ran exactly 60.500s).
+        low_fps.tick(t0 + Duration::from_secs(95), true);
+        low_fps.sync_simulation_time(65.5);
+        assert!(low_fps.begin_finish_rollout_with_sim_time(
+            t0 + Duration::from_secs(95),
+            2,
+            2,
+            5000.0,
+            None,
+        ));
+
+        let mut high_fps = Clock::default();
+        high_fps.ready(t0);
+        high_fps.tick(t0 + Duration::from_secs(5), true);
+        high_fps.sync_simulation_time(5.0);
+        // 120 FPS smooth ticks over 40s wall clock, simulation still ran exactly 60.500s.
+        high_fps.tick(t0 + Duration::from_secs(45), true);
+        high_fps.sync_simulation_time(65.5);
+        assert!(high_fps.begin_finish_rollout_with_sim_time(
+            t0 + Duration::from_secs(45),
+            2,
+            2,
+            5000.0,
+            None,
+        ));
+
+        let r_low = low_fps.result().unwrap();
+        let r_high = high_fps.result().unwrap();
+        assert_eq!(r_low.driving_ms, 60_500);
+        assert_eq!(r_high.driving_ms, 60_500);
+        assert_eq!(r_low.total_ms, r_high.total_ms);
     }
 }

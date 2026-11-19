@@ -8,6 +8,8 @@ pub mod mesh;
 pub mod neighbors;
 #[cfg(feature = "physics-stage")]
 pub mod stage;
+#[cfg(feature = "physics-stage")]
+pub mod stage_audit;
 pub mod texture;
 
 #[cfg(feature = "physics-stage")]

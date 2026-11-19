@@ -40,6 +40,10 @@ pub struct StageTiming {
     pub split_times: Vec<Option<f64>>,
     pub finished: bool,
     pub finish_crossed_forward: bool,
+    /// Deterministic simulation time accumulated from fixed 720 Hz steps (`steps * dt`), independent of FPS.
+    pub sim_elapsed_seconds: f64,
+    /// Authentic `CTimeKeeper` finish time (`finish_time - origin`) in simulation seconds once finished.
+    pub official_finish_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,6 +577,11 @@ impl Session {
             split_times: tk.card.splits().iter().map(|s| s.time.map(|t| t - tk.card.origin)).collect(),
             finished,
             finish_crossed_forward: finished && self.finish_crossed_forward,
+            sim_elapsed_seconds: f64::from(self.steps) * f64::from(self.dt),
+            official_finish_seconds: finished
+                .then_some(tk.card.finish_time.map(|ft| (ft - tk.card.origin).max(0.0)))
+                .flatten()
+                .filter(|t| t.is_finite() && *t > 0.0),
         }
     }
     pub fn sample(&self) -> diagnostics::Sample {

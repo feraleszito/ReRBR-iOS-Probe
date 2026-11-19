@@ -110,13 +110,18 @@ pub fn block_mesh(block: &lbs::GeometryBlock<'_>) -> Mesh {
         mesh.vertices
             .extend((0..view.vertex_count).map(|v| repack(view, v, layout)));
     }
+    let has_near_or_always = block.chunks.iter().any(|c| matches!(c.list, 1 | 2));
     for chunk in &block.chunks {
-        // Never overlay the far LOD on the near one in this close-up experiment.
+        // Never overlay the far LOD on top of near/always geometry in the same block.
+        // If a block is authored exclusively as far-LOD backdrop (list == 3 only, e.g.
+        // Diamond Creek I/II blocks 0..5, Tanner block 39, Kaihuavaara blocks 0..1),
+        // load its genuine original list-3 triangles instead of discarding the block.
         if chunk.list == 3 {
             mesh.far_draws += 1;
-            continue;
-        }
-        if !matches!(chunk.list, 1 | 2) {
+            if has_near_or_always {
+                continue;
+            }
+        } else if !matches!(chunk.list, 1 | 2) {
             mesh.skipped_draws += 1;
             continue;
         }
@@ -259,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn block_mesh_counts_list_3_far_chunk_without_near_indices() {
+    fn block_mesh_loads_far_only_list_3_block_and_skips_list_3_when_near_present() {
         let stride = lbs::VIEW_STRIDES[0];
         let vertices = vec![0u8; stride * 3];
         let indices: Vec<u8> = [0u16, 1, 2]
@@ -273,7 +278,7 @@ mod tests {
             vertex_count: 3,
             stride,
         });
-        let block = lbs::GeometryBlock {
+        let far_only = lbs::GeometryBlock {
             views,
             chunks: vec![sample_render_chunk(0, 3, false)],
             bounds: lbs::Bounds {
@@ -281,9 +286,29 @@ mod tests {
                 half_extent: [1.0; 3],
             },
         };
-        let mesh = block_mesh(&block);
-        assert!(mesh.indices.is_empty());
-        assert_eq!(mesh.far_draws, 1);
-        assert_eq!(mesh.skipped_draws, 0);
+        let mesh_far = block_mesh(&far_only);
+        assert_eq!(mesh_far.indices.len(), 3);
+        assert_eq!(mesh_far.draws.len(), 1);
+        assert_eq!(mesh_far.draws[0].list, 3);
+        assert_eq!(mesh_far.far_draws, 1);
+        assert_eq!(mesh_far.skipped_draws, 0);
+
+        let mixed = lbs::GeometryBlock {
+            views,
+            chunks: vec![
+                sample_render_chunk(0, 1, false),
+                sample_render_chunk(0, 3, false),
+            ],
+            bounds: lbs::Bounds {
+                center: [0.0; 3],
+                half_extent: [1.0; 3],
+            },
+        };
+        let mesh_mixed = block_mesh(&mixed);
+        assert_eq!(mesh_mixed.indices.len(), 3);
+        assert_eq!(mesh_mixed.draws.len(), 1);
+        assert_eq!(mesh_mixed.draws[0].list, 1);
+        assert_eq!(mesh_mixed.far_draws, 1);
+        assert_eq!(mesh_mixed.skipped_draws, 0);
     }
 }

@@ -269,7 +269,8 @@ impl StageDescriptor {
     }
     pub fn surface(&self) -> &'static str {
         match self.original_map {
-            41..=46 | 51..=56 | 73 | 85 | 86 => "Tarmac",
+            10..=18 => "Snow",
+            41..=49 | 73 | 85 | 86 => "Tarmac",
             _ => "Gravel",
         }
     }
@@ -277,6 +278,7 @@ impl StageDescriptor {
         match self.original_map {
             10..=15 => "Finland",
             20..=25 => "United Kingdom",
+            31..=36 => "Australia",
             41..=46 => "France",
             51..=56 => "Japan",
             61..=66 => "United States",
@@ -601,15 +603,22 @@ impl StageDescriptor {
             terrain_blocks: 144,
         }
     }
-    /// Original Montblanc flip-spectator models needed to build the car's handles.
-    /// Britain models remain part of the legacy common boot requirements.
+    /// Original rally flip-spectator models needed to build the car's animation handles.
+    /// Britain (`br_spectator_00..03`) remains part of the legacy common boot requirements.
     pub fn additional_boot_paths(&self) -> Vec<String> {
-        if matches!(self.original_map, 41..=46) {
-            (0..4)
-                .map(|i| format!("Sgs/mo_spectator_{i:02}.sgs"))
-                .collect()
-        } else {
-            Vec::new()
+        let prefix = match self.original_map {
+            10..=15 => Some("ar"),
+            31..=36 => Some("au"),
+            41..=46 => Some("mo"),
+            51..=56 => Some("ho"),
+            61..=66 => Some("us"),
+            _ => None,
+        };
+        match prefix {
+            Some(p) => (0..4)
+                .map(|i| format!("Sgs/{p}_spectator_{i:02}.sgs"))
+                .collect(),
+            None => Vec::new(),
         }
     }
     pub fn validated_presets() -> [Self; 4] {
@@ -631,6 +640,13 @@ impl StageDescriptor {
             Self::new_rbr(23, "shepherds-shield", "Shepherds Shield", 250),
             Self::new_rbr(24, "harwood-forest-ii", "Harwood Forest II", 282),
             Self::new_rbr(25, "chirdonhead-ii", "Chirdonhead II", 242),
+            // Australia (retail uses M/N/E variants, no _O)
+            Self::new_rbr_variant(31, "newbobs", "NewBobs", "E", 2, 358),
+            Self::new_rbr_variant(32, "greenhills", "Greenhills", "M", 0, 241),
+            Self::new_rbr_variant(33, "mineshaft", "Mineshaft", "N", 1, 267),
+            Self::new_rbr_variant(34, "east-west", "East-West", "E", 2, 270),
+            Self::new_rbr_variant(35, "newbobs-ii", "NewBobs II", "N", 1, 361),
+            Self::new_rbr_variant(36, "east-west-ii", "East-West II", "M", 0, 270),
             // France (Mont Blanc)
             Self::new_rbr(42, "joux-verte", "Joux Verte", 158),
             Self::new_rbr(43, "bisanne", "Bisanne", 112),
@@ -643,13 +659,13 @@ impl StageDescriptor {
             Self::new_rbr(13, "autiovaara", "Autiovaara", 177),
             Self::new_rbr(14, "kaihuavaara-ii", "Kaihuavaara II", 154),
             Self::new_rbr(15, "mustaselka-ii", "Mustaselka II", 182),
-            // Japan (Hokkaido)
-            Self::new_rbr(51, "noiker", "Noiker", 357),
-            Self::new_rbr(52, "sipirkakim", "Sipirkakim", 344),
-            Self::new_rbr(53, "pirka-menoko", "Pirka Menoko", 183),
-            Self::new_rbr(54, "tanner", "Tanner", 131),
-            Self::new_rbr(55, "noiker-ii", "Noiker II", 357),
-            Self::new_rbr(56, "tanner-ii", "Tanner II", 130),
+            // Japan (Hokkaido: retail season.dat uses damp wetness=1 for _O)
+            Self::new_rbr_weather(51, "noiker", "Noiker", "O", 3, 1, 357),
+            Self::new_rbr_weather(52, "sipirkakim", "Sipirkakim", "O", 3, 1, 344),
+            Self::new_rbr_weather(53, "pirka-menoko", "Pirka Menoko", "O", 3, 1, 183),
+            Self::new_rbr_weather(54, "tanner", "Tanner", "O", 3, 1, 131),
+            Self::new_rbr_weather(55, "noiker-ii", "Noiker II", "O", 3, 1, 357),
+            Self::new_rbr_weather(56, "tanner-ii", "Tanner II", "O", 3, 1, 130),
             // United States
             Self::new_rbr(61, "fraizer-wells", "Fraizer Wells", 150),
             Self::new_rbr(62, "prospect-ridge", "Prospect Ridge", 232),
@@ -660,14 +676,35 @@ impl StageDescriptor {
         ]
     }
     fn new_rbr(map: u32, id: &str, name: &str, terrain_blocks: usize) -> Self {
+        Self::new_rbr_weather(map, id, name, "O", 3, 0, terrain_blocks)
+    }
+    fn new_rbr_variant(
+        map: u32,
+        id: &str,
+        name: &str,
+        suffix: &str,
+        weather_letter: u32,
+        terrain_blocks: usize,
+    ) -> Self {
+        Self::new_rbr_weather(map, id, name, suffix, weather_letter, 0, terrain_blocks)
+    }
+    fn new_rbr_weather(
+        map: u32,
+        id: &str,
+        name: &str,
+        suffix: &str,
+        weather_letter: u32,
+        wetness: u32,
+        terrain_blocks: usize,
+    ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             original_map: map,
-            stem: format!("track-{map}_O"),
+            stem: format!("track-{map}_{suffix}"),
             documents_maps: "RBR/Maps".into(),
-            weather_letter: 3,
-            wetness: 0,
+            weather_letter,
+            wetness,
             wear: 1,
             terrain_blocks,
         }

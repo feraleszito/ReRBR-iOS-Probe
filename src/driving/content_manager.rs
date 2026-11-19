@@ -401,15 +401,14 @@ pub fn audit_stage(root: &Path, stage: &StageDescriptor) -> FileAudit {
     // Known retail overcast presets share DDS files with these sibling archives.
     // Existence only; the loader still parses metadata and verifies ZIP/DDS data.
     paths.push(format!("{}_textures.rbz", stage.stem));
-    let sibling = match stage.original_map {
-        20 | 22 => Some("N"),
-        23 => Some("E"),
-        41 | 42 => Some("M"),
-        43 | 45 => Some("N"),
-        44 | 46 => Some("E"),
-        _ => None,
+    let siblings: &[&str] = match stage.original_map {
+        20 | 22 | 43 | 45 | 51 | 53 | 63 | 65 => &["N"],
+        23 | 44 | 46 | 64 | 66 => &["E"],
+        41 | 42 | 52 | 56 | 61 | 62 => &["M"],
+        54 => &["E", "M"],
+        _ => &[],
     };
-    if let Some(s) = sibling {
+    for s in siblings {
         paths.push(format!("track-{}_{s}_textures.rbz", stage.original_map));
     }
     let mut audit = audit_paths(&root.join(&stage.documents_maps), &paths);
@@ -527,7 +526,7 @@ mod tests {
         }
         assert_eq!(catalog.vehicles[8].state, EntryState::Unsupported);
         assert!(!catalog.vehicles[8].descriptor.is_original_rbr());
-        assert_eq!(catalog.stages.len(), 30);
+        assert_eq!(catalog.stages.len(), 36);
         assert_eq!(catalog.stages[0].state, EntryState::Selected);
         assert!(!catalog.inspected);
         assert!(catalog.vehicle("toyota-corolla-wrc").is_some());

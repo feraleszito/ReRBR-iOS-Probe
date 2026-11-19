@@ -259,6 +259,9 @@ pub struct Context<'a> {
     pub school: Option<&'a super::school::SchoolCatalog>,
     pub active_school_lesson: Option<u32>,
     pub school_result: Option<&'a super::school::SchoolRunResult>,
+    pub personal_best_ms: Option<u64>,
+    pub inspected_stage_pb_ms: Option<u64>,
+    pub record_outcome: Option<&'a super::records::RecordOutcome>,
 }
 
 #[derive(Debug, Default)]
@@ -685,6 +688,12 @@ impl Menu {
                         } else {
                             "EXPERIMENTAL RBR"
                         },
+                    ));
+                    rows.push(Row::info(
+                        "RÉCORD PERSONAL",
+                        ctx.inspected_stage_pb_ms
+                            .map(super::records::format_time_ms)
+                            .unwrap_or_else(|| "SIN RÉCORD".into()),
                     ));
                 }
                 if let Some(missing) = entry.and_then(|e| e.files.missing_label()) {
@@ -1196,24 +1205,32 @@ impl Menu {
                 let mut rows = Vec::new();
                 if let Some(res) = ctx.stage_result {
                     rows.push(Row::info(
-                        "DRIVING TIME",
-                        format_stage_time(res.driving_seconds),
+                        "TIEMPO CONDUCCIÓN",
+                        super::records::format_time_ms(res.driving_ms),
                     ));
                     rows.push(Row::info(
-                        "PENALTIES",
+                        "PENALIZACIONES",
                         if res.false_start {
-                            format!("+{:.0}s FALSE START", res.penalty_seconds)
+                            format!("+{:.0}s SALIDA EN FALSO", res.penalty_seconds)
                         } else {
-                            "0.0s".into()
+                            "0.000s".into()
                         },
                     ));
                     rows.push(Row::info(
-                        "TOTAL TIME",
-                        format_stage_time(res.total_seconds),
+                        "TIEMPO TOTAL",
+                        super::records::format_time_ms(res.total_ms),
                     ));
                     rows.push(Row::info(
                         "CHECKPOINTS",
                         format!("{}/{}", res.splits_passed, res.splits_total),
+                    ));
+                }
+                if let Some(outcome) = ctx.record_outcome {
+                    rows.push(Row::info("RÉCORD PERSONAL", outcome.summary_line()));
+                } else if let Some(pb) = ctx.personal_best_ms {
+                    rows.push(Row::info(
+                        "RÉCORD PERSONAL",
+                        super::records::format_time_ms(pb),
                     ));
                 }
                 if ctx.has_replay {
@@ -2214,6 +2231,9 @@ mod tests {
             school: None,
             active_school_lesson: None,
             school_result: None,
+            personal_best_ms: None,
+            inspected_stage_pb_ms: None,
+            record_outcome: None,
         }
     }
 
@@ -2520,7 +2540,7 @@ mod tests {
                 Some(expected)
             );
         }
-        assert_eq!(content.stages.len(), 30);
+        assert_eq!(content.stages.len(), 36);
         for (i, stage) in content.stages.iter().enumerate() {
             menu.inspected_stage = i;
             menu.page = Page::StageDetail;
@@ -2614,6 +2634,9 @@ mod tests {
             driving_seconds: 125.4,
             penalty_seconds: 10.0,
             total_seconds: 135.4,
+            driving_ms: 125_400,
+            penalty_ms: 10_000,
+            total_ms: 135_400,
             false_start: true,
             splits_passed: 2,
             splits_total: 2,
@@ -2624,11 +2647,11 @@ mod tests {
             ..Menu::default()
         };
         let rows = menu.rows(&ctx);
-        assert!(rows.iter().any(|r| r.label == "DRIVING TIME"));
-        assert!(rows.iter().any(|r| r.label == "TOTAL TIME"));
+        assert!(rows.iter().any(|r| r.label == "TIEMPO CONDUCCIÓN"));
+        assert!(rows.iter().any(|r| r.label == "TIEMPO TOTAL"));
         assert!(rows.iter().any(|r| matches!(
             &r.kind,
-            RowKind::Info { value } if value == "02:15.4"
+            RowKind::Info { value } if value == "02:15.400"
         )));
         assert!(rows.iter().any(|r| matches!(
             &r.kind,
@@ -2721,15 +2744,15 @@ mod tests {
         menu.back();
         assert_eq!(menu.page, Page::Main);
 
-        // 2. Pagination test across all 4 pages (30 stages)
+        // 2. Pagination test across all 5 pages (36 retail stages including Australia)
         menu.page = Page::Stages;
         menu.stage_page = 0;
         let total_stages = content.stages.len();
-        assert_eq!(total_stages, 30);
+        assert_eq!(total_stages, 36);
         let total_pages = total_stages.div_ceil(8);
-        assert_eq!(total_pages, 4);
+        assert_eq!(total_pages, 5);
 
-        for expected_page in 0..4 {
+        for expected_page in 0..5 {
             let rows = menu.rows(&ctx);
             let page_row = rows.iter().find(|r| r.label == "PÁGINA");
             assert!(page_row.is_some());
