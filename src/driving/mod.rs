@@ -1,6 +1,7 @@
 //! Original physics-owned driving presentation, menus and session controls.
 pub mod audio;
 pub mod cameras;
+pub mod career;
 pub mod championship;
 pub mod codriver;
 pub mod content_manager;
@@ -136,6 +137,15 @@ pub struct Runtime {
     showroom_loading: bool,
     showroom_error: Option<String>,
     coming_soon_notice: Option<(String, Instant)>,
+    pub career: career::CareerStore,
+    active_career_stage: bool,
+    last_career_stage_outcome: Option<career::StageRecordOutcome>,
+    pilot_preset_index: usize,
+    pilot_tag_index: usize,
+    pilot_draft_name: String,
+    career_create_return_dealership: bool,
+    pending_buy_vehicle_id: Option<String>,
+    selected_career_difficulty: career::CareerDifficulty,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -266,6 +276,15 @@ impl Runtime {
             showroom_loading: false,
             showroom_error: None,
             coming_soon_notice: None,
+            career: career::CareerStore::load(),
+            active_career_stage: false,
+            last_career_stage_outcome: None,
+            pilot_preset_index: 0,
+            pilot_tag_index: 0,
+            pilot_draft_name: career::PILOT_NAME_PRESETS[0].to_string(),
+            career_create_return_dealership: false,
+            pending_buy_vehicle_id: None,
+            selected_career_difficulty: career::CareerDifficulty::Beginner,
         }
     }
 
@@ -324,6 +343,34 @@ impl Runtime {
                 } else {
                     indices.first().copied().unwrap_or(0)
                 };
+                let entry = self.content.vehicles.get(active_idx)?;
+                if !entry.can_showroom_view() {
+                    return None;
+                }
+                Some((ShowroomMode::Garage, entry.descriptor.clone(), Vec::new()))
+            }
+            menu::Page::Dealership => {
+                let ctx = self.context();
+                let indices = self.menu.dealership_indices(&ctx);
+                let active_idx = if indices.contains(&self.menu.dealership_vehicle) {
+                    self.menu.dealership_vehicle
+                } else {
+                    indices.first().copied().unwrap_or(0)
+                };
+                let entry = self.content.vehicles.get(active_idx)?;
+                if !entry.can_showroom_view() {
+                    return None;
+                }
+                Some((ShowroomMode::Garage, entry.descriptor.clone(), Vec::new()))
+            }
+            menu::Page::CareerGarage => {
+                let ctx = self.context();
+                let indices = self.menu.career_garage_indices(&ctx);
+                let cursor = self
+                    .menu
+                    .career_garage_cursor
+                    .min(indices.len().saturating_sub(1));
+                let active_idx = *indices.get(cursor)?;
                 let entry = self.content.vehicles.get(active_idx)?;
                 if !entry.can_showroom_view() {
                     return None;
@@ -427,6 +474,53 @@ impl Runtime {
                         gamepad::MenuNavEvent::Confirm => {
                             let idx = self.menu.inspected_vehicle;
                             self.menu_command(menu::Command::SelectVehicle(idx));
+                        }
+                        gamepad::MenuNavEvent::Back => {
+                            self.menu_command(menu::Command::Back);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                if self.menu.page == menu::Page::Dealership {
+                    match ev {
+                        gamepad::MenuNavEvent::Left => {
+                            self.menu_command(menu::Command::DealershipPrevCar);
+                        }
+                        gamepad::MenuNavEvent::Right => {
+                            self.menu_command(menu::Command::DealershipNextCar);
+                        }
+                        gamepad::MenuNavEvent::Confirm => {
+                            if self.career.profile.is_none() {
+                                self.career_create_return_dealership = true;
+                                self.menu_command(menu::Command::Open(menu::Page::CareerCreate));
+                            } else if self.pending_buy_vehicle_id.is_some() {
+                                self.menu_command(menu::Command::DealershipConfirmBuy);
+                            } else {
+                                self.menu_command(menu::Command::DealershipRequestBuy);
+                            }
+                        }
+                        gamepad::MenuNavEvent::Back => {
+                            if self.pending_buy_vehicle_id.is_some() {
+                                self.menu_command(menu::Command::DealershipCancelBuy);
+                            } else {
+                                self.menu_command(menu::Command::Back);
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                if self.menu.page == menu::Page::CareerGarage {
+                    match ev {
+                        gamepad::MenuNavEvent::Left => {
+                            self.menu_command(menu::Command::CareerGaragePrevCar);
+                        }
+                        gamepad::MenuNavEvent::Right => {
+                            self.menu_command(menu::Command::CareerGarageNextCar);
+                        }
+                        gamepad::MenuNavEvent::Confirm => {
+                            self.menu_command(menu::Command::CareerGarageSelectActive);
                         }
                         gamepad::MenuNavEvent::Back => {
                             self.menu_command(menu::Command::Back);
@@ -776,6 +870,14 @@ impl Runtime {
                 } else {
                     self.coming_soon_notice = None;
                     match section {
+                        menu::MainSection::Career => {
+                            self.career_create_return_dealership = false;
+                            if self.career.profile.is_some() {
+                                self.menu.open(menu::Page::CareerHub);
+                            } else {
+                                self.menu.open(menu::Page::CareerCreate);
+                            }
+                        }
                         menu::MainSection::TimeTrial => self.menu.open(menu::Page::Drive),
                         menu::MainSection::Garage => {
                             if let Some(pos) = self
@@ -789,6 +891,19 @@ impl Runtime {
                             self.showroom_camera
                                 .set_mode(crate::car::showroom::ShowroomMode::Garage);
                             self.menu.open(menu::Page::Garage);
+                        }
+                        menu::MainSection::UsedCars => {
+                            self.pending_buy_vehicle_id = None;
+                            let first = {
+                                let ctx = self.context();
+                                self.menu.dealership_indices(&ctx).first().copied()
+                            };
+                            if let Some(idx) = first {
+                                self.menu.dealership_vehicle = idx;
+                            }
+                            self.showroom_camera
+                                .set_mode(crate::car::showroom::ShowroomMode::Garage);
+                            self.menu.open(menu::Page::Dealership);
                         }
                         menu::MainSection::RallySchool => self.menu.open(menu::Page::RallySchool),
                         menu::MainSection::Settings => self.menu.open(menu::Page::Settings),
@@ -842,16 +957,37 @@ impl Runtime {
                     }
                     self.showroom_camera
                         .set_mode(crate::car::showroom::ShowroomMode::Garage);
+                } else if page == menu::Page::Dealership {
+                    self.pending_buy_vehicle_id = None;
+                    let first = {
+                        let ctx = self.context();
+                        self.menu.dealership_indices(&ctx).first().copied()
+                    };
+                    if let Some(idx) = first {
+                        self.menu.dealership_vehicle = idx;
+                    }
+                    self.showroom_camera
+                        .set_mode(crate::car::showroom::ShowroomMode::Garage);
+                } else if page == menu::Page::CareerGarage {
+                    self.menu.career_garage_cursor = 0;
+                    self.showroom_camera
+                        .set_mode(crate::car::showroom::ShowroomMode::Garage);
+                } else if page == menu::Page::CareerCreate {
+                    self.career_create_return_dealership = self.menu.page == menu::Page::Dealership;
                 }
                 self.coming_soon_notice = None;
                 self.menu.open(page);
             }
             Back => {
+                self.pending_buy_vehicle_id = None;
                 self.menu.back();
                 if self.menu.page == menu::Page::Main {
                     self.showroom_camera
                         .set_mode(crate::car::showroom::ShowroomMode::MainMenu);
-                } else if self.menu.page == menu::Page::Garage {
+                } else if matches!(
+                    self.menu.page,
+                    menu::Page::Garage | menu::Page::Dealership | menu::Page::CareerGarage
+                ) {
                     self.showroom_camera
                         .set_mode(crate::car::showroom::ShowroomMode::Garage);
                 }
@@ -872,6 +1008,9 @@ impl Runtime {
                 self.active_school_lesson = None;
                 self.active_school_result = None;
                 self.school_incident_banner = None;
+                self.active_career_stage = false;
+                self.last_career_stage_outcome = None;
+                self.pending_buy_vehicle_id = None;
                 self.split_tracker.reset();
                 self.last_finish_splits_ms.clear();
                 self.last_run_prev_pb_splits_ms = None;
@@ -886,6 +1025,10 @@ impl Runtime {
                 audio::set_menu_music_active(true);
             }
             StartRally => {
+                if self.menu.page != menu::Page::CareerChampionship {
+                    self.active_career_stage = false;
+                    self.last_career_stage_outcome = None;
+                }
                 self.content = Catalog::scan(&self.selection);
                 if self.selection.vehicle.is_ngp_experimental_car() {
                     if let Some(entry) = self.content.vehicle(&self.selection.vehicle.id) {
@@ -1909,7 +2052,363 @@ impl Runtime {
                     }
                 }
             }
+            CareerPilotPrev | CareerPilotNext => {
+                let len = career::PILOT_NAME_PRESETS.len();
+                let delta = if matches!(command, CareerPilotNext) {
+                    1isize
+                } else {
+                    -1isize
+                };
+                self.pilot_preset_index =
+                    ((self.pilot_preset_index as isize + delta).rem_euclid(len as isize)) as usize;
+                self.refresh_pilot_draft_name();
+            }
+            CareerPilotTagNext => {
+                self.pilot_tag_index = (self.pilot_tag_index + 1) % 6;
+                self.refresh_pilot_draft_name();
+            }
+            CareerCreateConfirm => match self.career.create_profile(&self.pilot_draft_name) {
+                Ok(()) => {
+                    self.message = Some(format!(
+                        "PERFIL {} CREADO · SALDO {}",
+                        self.pilot_draft_name,
+                        career::format_usd(career::INITIAL_CASH_USD)
+                    ));
+                    self.menu.reset_to_main();
+                    if self.career_create_return_dealership {
+                        self.career_create_return_dealership = false;
+                        self.showroom_camera
+                            .set_mode(crate::car::showroom::ShowroomMode::Garage);
+                        self.menu.open(menu::Page::Dealership);
+                    } else {
+                        self.menu.open(menu::Page::CareerHub);
+                    }
+                }
+                Err(err) => {
+                    self.message = Some(err);
+                }
+            },
+            DealershipPrevCar | DealershipNextCar => {
+                self.pending_buy_vehicle_id = None;
+                let indices = {
+                    let ctx = self.context();
+                    self.menu.dealership_indices(&ctx)
+                };
+                if !indices.is_empty() {
+                    let pos = indices
+                        .iter()
+                        .position(|&i| i == self.menu.dealership_vehicle)
+                        .unwrap_or(0);
+                    let delta = if matches!(command, DealershipNextCar) {
+                        1isize
+                    } else {
+                        -1isize
+                    };
+                    let next = ((pos as isize + delta).rem_euclid(indices.len() as isize)) as usize;
+                    self.menu.dealership_vehicle = indices[next];
+                    self.message = None;
+                }
+            }
+            DealershipFilterCycle => {
+                self.pending_buy_vehicle_id = None;
+                self.menu.dealership_filter = self.menu.dealership_filter.next();
+                let indices = {
+                    let ctx = self.context();
+                    self.menu.dealership_indices(&ctx)
+                };
+                if !indices.contains(&self.menu.dealership_vehicle) {
+                    if let Some(&first) = indices.first() {
+                        self.menu.dealership_vehicle = first;
+                    }
+                }
+            }
+            DealershipRequestBuy => {
+                let indices = {
+                    let ctx = self.context();
+                    self.menu.dealership_indices(&ctx)
+                };
+                let active_idx = if indices.contains(&self.menu.dealership_vehicle) {
+                    self.menu.dealership_vehicle
+                } else {
+                    indices.first().copied().unwrap_or(0)
+                };
+                let Some(entry) = self.content.vehicles.get(active_idx) else {
+                    return;
+                };
+                let Some(profile) = self.career.profile.as_ref() else {
+                    self.career_create_return_dealership = true;
+                    self.menu.open(menu::Page::CareerCreate);
+                    return;
+                };
+                let cap = entry.capability(self.ngp_experimental);
+                let spec = career::vehicle_market_spec(entry);
+                if cap != content_manager::DriveCapability::Drivable {
+                    self.message = Some("SOLO VISUALIZACIÓN 3D — NO COMPRABLE SIN FÍSICA".into());
+                } else if profile.owns_vehicle(&entry.descriptor.id) {
+                    self.message = Some("YA TIENES ESTE COCHE EN TU GARAJE DE CARRERA".into());
+                } else if !profile.can_afford(spec.price_usd) {
+                    self.message = Some(format!(
+                        "SALDO INSUFICIENTE (NECESITAS {})",
+                        career::format_usd(spec.price_usd)
+                    ));
+                } else {
+                    self.pending_buy_vehicle_id = Some(entry.descriptor.id.clone());
+                    self.message = Some(format!(
+                        "PULSA CONFIRMAR COMPRA PARA ADQUIRIR {} POR {}",
+                        entry.descriptor.name,
+                        career::format_usd(spec.price_usd)
+                    ));
+                }
+            }
+            DealershipConfirmBuy => {
+                let Some(target_id) = self.pending_buy_vehicle_id.take() else {
+                    return;
+                };
+                let Some(entry) = self.content.vehicle(&target_id).cloned() else {
+                    self.message = Some("VEHÍCULO NO ENCONTRADO EN CATÁLOGO".into());
+                    return;
+                };
+                let ngp_exp = self.ngp_experimental;
+                let res = match self.career.profile.as_mut() {
+                    Some(profile) => profile.buy_vehicle(&entry, ngp_exp),
+                    None => Err("CREA UN PERFIL DE CARRERA PRIMERO".into()),
+                };
+                match res {
+                    Ok(paid) => {
+                        if let Err(err) = self.career.save() {
+                            self.message = Some(format!("ERROR GUARDANDO CARRERA: {err}"));
+                        } else {
+                            let rem = self.career.profile.as_ref().map_or(0, |p| p.cash_usd);
+                            self.message = Some(format!(
+                                "COMPRADO {} POR {} · SALDO {}",
+                                entry.descriptor.name,
+                                career::format_usd(paid),
+                                career::format_usd(rem)
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        self.message = Some(err);
+                    }
+                }
+            }
+            DealershipCancelBuy => {
+                self.pending_buy_vehicle_id = None;
+                self.message = Some("COMPRA CANCELADA".into());
+            }
+            CareerGaragePrevCar | CareerGarageNextCar => {
+                let indices = {
+                    let ctx = self.context();
+                    self.menu.career_garage_indices(&ctx)
+                };
+                if !indices.is_empty() {
+                    let delta = if matches!(command, CareerGarageNextCar) {
+                        1isize
+                    } else {
+                        -1isize
+                    };
+                    self.menu.career_garage_cursor =
+                        ((self.menu.career_garage_cursor as isize + delta)
+                            .rem_euclid(indices.len() as isize)) as usize;
+                    self.message = None;
+                }
+            }
+            CareerGarageSelectActive => {
+                let indices = {
+                    let ctx = self.context();
+                    self.menu.career_garage_indices(&ctx)
+                };
+                let cursor = self
+                    .menu
+                    .career_garage_cursor
+                    .min(indices.len().saturating_sub(1));
+                let Some(&veh_idx) = indices.get(cursor) else {
+                    self.menu.open(menu::Page::Dealership);
+                    return;
+                };
+                let Some(entry) = self.content.vehicles.get(veh_idx).cloned() else {
+                    return;
+                };
+                let res = match self.career.profile.as_mut() {
+                    Some(profile) => profile.select_career_vehicle(&entry.descriptor.id),
+                    None => Err("SIN PERFIL DE CARRERA".into()),
+                };
+                match res {
+                    Ok(()) => {
+                        let _ = self.career.save();
+                        self.message = Some(format!(
+                            "COCHE DE CARRERA ACTIVO: {}",
+                            entry.descriptor.name
+                        ));
+                    }
+                    Err(err) => {
+                        self.message = Some(err);
+                    }
+                }
+            }
+            CareerDiffPrev => {
+                self.selected_career_difficulty = self.selected_career_difficulty.prev();
+            }
+            CareerDiffNext => {
+                self.selected_career_difficulty = self.selected_career_difficulty.next();
+            }
+            CareerChampStart => {
+                let ngp_exp = self.ngp_experimental;
+                let diff = self.selected_career_difficulty;
+                let candidate = self
+                    .career
+                    .profile
+                    .as_ref()
+                    .and_then(|p| {
+                        p.active_career_vehicle_id
+                            .as_deref()
+                            .and_then(|id| self.content.vehicle(id))
+                            .filter(|e| {
+                                e.capability(ngp_exp) == content_manager::DriveCapability::Drivable
+                                    && career::vehicle_market_spec(e).tier.eligible_for_regional()
+                            })
+                            .or_else(|| {
+                                self.content.vehicles.iter().find(|e| {
+                                    p.owns_vehicle(&e.descriptor.id)
+                                        && e.capability(ngp_exp)
+                                            == content_manager::DriveCapability::Drivable
+                                        && career::vehicle_market_spec(e)
+                                            .tier
+                                            .eligible_for_regional()
+                                })
+                            })
+                    })
+                    .cloned();
+                let Some(car_entry) = candidate else {
+                    self.message =
+                        Some("COMPRA UN COCHE DE INICIACIÓN (EJ. MG ZR S1600) EN 2ª MANO".into());
+                    return;
+                };
+                let res = match self.career.profile.as_mut() {
+                    Some(p) => p.start_regional_championship(&car_entry, ngp_exp, diff),
+                    None => Err("CREA UN PERFIL DE CARRERA PRIMERO".into()),
+                };
+                match res {
+                    Ok(()) => {
+                        let _ = self.career.save();
+                        self.message = Some(format!(
+                            "COPA REGIONAL INICIADA ({} · {})",
+                            car_entry.descriptor.name,
+                            diff.label()
+                        ));
+                    }
+                    Err(err) => {
+                        self.message = Some(err);
+                    }
+                }
+            }
+            CareerChampRunNextStage => {
+                let Some(champ) = self
+                    .career
+                    .profile
+                    .as_ref()
+                    .and_then(|p| p.active_championship.clone())
+                else {
+                    self.message = Some("NO HAY CAMPEONATO ACTIVO".into());
+                    return;
+                };
+                let Some(stage_idx) = champ.next_stage_index() else {
+                    self.message = Some("EL CAMPEONATO YA HA FINALIZADO".into());
+                    return;
+                };
+                let Some(stage_desc) = career::regional_stage_descriptor(stage_idx) else {
+                    self.message = Some("ETAPA REGIONAL NO ENCONTRADA".into());
+                    return;
+                };
+                let Some(car_entry) = self.content.vehicle(&champ.locked_vehicle_id).cloned()
+                else {
+                    self.message = Some("COCHE BLOQUEADO DEL CAMPEONATO NO INSTALADO".into());
+                    return;
+                };
+                if car_entry.capability(self.ngp_experimental)
+                    != content_manager::DriveCapability::Drivable
+                {
+                    self.message =
+                        Some("EL COCHE DEL CAMPEONATO NO TIENE FÍSICA DISPONIBLE".into());
+                    return;
+                }
+                if let Some(st_entry) = self.content.stage(&stage_desc.id) {
+                    if let Some(missing) = st_entry.files.missing_label() {
+                        self.message = Some(missing);
+                        return;
+                    }
+                }
+                let next_sel = rerbr_content::Selection {
+                    vehicle: car_entry.descriptor,
+                    stage: stage_desc,
+                };
+                match self.configure_selection(next_sel) {
+                    Ok(()) => {
+                        self.active_career_stage = true;
+                        self.last_career_stage_outcome = None;
+                        self.apply_command(StartRally);
+                    }
+                    Err(e) => {
+                        self.active_career_stage = false;
+                        self.message = Some(format!("COPA REGIONAL BLOQUEADA: {e}"));
+                    }
+                }
+            }
+            CareerChampAbandon => {
+                let res = match self.career.profile.as_mut() {
+                    Some(p) => p.abandon_championship(),
+                    None => Err("SIN PERFIL DE CARRERA".into()),
+                };
+                match res {
+                    Ok(()) => {
+                        self.active_career_stage = false;
+                        self.last_career_stage_outcome = None;
+                        let _ = self.career.save();
+                        self.message = Some("CAMPEONATO ABANDONADO (SIN PREMIO)".into());
+                    }
+                    Err(err) => {
+                        self.message = Some(err);
+                    }
+                }
+            }
+            CareerChampDismissFinished => {
+                let res = match self.career.profile.as_mut() {
+                    Some(p) => p.dismiss_finished_championship(),
+                    None => Ok(()),
+                };
+                match res {
+                    Ok(()) => {
+                        self.active_career_stage = false;
+                        self.last_career_stage_outcome = None;
+                        let _ = self.career.save();
+                        self.menu.reset_to_main();
+                        self.menu.open(menu::Page::CareerHub);
+                        self.message = Some("COPA REGIONAL COMPLETADA Y GUARDADA".into());
+                    }
+                    Err(err) => {
+                        self.message = Some(err);
+                    }
+                }
+            }
+            OpenCareerAfterStage => {
+                self.apply_command(ResetToMain);
+                self.menu.open(menu::Page::CareerHub);
+                self.menu.open(menu::Page::CareerChampionship);
+            }
         }
+    }
+    fn refresh_pilot_draft_name(&mut self) {
+        let base =
+            career::PILOT_NAME_PRESETS[self.pilot_preset_index % career::PILOT_NAME_PRESETS.len()];
+        let suffix = match self.pilot_tag_index % 6 {
+            0 => "",
+            1 => " #01",
+            2 => " #07",
+            3 => " #24",
+            4 => " #88",
+            _ => " PRO",
+        };
+        self.pilot_draft_name = format!("{base}{suffix}");
     }
     pub fn touch(&mut self, t: Touch, size: (u32, u32)) {
         self.drawable_size = size;
@@ -2087,6 +2586,29 @@ impl Runtime {
             if outcome.valid {
                 if let Err(err) = self.records.save() {
                     eprintln!("records SAVE ERROR: {err}");
+                }
+            }
+            if self.active_career_stage {
+                let stage_id = self.selection.stage.id.clone();
+                let vehicle_id = self.selection.vehicle.id.clone();
+                if let Some(profile) = self.career.profile.as_mut() {
+                    match profile.record_championship_stage_result(
+                        &stage_id,
+                        &vehicle_id,
+                        res.total_ms,
+                        outcome.valid,
+                    ) {
+                        Ok(career_out) => {
+                            if let Err(err) = self.career.save() {
+                                eprintln!("career SAVE ERROR: {err}");
+                            }
+                            self.last_career_stage_outcome = Some(career_out);
+                        }
+                        Err(err) => {
+                            eprintln!("career STAGE RECORD REJECTED: {err}");
+                            self.last_career_stage_outcome = None;
+                        }
+                    }
                 }
             }
             self.last_record_outcome = Some(outcome);
@@ -2683,6 +3205,12 @@ impl Runtime {
                 .coming_soon_notice
                 .as_ref()
                 .and_then(|(msg, until)| (Instant::now() < *until).then_some(msg.as_str())),
+            career: Some(&self.career),
+            active_career_stage: self.active_career_stage,
+            last_career_stage_outcome: self.last_career_stage_outcome.as_ref(),
+            pilot_draft_name: self.pilot_draft_name.as_str(),
+            pending_buy_vehicle_id: self.pending_buy_vehicle_id.as_deref(),
+            selected_career_difficulty: self.selected_career_difficulty,
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
@@ -4252,10 +4780,23 @@ mod reload_tests {
         assert_eq!(app.menu.page, menu::Page::Main);
         assert!(app.transition_started.is_some());
 
-        // Coming-soon sections show a clear notice without inventing unimplemented systems.
-        app.apply_command(menu::Command::MainSectionActivate(0)); // Carrera
+        // Online remains clearly labeled as coming soon without inventing unimplemented systems.
+        app.apply_command(menu::Command::MainSectionActivate(2)); // Online
         assert_eq!(app.menu.page, menu::Page::Main);
         assert!(app.coming_soon_notice.is_some());
+
+        // Carrera opens pilot creation when no profile exists yet.
+        app.career = career::CareerStore::default();
+        app.apply_command(menu::Command::MainSectionActivate(0)); // Carrera
+        assert_eq!(app.menu.page, menu::Page::CareerCreate);
+        app.apply_command(menu::Command::Back);
+        assert_eq!(app.menu.page, menu::Page::Main);
+
+        // 2ª Mano opens the 3D Showroom Dealership.
+        app.apply_command(menu::Command::MainSectionActivate(4)); // 2ª Mano
+        assert_eq!(app.menu.page, menu::Page::Dealership);
+        app.apply_command(menu::Command::Back);
+        assert_eq!(app.menu.page, menu::Page::Main);
 
         // Contrarreloj opens the working stage/driving hub.
         app.apply_command(menu::Command::MainSectionActivate(1));
@@ -4266,6 +4807,98 @@ mod reload_tests {
         // Garage opens the 3D Showroom Garage.
         app.apply_command(menu::Command::MainSectionActivate(3));
         assert_eq!(app.menu.page, menu::Page::Garage);
+    }
+
+    #[test]
+    fn career_runtime_flow_create_buy_garage_and_championship_keeps_time_trial_free() {
+        let mut app = Runtime::new();
+        app.worker.shutdown();
+        app.worker = worker::Worker::idle();
+        app.career = career::CareerStore::default();
+        // 1. Time Trial can select Corolla WRC freely without owning any career cars.
+        let corolla_idx = app
+            .content
+            .vehicles
+            .iter()
+            .position(|v| v.descriptor.id == "toyota-corolla-wrc")
+            .unwrap();
+        app.apply_command(menu::Command::SelectVehicle(corolla_idx));
+        assert_eq!(app.selection.vehicle.id, "toyota-corolla-wrc");
+        for v in &mut app.content.vehicles {
+            v.has_3d_model = true;
+        }
+
+        // 2. Enter Career -> create pilot -> receives US$15,000 and 0 cars.
+        app.apply_command(menu::Command::EnterMainMenu);
+        app.apply_command(menu::Command::MainSectionActivate(0));
+        assert_eq!(app.menu.page, menu::Page::CareerCreate);
+        app.apply_command(menu::Command::CareerPilotNext);
+        app.apply_command(menu::Command::CareerCreateConfirm);
+        assert_eq!(app.menu.page, menu::Page::CareerHub);
+        assert_eq!(app.career.profile.as_ref().unwrap().cash_usd, 15_000);
+        assert!(app
+            .career
+            .profile
+            .as_ref()
+            .unwrap()
+            .owned_vehicle_ids
+            .is_empty());
+
+        // 3. Open Dealership -> initiation filter surfaces MG ZR S1600 first -> 2-step buy.
+        app.apply_command(menu::Command::Open(menu::Page::Dealership));
+        assert_eq!(app.menu.page, menu::Page::Dealership);
+        let zr_idx = app
+            .content
+            .vehicles
+            .iter()
+            .position(|v| v.descriptor.id == "mg-zr-s1600")
+            .unwrap();
+        assert_eq!(app.menu.dealership_vehicle, zr_idx);
+        let (mode, primary, _) = app.showroom_request().expect("dealership 3D showroom");
+        assert_eq!(mode, crate::car::showroom::ShowroomMode::Garage);
+        assert_eq!(primary.id, "mg-zr-s1600");
+
+        // Request buy does NOT deduct funds until explicitly confirmed!
+        app.apply_command(menu::Command::DealershipRequestBuy);
+        assert_eq!(app.pending_buy_vehicle_id.as_deref(), Some("mg-zr-s1600"));
+        assert_eq!(app.career.profile.as_ref().unwrap().cash_usd, 15_000);
+
+        // Confirm buy deducts US$12,500 and adds MG ZR S1600 to Career Garage.
+        app.apply_command(menu::Command::DealershipConfirmBuy);
+        assert!(app.pending_buy_vehicle_id.is_none());
+        assert_eq!(app.career.profile.as_ref().unwrap().cash_usd, 2_500);
+        assert!(app
+            .career
+            .profile
+            .as_ref()
+            .unwrap()
+            .owns_vehicle("mg-zr-s1600"));
+
+        // 4. Career Garage shows ONLY owned vehicles (1 car), separate from General Garage.
+        app.apply_command(menu::Command::Open(menu::Page::CareerGarage));
+        let ctx = app.context();
+        assert_eq!(app.menu.career_garage_indices(&ctx).len(), 1);
+        assert!(app.content.vehicles.len() >= 8);
+
+        // 5. Start Regional Championship with MG ZR S1600 on Intermediate difficulty.
+        app.apply_command(menu::Command::Open(menu::Page::CareerChampionship));
+        app.apply_command(menu::Command::CareerDiffNext);
+        assert_eq!(
+            app.selected_career_difficulty,
+            career::CareerDifficulty::Intermediate
+        );
+        app.apply_command(menu::Command::CareerChampStart);
+        let champ = app
+            .career
+            .profile
+            .as_ref()
+            .unwrap()
+            .active_championship
+            .as_ref()
+            .expect("active regional championship");
+        assert_eq!(champ.locked_vehicle_id, "mg-zr-s1600");
+        assert_eq!(champ.difficulty, career::CareerDifficulty::Intermediate);
+        assert_eq!(champ.total_stages(), 3);
     }
 
     #[test]

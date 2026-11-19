@@ -36,12 +36,20 @@ pub enum Page {
     RallySchool,
     SchoolBriefing,
     SchoolResult,
+    CareerCreate,
+    CareerHub,
+    Dealership,
+    CareerGarage,
+    CareerChampionship,
 }
 
 impl Page {
     /// Pages that render transparently over the live 3D Rally Showroom.
     pub fn is_showroom_page(self) -> bool {
-        matches!(self, Self::Title | Self::Main | Self::Garage)
+        matches!(
+            self,
+            Self::Title | Self::Main | Self::Garage | Self::Dealership | Self::CareerGarage
+        )
     }
 }
 
@@ -85,26 +93,50 @@ impl MainSection {
 
     pub fn subtitle(self) -> &'static str {
         match self {
-            Self::Career => "PRÓXIMAMENTE",
+            Self::Career => "MODO CARRERA",
             Self::TimeTrial => "TRAMOS Y PB",
             Self::Online => "PRÓXIMAMENTE",
             Self::Garage => "SHOWROOM 3D",
-            Self::UsedCars => "PRÓXIMAMENTE",
+            Self::UsedCars => "TIENDA 3D",
             Self::RallySchool => "17 LECCIONES",
             Self::Settings => "OPCIONES",
         }
     }
 
     pub fn is_coming_soon(self) -> bool {
-        matches!(self, Self::Career | Self::Online | Self::UsedCars)
+        matches!(self, Self::Online)
     }
 
     pub fn coming_soon_detail(self) -> Option<&'static str> {
         match self {
-            Self::Career => Some("MODO CARRERA — PRÓXIMAMENTE (USA CONTRARRELOJ O CAMPEONATO RBR)"),
             Self::Online => Some("ONLINE Y RANKINGS — PRÓXIMAMENTE EN UNA FASE POSTERIOR"),
-            Self::UsedCars => Some("TIENDA DE SEGUNDA MANO — PRÓXIMAMENTE EN UNA FASE POSTERIOR"),
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DealershipFilter {
+    #[default]
+    Initiation,
+    Drivable,
+    All,
+}
+
+impl DealershipFilter {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Initiation => Self::Drivable,
+            Self::Drivable => Self::All,
+            Self::All => Self::Initiation,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Initiation => "INICIACIÓN",
+            Self::Drivable => "CONDUCIBLES",
+            Self::All => "TODOS",
         }
     }
 }
@@ -268,6 +300,26 @@ pub enum Command {
     SchoolRetryLesson,
     SchoolNextStartLesson,
     ExportDiagnostics,
+    CareerPilotPrev,
+    CareerPilotNext,
+    CareerPilotTagNext,
+    CareerCreateConfirm,
+    DealershipPrevCar,
+    DealershipNextCar,
+    DealershipFilterCycle,
+    DealershipRequestBuy,
+    DealershipConfirmBuy,
+    DealershipCancelBuy,
+    CareerGaragePrevCar,
+    CareerGarageNextCar,
+    CareerGarageSelectActive,
+    CareerDiffPrev,
+    CareerDiffNext,
+    CareerChampStart,
+    CareerChampRunNextStage,
+    CareerChampAbandon,
+    CareerChampDismissFinished,
+    OpenCareerAfterStage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -388,6 +440,14 @@ pub struct Context<'a> {
     pub transition_alpha: f32,
     /// Optional non-blocking notice shown in the horizontal menu for "Próximamente" sections.
     pub coming_soon_notice: Option<&'a str>,
+    /// Career profile store (independent from Time Trial PBs & retail championship).
+    pub career: Option<&'a super::career::CareerStore>,
+    /// True when the active/just-finished stage belongs to the Career Regional Championship.
+    pub active_career_stage: bool,
+    pub last_career_stage_outcome: Option<&'a super::career::StageRecordOutcome>,
+    pub pilot_draft_name: &'a str,
+    pub pending_buy_vehicle_id: Option<&'a str>,
+    pub selected_career_difficulty: super::career::CareerDifficulty,
 }
 
 #[derive(Debug)]
@@ -396,7 +456,10 @@ pub struct Menu {
     stack: Vec<Page>,
     pub main_section: usize,
     pub garage_filter: GarageFilter,
+    pub dealership_filter: DealershipFilter,
     pub inspected_vehicle: usize,
+    pub dealership_vehicle: usize,
+    pub career_garage_cursor: usize,
     pub inspected_stage: usize,
     pub garage_page: usize,
     pub stage_page: usize,
@@ -410,7 +473,10 @@ impl Default for Menu {
             stack: Vec::new(),
             main_section: 1, // Contrarreloj focused by default for immediate driving access
             garage_filter: GarageFilter::All,
+            dealership_filter: DealershipFilter::Initiation,
             inspected_vehicle: 0,
+            dealership_vehicle: 0,
+            career_garage_cursor: 0,
             inspected_stage: 0,
             garage_page: 0,
             stage_page: 0,
@@ -534,6 +600,11 @@ impl Menu {
             Page::RallySchool => "ACADEMIA DE RALLY",
             Page::SchoolBriefing => "INSTRUCCIONES DE LECCIÓN",
             Page::SchoolResult => "RESULTADO ESCUELA DE RALLY",
+            Page::CareerCreate => "NUEVO PILOTO — CARRERA",
+            Page::CareerHub => "MODO CARRERA",
+            Page::Dealership => "CONCESIONARIO 2ª MANO",
+            Page::CareerGarage => "GARAJE DE CARRERA",
+            Page::CareerChampionship => "COPA REGIONAL DE INICIACIÓN",
         }
     }
     /// Filtered indices into `ctx.content.vehicles` for the active `GarageFilter`.
@@ -554,6 +625,61 @@ impl Menu {
         } else {
             filtered
         }
+    }
+    /// Filtered indices into `ctx.content.vehicles` for the Used Car Dealership (`2ª MANO`),
+    /// sorted with affordable drivable initiation cars first so the player sees buyable cars immediately.
+    pub fn dealership_indices(&self, ctx: &Context) -> Vec<usize> {
+        let mut indices: Vec<usize> = ctx
+            .content
+            .vehicles
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                let cap = e.capability(ctx.ngp_experimental);
+                let spec = super::career::vehicle_market_spec(e);
+                match self.dealership_filter {
+                    DealershipFilter::Initiation => spec.tier.eligible_for_regional(),
+                    DealershipFilter::Drivable => cap == DriveCapability::Drivable,
+                    DealershipFilter::All => {
+                        e.can_showroom_view() || cap == DriveCapability::Drivable
+                    }
+                }
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if indices.is_empty() && !ctx.content.vehicles.is_empty() {
+            indices = (0..ctx.content.vehicles.len()).collect();
+        }
+        indices.sort_by_key(|&i| {
+            let e = &ctx.content.vehicles[i];
+            let cap = e.capability(ctx.ngp_experimental);
+            let spec = super::career::vehicle_market_spec(e);
+            let drivable_rank = if cap == DriveCapability::Drivable {
+                0u8
+            } else {
+                1u8
+            };
+            let regional_rank = if spec.tier.eligible_for_regional() {
+                0u8
+            } else {
+                1u8
+            };
+            (regional_rank, drivable_rank, spec.price_usd, i)
+        });
+        indices
+    }
+    /// Indices into `ctx.content.vehicles` for vehicles OWNED in the active Career profile.
+    pub fn career_garage_indices(&self, ctx: &Context) -> Vec<usize> {
+        let Some(profile) = ctx.career.and_then(|c| c.profile.as_ref()) else {
+            return Vec::new();
+        };
+        ctx.content
+            .vehicles
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| profile.owns_vehicle(&e.descriptor.id))
+            .map(|(i, _)| i)
+            .collect()
     }
     pub fn rows(&self, ctx: &Context) -> Vec<Row> {
         let vehicle = &ctx.selection.vehicle;
@@ -1461,10 +1587,34 @@ impl Menu {
                         super::records::format_time_ms(pb),
                     ));
                 }
+                if ctx.active_career_stage {
+                    if let Some(out) = ctx.last_career_stage_outcome {
+                        let summary = if out.championship_finished {
+                            format!(
+                                "P{} FINAL · PREMIO {}",
+                                out.current_position,
+                                super::career::format_usd(out.prize_awarded_usd)
+                            )
+                        } else {
+                            format!(
+                                "ETAPA {}/3 REGISTRADA · P{} GENERAL",
+                                out.stage_index + 1,
+                                out.current_position
+                            )
+                        };
+                        rows.push(Row::info("COPA REGIONAL", summary));
+                    }
+                    rows.push(Row::action(
+                        "VOLVER A COPA REGIONAL",
+                        Command::OpenCareerAfterStage,
+                    ));
+                }
                 if ctx.has_replay {
                     rows.push(Row::action("VER REPETICIÓN", Command::StartReplay));
                 }
-                rows.push(Row::action("REINICIAR TRAMO", Command::Restart));
+                if !ctx.active_career_stage {
+                    rows.push(Row::action("REINICIAR TRAMO", Command::Restart));
+                }
                 rows.push(Row::action("MENÚ PRINCIPAL", Command::ResetToMain));
                 rows
             }
@@ -1498,6 +1648,182 @@ impl Menu {
                     },
                     Row::action("VOLVER", Command::Back),
                 ]
+            }
+            Page::CareerCreate => vec![
+                Row::stepper(
+                    "NOMBRE DEL PILOTO",
+                    Command::CareerPilotPrev,
+                    Command::CareerPilotNext,
+                    ctx.pilot_draft_name,
+                ),
+                Row::action("PERSONALIZAR DORSAL / SUFIJO", Command::CareerPilotTagNext),
+                Row::info(
+                    "PRESUPUESTO INICIAL",
+                    super::career::format_usd(super::career::INITIAL_CASH_USD),
+                ),
+                Row::info("COCHES EN PROPIEDAD", "0 (COMPRA EN 2ª MANO)"),
+                Row::action(
+                    format!(
+                        "CREAR PERFIL ({})",
+                        super::career::format_usd(super::career::INITIAL_CASH_USD)
+                    ),
+                    Command::CareerCreateConfirm,
+                ),
+                Row::action("VOLVER", Command::Back),
+            ],
+            Page::CareerHub => {
+                let mut rows = Vec::new();
+                if let Some(p) = ctx.career.and_then(|c| c.profile.as_ref()) {
+                    let active_car_name = p
+                        .active_career_vehicle_id
+                        .as_deref()
+                        .and_then(|id| ctx.content.vehicle(id))
+                        .map(|e| e.descriptor.name.clone())
+                        .unwrap_or_else(|| "NINGUNO (COMPRA EN 2ª MANO)".into());
+                    rows.push(Row::info(
+                        "PILOTO / SALDO",
+                        format!(
+                            "{} · {}",
+                            p.pilot_name,
+                            super::career::format_usd(p.cash_usd)
+                        ),
+                    ));
+                    rows.push(Row::info("COCHE DE CARRERA", active_car_name));
+                    rows.push(Row::info(
+                        "PALMARÉS",
+                        format!(
+                            "{} VICTORIAS · {} PODIOS · HISTÓRICOS {}",
+                            p.wins,
+                            p.podiums,
+                            if p.historics_unlocked {
+                                "DESBLOQUEADOS"
+                            } else {
+                                "BLOQUEADOS"
+                            }
+                        ),
+                    ));
+                    let champ_label = match &p.active_championship {
+                        Some(c) if !c.finished => format!(
+                            "CONTINUAR COPA REGIONAL ({}/{})",
+                            c.completed_stages(),
+                            c.total_stages()
+                        ),
+                        Some(_) => "VER RESULTADOS COPA REGIONAL".into(),
+                        None => "COPA REGIONAL DE INICIACIÓN (3 ETAPAS)".into(),
+                    };
+                    rows.push(Row::action(
+                        champ_label,
+                        Command::Open(Page::CareerChampionship),
+                    ));
+                    rows.push(Row::action(
+                        format!("GARAJE DE CARRERA ({} PROPIOS)", p.owned_vehicle_ids.len()),
+                        Command::Open(Page::CareerGarage),
+                    ));
+                    rows.push(Row::action(
+                        "CONCESIONARIO 2ª MANO (SHOWROOM 3D)",
+                        Command::Open(Page::Dealership),
+                    ));
+                } else {
+                    rows.push(Row::action(
+                        "CREAR PERFIL DE CARRERA",
+                        Command::Open(Page::CareerCreate),
+                    ));
+                }
+                rows.push(Row::action("VOLVER", Command::Back));
+                rows
+            }
+            Page::Dealership => vec![
+                Row::action("ANTERIOR", Command::DealershipPrevCar),
+                Row::action("SIGUIENTE", Command::DealershipNextCar),
+                Row::action("VOLVER", Command::Back),
+            ],
+            Page::CareerGarage => vec![
+                Row::action("ANTERIOR", Command::CareerGaragePrevCar),
+                Row::action("SIGUIENTE", Command::CareerGarageNextCar),
+                Row::action("VOLVER", Command::Back),
+            ],
+            Page::CareerChampionship => {
+                let mut rows = Vec::new();
+                if let Some(p) = ctx.career.and_then(|c| c.profile.as_ref()) {
+                    if let Some(champ) = &p.active_championship {
+                        if champ.finished {
+                            rows.push(Row::action(
+                                "FINALIZAR Y VOLVER A CARRERA",
+                                Command::CareerChampDismissFinished,
+                            ));
+                        } else {
+                            let next_idx = champ.next_stage_index().unwrap_or(0);
+                            let stage_name = super::career::REGIONAL_STAGES
+                                .get(next_idx)
+                                .map_or("TRAMO", |s| s.display_name);
+                            rows.push(Row {
+                                label: if ctx.steering_ready {
+                                    format!(
+                                        "CORRER ETAPA {}/{}: {}",
+                                        next_idx + 1,
+                                        champ.total_stages(),
+                                        stage_name
+                                    )
+                                } else {
+                                    "SUJETA EN HORIZONTAL PARA CORRER".into()
+                                },
+                                kind: RowKind::Action {
+                                    command: Command::CareerChampRunNextStage,
+                                    enabled: ctx.steering_ready,
+                                },
+                            });
+                            rows.push(Row::action(
+                                "ABANDONAR CAMPEONATO (SIN PREMIO)",
+                                Command::CareerChampAbandon,
+                            ));
+                        }
+                    } else {
+                        let diff = ctx.selected_career_difficulty;
+                        rows.push(Row::stepper(
+                            "DIFICULTAD",
+                            Command::CareerDiffPrev,
+                            Command::CareerDiffNext,
+                            format!(
+                                "{} (1º {})",
+                                diff.label(),
+                                super::career::format_usd(diff.regional_prize_for_position(1))
+                            ),
+                        ));
+                        let eligible_owned = p
+                            .active_career_vehicle_id
+                            .as_deref()
+                            .and_then(|id| ctx.content.vehicle(id))
+                            .filter(|e| {
+                                e.capability(ctx.ngp_experimental) == DriveCapability::Drivable
+                                    && super::career::vehicle_market_spec(e)
+                                        .tier
+                                        .eligible_for_regional()
+                            })
+                            .or_else(|| {
+                                ctx.content.vehicles.iter().find(|e| {
+                                    p.owns_vehicle(&e.descriptor.id)
+                                        && e.capability(ctx.ngp_experimental)
+                                            == DriveCapability::Drivable
+                                        && super::career::vehicle_market_spec(e)
+                                            .tier
+                                            .eligible_for_regional()
+                                })
+                            });
+                        if let Some(car) = eligible_owned {
+                            rows.push(Row::action(
+                                format!("INICIAR CAMPEONATO CON {}", car.descriptor.name),
+                                Command::CareerChampStart,
+                            ));
+                        } else {
+                            rows.push(Row::action(
+                                "COMPRAR COCHE DE INICIACIÓN EN 2ª MANO",
+                                Command::Open(Page::Dealership),
+                            ));
+                        }
+                    }
+                }
+                rows.push(Row::action("VOLVER", Command::Back));
+                rows
             }
         }
     }
@@ -1694,6 +2020,26 @@ impl Menu {
                     vec!["EVALUACIÓN DE LECCIÓN FINALIZADA".into()]
                 }
             }
+            Page::CareerCreate => vec![
+                "CREA TU PERFIL DE PILOTO PARA INICIAR EL MODO CARRERA".into(),
+                "EMPIEZAS CON US$15,000 Y 0 COCHES · GUARDADO INDEPENDIENTE".into(),
+            ],
+            Page::CareerHub => vec![
+                "PERFIL, ECONOMÍA USD, GARAJE PROPIO Y COPA REGIONAL".into(),
+                "CONTRARRELOJ SIGUE LIBRE CON CUALQUIER COCHE CONDUCIBLE".into(),
+            ],
+            Page::Dealership => vec![
+                "CONCESIONARIO 2ª MANO · PRECIOS PROVISIONALES EN USD".into(),
+                "SOLO COCHES CONDUCIBLES SE PUEDEN COMPRAR".into(),
+            ],
+            Page::CareerGarage => vec![
+                "GARAJE DE CARRERA · SOLO COCHES DE TU PROPIEDAD".into(),
+                "SEPARADO DEL GARAJE GENERAL DE CONTRARRELOJ".into(),
+            ],
+            Page::CareerChampionship => vec![
+                "3 ETAPAS CORTAS · INICIACIÓN FWD (SUPER 1600 / RALLY5 / RALLY4 / R2)".into(),
+                "ÉLITE MUNDIAL: PRÓXIMAMENTE (REQUIERE TIEMPOS ONLINE VERIFICADOS)".into(),
+            ],
         }
     }
     fn row_bounds(&self) -> (f32, f32, f32, f32) {
@@ -1702,7 +2048,9 @@ impl Menu {
             Page::Loading => (0.28, 0.44, 0.76, 0.86),
             Page::ControlsEditor => (0.28, 0.44, 0.04, 0.36),
             Page::NgpExperimental => (0.055, 0.89, 0.615, 0.89),
-            Page::SchoolBriefing | Page::SchoolResult => (0.055, 0.89, 0.655, 0.89),
+            Page::SchoolBriefing | Page::SchoolResult | Page::CareerChampionship => {
+                (0.055, 0.89, 0.655, 0.89)
+            }
             _ => (ROW_X, ROW_WIDTH, ROW_TOP, ROW_BOTTOM),
         }
     }
@@ -1730,7 +2078,7 @@ impl Menu {
         let yf = y as f32;
         match self.page {
             Page::Main => (0.105..=0.745).contains(&yf),
-            Page::Garage => (0.105..=0.695).contains(&yf),
+            Page::Garage | Page::Dealership | Page::CareerGarage => (0.105..=0.695).contains(&yf),
             _ => false,
         }
     }
@@ -1843,6 +2191,71 @@ impl Menu {
                 }
                 None
             }
+            Page::Dealership => {
+                if Self::garage_back_rect().contains(x, y) {
+                    return Some(Command::Back);
+                }
+                if Self::garage_filter_rect().contains(x, y) {
+                    return Some(Command::DealershipFilterCycle);
+                }
+                if Self::garage_prev_rect().contains(x, y) {
+                    return Some(Command::DealershipPrevCar);
+                }
+                if Self::garage_next_rect().contains(x, y) {
+                    return Some(Command::DealershipNextCar);
+                }
+                if Self::garage_action_rect().contains(x, y) {
+                    let indices = self.dealership_indices(ctx);
+                    let active_idx = if indices.contains(&self.dealership_vehicle) {
+                        self.dealership_vehicle
+                    } else {
+                        indices.first().copied().unwrap_or(0)
+                    };
+                    if let Some(entry) = ctx.content.vehicles.get(active_idx) {
+                        let profile = ctx.career.and_then(|c| c.profile.as_ref());
+                        if profile.is_none() {
+                            return Some(Command::Open(Page::CareerCreate));
+                        }
+                        if ctx.pending_buy_vehicle_id == Some(entry.descriptor.id.as_str()) {
+                            return Some(Command::DealershipConfirmBuy);
+                        }
+                        let cap = entry.capability(ctx.ngp_experimental);
+                        let owned = profile.is_some_and(|p| p.owns_vehicle(&entry.descriptor.id));
+                        if cap == DriveCapability::Drivable && !owned {
+                            return Some(Command::DealershipRequestBuy);
+                        }
+                    }
+                }
+                if Self::garage_details_rect().contains(x, y) {
+                    if ctx.pending_buy_vehicle_id.is_some() {
+                        return Some(Command::DealershipCancelBuy);
+                    }
+                    return Some(Command::Open(Page::CareerHub));
+                }
+                None
+            }
+            Page::CareerGarage => {
+                if Self::garage_back_rect().contains(x, y) {
+                    return Some(Command::Back);
+                }
+                if Self::garage_details_rect().contains(x, y) {
+                    return Some(Command::Open(Page::Dealership));
+                }
+                if Self::garage_prev_rect().contains(x, y) {
+                    return Some(Command::CareerGaragePrevCar);
+                }
+                if Self::garage_next_rect().contains(x, y) {
+                    return Some(Command::CareerGarageNextCar);
+                }
+                if Self::garage_action_rect().contains(x, y) {
+                    let indices = self.career_garage_indices(ctx);
+                    if indices.is_empty() {
+                        return Some(Command::Open(Page::Dealership));
+                    }
+                    return Some(Command::CareerGarageSelectActive);
+                }
+                None
+            }
             _ => self.press(x, y, rows),
         }
     }
@@ -1883,6 +2296,16 @@ impl Menu {
         }
         if self.page == Page::Garage {
             self.draw_showroom_garage(canvas, ctx, status);
+            self.draw_transition_fade(canvas, ctx.transition_alpha);
+            return;
+        }
+        if self.page == Page::Dealership {
+            self.draw_dealership_showroom(canvas, ctx, status);
+            self.draw_transition_fade(canvas, ctx.transition_alpha);
+            return;
+        }
+        if self.page == Page::CareerGarage {
+            self.draw_career_garage_showroom(canvas, ctx, status);
             self.draw_transition_fade(canvas, ctx.transition_alpha);
             return;
         }
@@ -1987,6 +2410,8 @@ impl Menu {
             self.draw_school_briefing_panel(canvas, ctx);
         } else if self.page == Page::SchoolResult {
             self.draw_school_result_panel(canvas, ctx);
+        } else if self.page == Page::CareerChampionship {
+            self.draw_career_championship_panel(canvas, ctx);
         }
 
         let rows = self.rows(ctx);
@@ -2001,7 +2426,12 @@ impl Menu {
             let is_primary = matches!(
                 row.kind,
                 RowKind::Action {
-                    command: Command::StartRally | Command::SchoolConfirmStart,
+                    command: Command::StartRally
+                        | Command::SchoolConfirmStart
+                        | Command::CareerCreateConfirm
+                        | Command::CareerChampStart
+                        | Command::CareerChampRunNextStage
+                        | Command::OpenCareerAfterStage,
                     enabled: true,
                 }
             );
@@ -2609,6 +3039,11 @@ impl Menu {
 
             let sub = if *sec == MainSection::Garage {
                 format!("{} COCHES", ctx.content.vehicles.len())
+            } else if *sec == MainSection::Career {
+                ctx.career
+                    .and_then(|c| c.profile.as_ref())
+                    .map(|p| super::career::format_usd(p.cash_usd))
+                    .unwrap_or_else(|| sec.subtitle().to_string())
             } else {
                 sec.subtitle().to_string()
             };
@@ -2791,6 +3226,428 @@ impl Menu {
                 "NO HAY COCHES DETECTADOS EN DOCUMENTS/RBR/CARS",
                 0.82,
                 WARN,
+            );
+        }
+    }
+
+    /// Transparent 3D Showroom Used Car Dealership (`2ª MANO`):
+    /// Shows provisional USD price, real category, driving capability, ownership, balance,
+    /// and enforces explicit two-step purchase confirmation strictly for drivable vehicles.
+    fn draw_dealership_showroom(&self, canvas: &mut Canvas, ctx: &Context, status: &str) {
+        ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 0.106), [10, 13, 19, 200]);
+        ui::rule(canvas, 0.0, 0.106, 1.0, LINE);
+
+        let indices = self.dealership_indices(ctx);
+        let pos = indices
+            .iter()
+            .position(|&i| i == self.dealership_vehicle)
+            .unwrap_or(0);
+        let active_idx = indices.get(pos).copied().unwrap_or(0);
+        let entry = ctx.content.vehicles.get(active_idx);
+        let profile = ctx.career.and_then(|c| c.profile.as_ref());
+
+        ui::button(canvas, Self::garage_back_rect(), "VOLVER", false, true);
+        let filter_label = format!(
+            "2ª MANO: {} ({})",
+            self.dealership_filter.label(),
+            indices.len()
+        );
+        ui::button(
+            canvas,
+            Self::garage_filter_rect(),
+            &filter_label,
+            false,
+            true,
+        );
+
+        let right_label = if ctx.pending_buy_vehicle_id.is_some() {
+            "CANCELAR COMPRA".to_string()
+        } else if let Some(p) = profile {
+            format!("SALDO: {}", super::career::format_usd(p.cash_usd))
+        } else {
+            "SIN PERFIL CARRERA".to_string()
+        };
+        ui::button(
+            canvas,
+            Self::garage_details_rect(),
+            &right_label,
+            ctx.pending_buy_vehicle_id.is_some(),
+            true,
+        );
+
+        // Bottom dock.
+        ui::fill(canvas, Rect::new(0.0, 0.705, 1.0, 0.295), [9, 12, 18, 212]);
+        ui::rule(canvas, 0.0, 0.705, 1.0, LINE);
+
+        let can_nav = indices.len() > 1;
+        ui::button(canvas, Self::garage_prev_rect(), "<", false, can_nav);
+        ui::button(canvas, Self::garage_next_rect(), ">", false, can_nav);
+
+        let card = Rect::new(0.115, 0.720, 0.770, 0.228);
+        ui::panel(canvas, card, [16, 20, 28, 234], LINE);
+        let (cx, cy, cw, _) = ui::px(card, canvas);
+
+        if let Some(entry) = entry {
+            let cap = entry.capability(ctx.ngp_experimental);
+            let spec = super::career::vehicle_market_spec(entry);
+            let owned = profile.is_some_and(|p| p.owns_vehicle(&entry.descriptor.id));
+            let affordable = profile.is_some_and(|p| p.can_afford(spec.price_usd));
+            let pending_this = ctx.pending_buy_vehicle_id == Some(entry.descriptor.id.as_str());
+
+            let title = format!(
+                "{}  ({}/{})",
+                entry.descriptor.name,
+                pos + 1,
+                indices.len().max(1)
+            );
+            ui::text_clipped(canvas, cx + 12.0, cy + 8.0, cw * 0.58, &title, 0.92, TEXT);
+
+            let badge_rect = Rect::new(0.585, 0.732, 0.285, 0.044);
+            let (badge_text, badge_col) = if owned {
+                ("EN TU GARAJE".to_string(), GOOD)
+            } else {
+                (
+                    format!("{} (PROV.)", super::career::format_usd(spec.price_usd)),
+                    if cap == DriveCapability::Drivable && affordable {
+                        GOOD
+                    } else if cap == DriveCapability::Drivable {
+                        WARN
+                    } else {
+                        DIM
+                    },
+                )
+            };
+            ui::panel(canvas, badge_rect, PANEL_DEEP, badge_col);
+            ui::text_center(canvas, badge_rect, &badge_text, 0.58, badge_col);
+
+            let cat = entry.descriptor.category.as_deref().unwrap_or("RBR / RSF");
+            let meta = format!("{} · {} · {}", spec.tier.label(), cat, cap.short_badge());
+            ui::text_clipped(canvas, cx + 12.0, cy + 28.0, cw - 24.0, &meta, 0.58, DIM);
+
+            let info_line = if pending_this {
+                format!(
+                    "CONFIRMA COMPRA POR {} (SALDO RESTANTE {})",
+                    super::career::format_usd(spec.price_usd),
+                    profile
+                        .map(|p| super::career::format_usd(
+                            p.cash_usd.saturating_sub(spec.price_usd)
+                        ))
+                        .unwrap_or_else(|| "US$0".into())
+                )
+            } else if cap != DriveCapability::Drivable {
+                "EXHIBICIÓN 3D · NO COMPRABLE SIN FÍSICA INTEGRADA".to_string()
+            } else if owned {
+                "YA LO TIENES EN TU GARAJE DE CARRERA".to_string()
+            } else if !status.is_empty() && status != "READY - TAP A ROW" {
+                status.to_string()
+            } else if spec.tier.eligible_for_regional() {
+                "ELEGIBLE PARA COPA REGIONAL DE INICIACIÓN".to_string()
+            } else {
+                "CATEGORÍA SUPERIOR (NO ELEGIBLE PARA COPA REGIONAL)".to_string()
+            };
+            let info_col = if pending_this || cap != DriveCapability::Drivable {
+                WARN
+            } else if owned {
+                GOOD
+            } else {
+                INFO
+            };
+            ui::text_clipped(
+                canvas,
+                cx + 12.0,
+                cy + 46.0,
+                cw * 0.54,
+                &info_line,
+                0.54,
+                info_col,
+            );
+
+            let action_rect = Self::garage_action_rect();
+            if profile.is_none() {
+                ui::panel(canvas, action_rect, [156, 30, 30, 238], ACCENT);
+                ui::text_center(canvas, action_rect, "CREAR PERFIL (US$15,000)", 0.60, TEXT);
+            } else if owned {
+                ui::panel(canvas, action_rect, [22, 68, 48, 235], GOOD);
+                ui::text_center(canvas, action_rect, "EN PROPIEDAD", 0.66, TEXT);
+            } else if cap != DriveCapability::Drivable {
+                ui::panel(canvas, action_rect, PANEL_DEEP, LINE);
+                ui::text_center(canvas, action_rect, "EXHIBICIÓN (SIN FÍSICA)", 0.58, DIM);
+            } else if pending_this {
+                ui::panel(canvas, action_rect, [180, 105, 16, 245], WARN);
+                ui::text_center(canvas, action_rect, "CONFIRMAR COMPRA", 0.66, TEXT);
+            } else if affordable {
+                ui::panel(
+                    canvas,
+                    action_rect,
+                    [156, 30, 30, 238],
+                    [240, 110, 110, 255],
+                );
+                let buy_txt = format!("COMPRAR {}", super::career::format_usd(spec.price_usd));
+                ui::text_center(canvas, action_rect, &buy_txt, 0.62, TEXT);
+            } else {
+                ui::panel(canvas, action_rect, PANEL_DEEP, BAD);
+                ui::text_center(canvas, action_rect, "SALDO INSUFICIENTE", 0.62, BAD);
+            }
+        } else {
+            ui::text_center(
+                canvas,
+                card,
+                "NO HAY COCHES DETECTADOS PARA EL CONCESIONARIO",
+                0.80,
+                WARN,
+            );
+        }
+    }
+
+    /// Transparent 3D Showroom Personal Career Garage (ONLY owned vehicles).
+    fn draw_career_garage_showroom(&self, canvas: &mut Canvas, ctx: &Context, status: &str) {
+        ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 0.106), [10, 13, 19, 200]);
+        ui::rule(canvas, 0.0, 0.106, 1.0, LINE);
+
+        let indices = self.career_garage_indices(ctx);
+        let profile = ctx.career.and_then(|c| c.profile.as_ref());
+        let cursor = self
+            .career_garage_cursor
+            .min(indices.len().saturating_sub(1));
+        let entry = indices
+            .get(cursor)
+            .and_then(|&idx| ctx.content.vehicles.get(idx));
+
+        ui::button(canvas, Self::garage_back_rect(), "VOLVER", false, true);
+        let header_label = match profile {
+            Some(p) => format!(
+                "GARAJE CARRERA: {} ({} COCHES)",
+                p.pilot_name,
+                indices.len()
+            ),
+            None => "GARAJE DE CARRERA".into(),
+        };
+        ui::button(
+            canvas,
+            Self::garage_filter_rect(),
+            &header_label,
+            false,
+            false,
+        );
+        ui::button(
+            canvas,
+            Self::garage_details_rect(),
+            "IR A 2ª MANO",
+            false,
+            true,
+        );
+
+        ui::fill(canvas, Rect::new(0.0, 0.705, 1.0, 0.295), [9, 12, 18, 212]);
+        ui::rule(canvas, 0.0, 0.705, 1.0, LINE);
+
+        let can_nav = indices.len() > 1;
+        ui::button(canvas, Self::garage_prev_rect(), "<", false, can_nav);
+        ui::button(canvas, Self::garage_next_rect(), ">", false, can_nav);
+
+        let card = Rect::new(0.115, 0.720, 0.770, 0.228);
+        ui::panel(canvas, card, [16, 20, 28, 234], LINE);
+        let (cx, cy, cw, _) = ui::px(card, canvas);
+
+        if let Some(entry) = entry {
+            let spec = super::career::vehicle_market_spec(entry);
+            let is_active = profile.is_some_and(|p| {
+                p.active_career_vehicle_id.as_deref() == Some(entry.descriptor.id.as_str())
+            });
+            let locked = profile.is_some_and(|p| p.has_locked_championship());
+
+            let title = format!(
+                "{}  ({}/{})",
+                entry.descriptor.name,
+                cursor + 1,
+                indices.len().max(1)
+            );
+            ui::text_clipped(canvas, cx + 12.0, cy + 8.0, cw * 0.62, &title, 0.92, TEXT);
+
+            let badge_rect = Rect::new(0.60, 0.732, 0.270, 0.044);
+            let (b_txt, b_col) = if is_active {
+                ("ACTIVO CARRERA", GOOD)
+            } else {
+                ("EN PROPIEDAD", INFO)
+            };
+            ui::panel(canvas, badge_rect, PANEL_DEEP, b_col);
+            ui::text_center(canvas, badge_rect, b_txt, 0.56, b_col);
+
+            let cat = entry.descriptor.category.as_deref().unwrap_or("RBR / RSF");
+            let meta = format!("{} · {} · PROPIO", spec.tier.label(), cat);
+            ui::text_clipped(canvas, cx + 12.0, cy + 28.0, cw - 24.0, &meta, 0.58, DIM);
+
+            let info = if locked {
+                "COCHE BLOQUEADO MIENTRAS DURA LA COPA REGIONAL".to_string()
+            } else if !status.is_empty() && status != "READY - TAP A ROW" {
+                status.to_string()
+            } else {
+                "ARRASTRA ARRIBA PARA INSPECCIONAR TU COCHE EN 3D".to_string()
+            };
+            ui::text_clipped(
+                canvas,
+                cx + 12.0,
+                cy + 46.0,
+                cw * 0.54,
+                &info,
+                0.55,
+                if locked { WARN } else { INFO },
+            );
+
+            let action_rect = Self::garage_action_rect();
+            if is_active {
+                ui::panel(canvas, action_rect, [22, 68, 48, 235], GOOD);
+                ui::text_center(canvas, action_rect, "COCHE ACTIVO", 0.66, TEXT);
+            } else if locked {
+                ui::panel(canvas, action_rect, PANEL_DEEP, WARN);
+                ui::text_center(canvas, action_rect, "BLOQUEADO EN COPA", 0.60, WARN);
+            } else {
+                ui::panel(canvas, action_rect, [156, 30, 30, 238], ACCENT);
+                ui::text_center(canvas, action_rect, "USAR EN CARRERA", 0.64, TEXT);
+            }
+        } else {
+            ui::text_clipped(
+                canvas,
+                cx + 12.0,
+                cy + 14.0,
+                cw - 24.0,
+                "AÚN NO TIENES COCHES EN PROPIEDAD",
+                0.86,
+                WARN,
+            );
+            ui::text_clipped(
+                canvas,
+                cx + 12.0,
+                cy + 40.0,
+                cw * 0.56,
+                "COMPRA UN COCHE DE INICIACIÓN EN 2ª MANO CON TU SALDO USD",
+                0.56,
+                DIM,
+            );
+            let action_rect = Self::garage_action_rect();
+            ui::panel(canvas, action_rect, [156, 30, 30, 238], ACCENT);
+            ui::text_center(canvas, action_rect, "IR A 2ª MANO", 0.66, TEXT);
+        }
+    }
+
+    /// Standings, calendar, and prize summary panel for `Page::CareerChampionship`.
+    fn draw_career_championship_panel(&self, canvas: &mut Canvas, ctx: &Context) {
+        let panel = Rect::new(0.055, 0.195, 0.89, 0.440);
+        ui::panel(canvas, panel, PANEL_DEEP, LINE);
+        let (px, py, pw, _) = ui::px(panel, canvas);
+
+        let Some(p) = ctx.career.and_then(|c| c.profile.as_ref()) else {
+            ui::text_center(
+                canvas,
+                panel,
+                "CREA UN PERFIL DE CARRERA PRIMERO",
+                0.80,
+                WARN,
+            );
+            return;
+        };
+
+        let mut lines: Vec<(String, [u8; 4])> = Vec::new();
+        if let Some(champ) = &p.active_championship {
+            let status_hdr = if champ.finished {
+                let pos = champ.final_position.unwrap_or(1);
+                format!(
+                    "FINALIZADO · P{} · PREMIO {} · {}",
+                    pos,
+                    super::career::format_usd(champ.prize_awarded_usd),
+                    champ.difficulty.label()
+                )
+            } else {
+                format!(
+                    "EN CURSO ({}/{} ETAPAS) · {} · {}",
+                    champ.completed_stages(),
+                    champ.total_stages(),
+                    champ.locked_vehicle_name,
+                    champ.difficulty.label()
+                )
+            };
+            lines.push((status_hdr, if champ.finished { GOOD } else { INFO }));
+            if champ.finished && champ.final_position.is_some_and(|pos| pos <= 3) {
+                lines.push((
+                    "PODIO REGIONAL LOGRADO · CAMPEONATOS HISTÓRICOS DESBLOQUEADOS".into(),
+                    WARN,
+                ));
+            }
+            let standings = champ.standings(&p.pilot_name);
+            for row in standings.iter().take(7) {
+                let gap = if row.position == 1 || champ.completed_stages() == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        " (+{})",
+                        super::records::format_time_ms(row.gap_to_leader_ms)
+                    )
+                };
+                let time_str = if champ.completed_stages() == 0 {
+                    "--:--.---".into()
+                } else {
+                    super::records::format_time_ms(row.total_ms)
+                };
+                let marker = if row.is_player { ">" } else { " " };
+                lines.push((
+                    format!(
+                        "{marker}P{} {:<12} {:<14} {}{}",
+                        row.position, row.name, row.car_label, time_str, gap
+                    ),
+                    if row.is_player { GOOD } else { TEXT },
+                ));
+            }
+        } else {
+            let diff = ctx.selected_career_difficulty;
+            lines.push((
+                format!(
+                    "PILOTO: {} · SALDO: {} · DIFICULTAD: {}",
+                    p.pilot_name,
+                    super::career::format_usd(p.cash_usd),
+                    diff.label()
+                ),
+                INFO,
+            ));
+            lines.push((
+                format!(
+                    "PREMIOS (PROV.): 1º {} · 2º {} · 3º {} · 4º {}",
+                    super::career::format_usd(diff.regional_prize_for_position(1)),
+                    super::career::format_usd(diff.regional_prize_for_position(2)),
+                    super::career::format_usd(diff.regional_prize_for_position(3)),
+                    super::career::format_usd(diff.regional_prize_for_position(4)),
+                ),
+                GOOD,
+            ));
+            for (i, st) in super::career::REGIONAL_STAGES.iter().enumerate() {
+                lines.push((
+                    format!(
+                        "ETAPA {}: {} ({} · {:.2} KM)",
+                        i + 1,
+                        st.display_name,
+                        st.surface,
+                        st.length_km
+                    ),
+                    TEXT,
+                ));
+            }
+            lines.push((
+                "REGLAS: COCHE Y DIFICULTAD BLOQUEADOS HASTA TERMINAR O ABANDONAR".into(),
+                DIM,
+            ));
+            lines.push((
+                "PODIO EN COPA REGIONAL DESBLOQUEA FUTUROS CAMPEONATOS HISTÓRICOS".into(),
+                WARN,
+            ));
+        }
+
+        for (i, (line, col)) in lines.into_iter().take(9).enumerate() {
+            ui::text_clipped(
+                canvas,
+                px + 12.0,
+                py + 10.0 + i as f32 * 16.0,
+                pw - 24.0,
+                &line,
+                0.68,
+                col,
             );
         }
     }
@@ -3021,6 +3878,12 @@ mod tests {
             title_pulse: 0.5,
             transition_alpha: 0.0,
             coming_soon_notice: None,
+            career: None,
+            active_career_stage: false,
+            last_career_stage_outcome: None,
+            pilot_draft_name: "PILOTO RBR",
+            pending_buy_vehicle_id: None,
+            selected_career_difficulty: crate::driving::career::CareerDifficulty::Beginner,
         }
     }
 
@@ -3617,6 +4480,11 @@ mod tests {
             Page::RallySchool,
             Page::SchoolBriefing,
             Page::SchoolResult,
+            Page::CareerCreate,
+            Page::CareerHub,
+            Page::Dealership,
+            Page::CareerGarage,
+            Page::CareerChampionship,
         ];
 
         // Verify both iPad mini A17 Pro (1024x768) and iPhone 15 wide landscape (2556x1179).

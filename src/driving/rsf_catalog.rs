@@ -1364,4 +1364,195 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    #[ignore = "heavy local PC + iPad backup 720Hz physics verification (never runs without private assets)"]
+    fn verifies_mg_zr_initiation_and_four_extra_pc_ngp_cars_on_ipad_ngp74_runtime_if_present() {
+        let ipad_rbr = Path::new(r"C:\Users\adria\Desktop\Respaldo RBR iPad\RBR");
+        let pc_rbr = Path::new(r"C:\Richard Burns Rally");
+        if !ipad_rbr.join("Plugins/NGP.dll").is_file() || !pc_rbr.join("rsfdata/cars").is_dir() {
+            return;
+        }
+        std::thread::Builder::new()
+            .stack_size(rerbr_sim::STACK_BYTES)
+            .spawn(move || {
+                let paths = rerbr_sim::inputs::Paths {
+                    install: ipad_rbr.to_path_buf(),
+                    overlay: None,
+                    maps: ipad_rbr.join("Maps"),
+                };
+
+                // 1. Validate MG ZR Super 1600 (3D + 720 Hz physics on all 3 Regional stages)
+                let mg_zr = rerbr_content::VehicleDescriptor::original_rbr_presets()
+                    .into_iter()
+                    .find(|v| v.id == "mg-zr-s1600")
+                    .expect("mg-zr-s1600 preset");
+                let loaded_zr = crate::car::load_vehicle_for_mode(ipad_rbr, &mg_zr, false)
+                    .expect("MG ZR S1600 3D load from iPad backup");
+                eprintln!(
+                    "INITIATION VERIFY [mg-zr-s1600]: 3D OK ({} draws, {} DDS, cockpit={})",
+                    loaded_zr.geometry.drawn.len(),
+                    loaded_zr.textures.len(),
+                    loaded_zr.cockpit.is_some()
+                );
+
+                for st_idx in 0..super::super::career::REGIONAL_STAGES.len() {
+                    let stage = super::super::career::regional_stage_descriptor(st_idx).unwrap();
+                    let sel = rerbr_content::Selection {
+                        vehicle: mg_zr.clone(),
+                        stage: stage.clone(),
+                    };
+                    let mut sess =
+                        rerbr_sim::drive::Session::boot_with_aids(&paths, &sel, false, true)
+                            .unwrap_or_else(|e| panic!("MG ZR boot failed on {}: {e}", stage.id));
+                    let mut peak_speed = 0.0f64;
+                    for tick in 0..3600 {
+                        let steer = if (1200..2400).contains(&tick) { 0.35 } else { 0.0 };
+                        let brake = if tick >= 3000 { 0.9 } else { 0.0 };
+                        let throttle = if tick >= 3000 { 0.0 } else { 1.0 };
+                        let input = rerbr_sim::drive::Control {
+                            throttle,
+                            brake,
+                            steering: steer,
+                            flags: 4,
+                            gear: Some(2),
+                            ..Default::default()
+                        };
+                        let cmd = super::super::controls::pending_selection(
+                            input,
+                            sess.sample().commanded_gear,
+                        );
+                        sess.step(cmd).unwrap();
+                        peak_speed = peak_speed.max(sess.sample().speed());
+                        if tick % 720 == 719 {
+                            let sp = sess.sample();
+                            eprintln!(
+                                "  MG ZR @ {} tick={tick} speed={:.2} rpm={:.0} gear={} cmd={} thr={:.2} clu={:.2} ground={:?}",
+                                stage.id, sp.speed(), sp.rpm, sp.gear, sp.commanded_gear, sp.throttle_received, sp.payload_clutch, sp.wheel_ground
+                            );
+                        }
+                    }
+                    let s = sess.sample();
+                    assert!(s.finite(), "MG ZR non-finite on {}", stage.id);
+                    assert!(
+                        s.wheel_ground.iter().any(|&g| g != 0),
+                        "MG ZR no wheel contact on {}",
+                        stage.id
+                    );
+                    assert!(
+                        peak_speed > 3.0,
+                        "MG ZR failed acceleration on {}: peak={peak_speed:.2} m/s end={:.2} m/s rpm={:.0} gear={}",
+                        stage.id,
+                        s.speed(),
+                        s.rpm,
+                        s.gear
+                    );
+                    assert!(
+                        s.speed() < peak_speed,
+                        "MG ZR brake did not decelerate on {}: peak={peak_speed:.2} end={:.2}",
+                        stage.id,
+                        s.speed()
+                    );
+                    eprintln!(
+                        "INITIATION VERIFY [mg-zr-s1600 @ {}]: 720Hz PASS peak={peak_speed:.2} m/s after_brake={:.2} m/s rpm={:.0} gear={}",
+                        stage.id,
+                        s.speed(),
+                        s.rpm,
+                        s.gear
+                    );
+                }
+
+                // 2. Validate the 4 NEW PC NGP cars on the exact iPad NGP 7.4.778.507 runtime
+                // Overlay=ipad_rbr provides NGP.dll 7.4.778.507; install=pc_rbr provides the 4 new Cars/ folders.
+                let ngp_paths = rerbr_sim::inputs::Paths {
+                    install: pc_rbr.to_path_buf(),
+                    overlay: Some(ipad_rbr.to_path_buf()),
+                    maps: ipad_rbr.join("Maps"),
+                };
+                let discovered = discover(pc_rbr);
+                let harwood = rerbr_content::StageDescriptor::harwood_forest();
+                for target_id in [
+                    "rsf-citroen-ds3-wrc",
+                    "rsf-citroen-xsara-wrc-2006",
+                    "rsf-ford-fiesta-rally2",
+                    "rsf-skoda-fabia-rs-rally2",
+                ] {
+                    let d = discovered
+                        .iter()
+                        .find(|v| v.descriptor.id == target_id)
+                        .unwrap_or_else(|| panic!("missing PC RSF car {target_id}"));
+                    let pack_name = d.descriptor.rsf_pack.as_deref().unwrap();
+                    let pack_dir = pc_rbr.join("rsfdata/cars").join(pack_name);
+                    let sel = rerbr_content::Selection {
+                        vehicle: d.descriptor.clone(),
+                        stage: harwood.clone(),
+                    };
+                    let mut sess = rerbr_sim::drive::Session::boot_experimental_pack_with_aids(
+                        &ngp_paths, &sel, &pack_dir, false, true,
+                    )
+                    .unwrap_or_else(|e| panic!("NGP 7.4 boot failed for {target_id}: {e}"));
+                    let mut peak_speed = 0.0f64;
+                    for tick in 0..2880 {
+                        let steer = if (1600..2200).contains(&tick) { 0.3 } else { 0.0 };
+                        let brake = if tick >= 2400 { 0.9 } else { 0.0 };
+                        let throttle = if tick >= 2400 { 0.0 } else { 1.0 };
+                        let input = rerbr_sim::drive::Control {
+                            throttle,
+                            brake,
+                            steering: steer,
+                            flags: 4,
+                            gear: Some(2),
+                            ..Default::default()
+                        };
+                        let cmd = super::super::controls::pending_selection(
+                            input,
+                            sess.sample().commanded_gear,
+                        );
+                        sess.step(cmd).unwrap();
+                        peak_speed = peak_speed.max(sess.sample().speed());
+                    }
+                    let s = sess.sample();
+                    assert!(s.finite(), "{target_id} non-finite NGP 7.4 sample");
+                    assert!(
+                        s.wheel_ground.iter().any(|&g| g != 0),
+                        "{target_id} no ground contact"
+                    );
+                    assert!(
+                        peak_speed > 3.0,
+                        "{target_id} failed NGP 7.4 acceleration: peak={peak_speed:.2} m/s end={:.2} m/s rpm={:.0} gear={}",
+                        s.speed(),
+                        s.rpm,
+                        s.gear
+                    );
+                    assert!(
+                        s.speed() < peak_speed,
+                        "{target_id} brake did not decelerate: peak={peak_speed:.2} end={:.2}",
+                        s.speed()
+                    );
+                    eprintln!(
+                        "EXTRA PC NGP VERIFY [{target_id}]: NGP 7.4.778.507 720Hz PASS peak={peak_speed:.2} m/s after_brake={:.2} m/s rpm={:.0} gear={}",
+                        s.speed(),
+                        s.rpm,
+                        s.gear
+                    );
+                }
+
+                // 3. Verify Fiesta_R2T19.bank FMOD decoding (used by Clio Rally5 / Fiesta R2 / Fiesta Rally4)
+                let r2_fmod = super::super::fmod_synth::FmodVehicleAudio::load_from_documents(
+                    pc_rbr,
+                    "AudioFMOD/Fiesta_R2T19.bank",
+                    44100,
+                )
+                .expect("Fiesta_R2T19.bank decode");
+                let st = r2_fmod.stats();
+                assert!(st.decoded_samples > 0);
+                eprintln!(
+                    "FMOD R2/RALLY5 CHECK [Fiesta_R2T19.bank]: OK ({}/{} decoded)",
+                    st.decoded_samples, st.total_samples
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }
