@@ -76,17 +76,29 @@ pub fn resolve(
     shader: &str,
     name: &str,
 ) -> Result<Material, String> {
-    if car_parts::section(settings, shader).is_none() {
+    let prefixed = format!("Car{shader}");
+    let (effective_shader, forced_opacity) = if car_parts::section(settings, shader).is_some() {
+        (shader, false)
+    } else if car_parts::section(settings, &prefixed).is_some() {
+        (prefixed.as_str(), false)
+    } else if let Some(base) = shader
+        .strip_suffix(" transparent")
+        .or_else(|| shader.strip_suffix("_transparent"))
+        .filter(|b| car_parts::section(settings, b).is_some())
+    {
+        (base, true)
+    } else {
         return Err(format!("CAR MATERIAL: unknown shader class {shader}"));
-    }
+    };
     let (path, opacity) = resolved_diffuse_and_opacity(shaders, name)
         .ok_or_else(|| format!("CAR MATERIAL: no diffuse for {name}"))?;
+    let opacity = opacity || forced_opacity;
     Ok(Material {
-        shader: shader.into(),
+        shader: effective_shader.into(),
         name: name.into(),
         path: path.replace('/', "\\").to_ascii_lowercase(),
-        pass: pass_for(shader, opacity),
-        list: list_for(shader, opacity),
+        pass: pass_for(effective_shader, opacity),
+        list: list_for(effective_shader, opacity),
     })
 }
 

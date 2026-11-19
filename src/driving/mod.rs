@@ -143,7 +143,7 @@ pub struct Runtime {
     pilot_preset_index: usize,
     pilot_tag_index: usize,
     pilot_draft_name: String,
-    career_create_return_dealership: bool,
+    career_create_return_dealership: Option<menu::Page>,
     pending_buy_vehicle_id: Option<String>,
     selected_career_difficulty: career::CareerDifficulty,
 }
@@ -282,7 +282,7 @@ impl Runtime {
             pilot_preset_index: 0,
             pilot_tag_index: 0,
             pilot_draft_name: career::PILOT_NAME_PRESETS[0].to_string(),
-            career_create_return_dealership: false,
+            career_create_return_dealership: None,
             pending_buy_vehicle_id: None,
             selected_career_difficulty: career::CareerDifficulty::Beginner,
         }
@@ -349,13 +349,13 @@ impl Runtime {
                 }
                 Some((ShowroomMode::Garage, entry.descriptor.clone(), Vec::new()))
             }
-            menu::Page::Dealership => {
+            menu::Page::Dealership | menu::Page::NewDealership => {
                 let ctx = self.context();
                 let indices = self.menu.dealership_indices(&ctx);
                 let active_idx = if indices.contains(&self.menu.dealership_vehicle) {
                     self.menu.dealership_vehicle
                 } else {
-                    indices.first().copied().unwrap_or(0)
+                    *indices.first()?
                 };
                 let entry = self.content.vehicles.get(active_idx)?;
                 if !entry.can_showroom_view() {
@@ -482,7 +482,10 @@ impl Runtime {
                     }
                     continue;
                 }
-                if self.menu.page == menu::Page::Dealership {
+                if matches!(
+                    self.menu.page,
+                    menu::Page::Dealership | menu::Page::NewDealership
+                ) {
                     match ev {
                         gamepad::MenuNavEvent::Left => {
                             self.menu_command(menu::Command::DealershipPrevCar);
@@ -492,7 +495,7 @@ impl Runtime {
                         }
                         gamepad::MenuNavEvent::Confirm => {
                             if self.career.profile.is_none() {
-                                self.career_create_return_dealership = true;
+                                self.career_create_return_dealership = Some(self.menu.page);
                                 self.menu_command(menu::Command::Open(menu::Page::CareerCreate));
                             } else if self.pending_buy_vehicle_id.is_some() {
                                 self.menu_command(menu::Command::DealershipConfirmBuy);
@@ -871,7 +874,7 @@ impl Runtime {
                     self.coming_soon_notice = None;
                     match section {
                         menu::MainSection::Career => {
-                            self.career_create_return_dealership = false;
+                            self.career_create_return_dealership = None;
                             if self.career.profile.is_some() {
                                 self.menu.open(menu::Page::CareerHub);
                             } else {
@@ -892,11 +895,30 @@ impl Runtime {
                                 .set_mode(crate::car::showroom::ShowroomMode::Garage);
                             self.menu.open(menu::Page::Garage);
                         }
+                        menu::MainSection::NewCars => {
+                            self.pending_buy_vehicle_id = None;
+                            let first = {
+                                let ctx = self.context();
+                                self.menu
+                                    .dealership_indices_for(&ctx, career::DealershipKind::NewSalon)
+                                    .first()
+                                    .copied()
+                            };
+                            if let Some(idx) = first {
+                                self.menu.dealership_vehicle = idx;
+                            }
+                            self.showroom_camera
+                                .set_mode(crate::car::showroom::ShowroomMode::Garage);
+                            self.menu.open(menu::Page::NewDealership);
+                        }
                         menu::MainSection::UsedCars => {
                             self.pending_buy_vehicle_id = None;
                             let first = {
                                 let ctx = self.context();
-                                self.menu.dealership_indices(&ctx).first().copied()
+                                self.menu
+                                    .dealership_indices_for(&ctx, career::DealershipKind::UsedCars)
+                                    .first()
+                                    .copied()
                             };
                             if let Some(idx) = first {
                                 self.menu.dealership_vehicle = idx;
@@ -957,11 +979,14 @@ impl Runtime {
                     }
                     self.showroom_camera
                         .set_mode(crate::car::showroom::ShowroomMode::Garage);
-                } else if page == menu::Page::Dealership {
+                } else if let Some(kind) = page.dealership_kind() {
                     self.pending_buy_vehicle_id = None;
                     let first = {
                         let ctx = self.context();
-                        self.menu.dealership_indices(&ctx).first().copied()
+                        self.menu
+                            .dealership_indices_for(&ctx, kind)
+                            .first()
+                            .copied()
                     };
                     if let Some(idx) = first {
                         self.menu.dealership_vehicle = idx;
@@ -973,7 +998,8 @@ impl Runtime {
                     self.showroom_camera
                         .set_mode(crate::car::showroom::ShowroomMode::Garage);
                 } else if page == menu::Page::CareerCreate {
-                    self.career_create_return_dealership = self.menu.page == menu::Page::Dealership;
+                    self.career_create_return_dealership =
+                        self.menu.page.dealership_kind().map(|_| self.menu.page);
                 }
                 self.coming_soon_notice = None;
                 self.menu.open(page);
@@ -2075,11 +2101,10 @@ impl Runtime {
                         career::format_usd(career::INITIAL_CASH_USD)
                     ));
                     self.menu.reset_to_main();
-                    if self.career_create_return_dealership {
-                        self.career_create_return_dealership = false;
+                    if let Some(return_page) = self.career_create_return_dealership.take() {
                         self.showroom_camera
                             .set_mode(crate::car::showroom::ShowroomMode::Garage);
-                        self.menu.open(menu::Page::Dealership);
+                        self.menu.open(return_page);
                     } else {
                         self.menu.open(menu::Page::CareerHub);
                     }
@@ -2123,40 +2148,53 @@ impl Runtime {
                 }
             }
             DealershipRequestBuy => {
+                let kind = self.menu.active_dealership_kind();
                 let indices = {
                     let ctx = self.context();
-                    self.menu.dealership_indices(&ctx)
+                    self.menu.dealership_indices_for(&ctx, kind)
                 };
                 let active_idx = if indices.contains(&self.menu.dealership_vehicle) {
                     self.menu.dealership_vehicle
                 } else {
-                    indices.first().copied().unwrap_or(0)
+                    let Some(&first) = indices.first() else {
+                        return;
+                    };
+                    first
                 };
                 let Some(entry) = self.content.vehicles.get(active_idx) else {
                     return;
                 };
                 let Some(profile) = self.career.profile.as_ref() else {
-                    self.career_create_return_dealership = true;
+                    self.career_create_return_dealership =
+                        self.menu.page.dealership_kind().map(|_| self.menu.page);
                     self.menu.open(menu::Page::CareerCreate);
                     return;
                 };
                 let cap = entry.capability(self.ngp_experimental);
                 let spec = career::vehicle_market_spec(entry);
+                let Some(active_price) = spec.price_for(kind) else {
+                    self.message = Some(format!(
+                        "ESTE VEHÍCULO NO SE VENDE EN {}",
+                        kind.short_name()
+                    ));
+                    return;
+                };
                 if cap != content_manager::DriveCapability::Drivable {
                     self.message = Some("SOLO VISUALIZACIÓN 3D — NO COMPRABLE SIN FÍSICA".into());
                 } else if profile.owns_vehicle(&entry.descriptor.id) {
                     self.message = Some("YA TIENES ESTE COCHE EN TU GARAJE DE CARRERA".into());
-                } else if !profile.can_afford(spec.price_usd) {
+                } else if !profile.can_afford(active_price) {
                     self.message = Some(format!(
                         "SALDO INSUFICIENTE (NECESITAS {})",
-                        career::format_usd(spec.price_usd)
+                        career::format_usd(active_price)
                     ));
                 } else {
                     self.pending_buy_vehicle_id = Some(entry.descriptor.id.clone());
                     self.message = Some(format!(
-                        "PULSA CONFIRMAR COMPRA PARA ADQUIRIR {} POR {}",
+                        "PULSA CONFIRMAR COMPRA PARA ADQUIRIR {} ({}) POR {}",
                         entry.descriptor.name,
-                        career::format_usd(spec.price_usd)
+                        kind.condition_label(),
+                        career::format_usd(active_price)
                     ));
                 }
             }
@@ -2168,9 +2206,10 @@ impl Runtime {
                     self.message = Some("VEHÍCULO NO ENCONTRADO EN CATÁLOGO".into());
                     return;
                 };
+                let kind = self.menu.active_dealership_kind();
                 let ngp_exp = self.ngp_experimental;
                 let res = match self.career.profile.as_mut() {
-                    Some(profile) => profile.buy_vehicle(&entry, ngp_exp),
+                    Some(profile) => profile.buy_vehicle_in_dealership(&entry, kind, ngp_exp),
                     None => Err("CREA UN PERFIL DE CARRERA PRIMERO".into()),
                 };
                 match res {
@@ -2180,8 +2219,9 @@ impl Runtime {
                         } else {
                             let rem = self.career.profile.as_ref().map_or(0, |p| p.cash_usd);
                             self.message = Some(format!(
-                                "COMPRADO {} POR {} · SALDO {}",
+                                "COMPRADO {} ({}) POR {} · SALDO {}",
                                 entry.descriptor.name,
+                                kind.condition_label(),
                                 career::format_usd(paid),
                                 career::format_usd(rem)
                             ));
@@ -4792,8 +4832,12 @@ mod reload_tests {
         app.apply_command(menu::Command::Back);
         assert_eq!(app.menu.page, menu::Page::Main);
 
-        // 2ª Mano opens the 3D Showroom Dealership.
-        app.apply_command(menu::Command::MainSectionActivate(4)); // 2ª Mano
+        // Salón 0KM (index 4) and 2ª Mano (index 5) open their respective 3D Showroom Dealerships.
+        app.apply_command(menu::Command::MainSectionActivate(4)); // Salón 0KM
+        assert_eq!(app.menu.page, menu::Page::NewDealership);
+        app.apply_command(menu::Command::Back);
+        assert_eq!(app.menu.page, menu::Page::Main);
+        app.apply_command(menu::Command::MainSectionActivate(5)); // 2ª Mano
         assert_eq!(app.menu.page, menu::Page::Dealership);
         app.apply_command(menu::Command::Back);
         assert_eq!(app.menu.page, menu::Page::Main);
@@ -4946,6 +4990,7 @@ mod reload_tests {
             files: content_manager::FileAudit::unchecked(),
             tech_sheet: None,
             classification: rerbr_content::VehicleClassification::VisualInspectionOnly,
+            year: Some(2020),
             drivetrain: None,
             fmod_bank: None,
             using_fallback_model: false,

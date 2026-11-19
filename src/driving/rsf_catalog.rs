@@ -1043,83 +1043,198 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "heavy 34-car PC + iPad NGP 7.4 audit"]
     fn audits_and_boots_all_installed_rsf_cars_if_pc_present() {
         let rbr_root = Path::new(r"C:\Richard Burns Rally");
         if !rbr_root.join("rsfdata/cache/cars.json").is_file() {
             return;
         }
-        let discovered = discover(rbr_root);
-        let paths = rerbr_sim::inputs::Paths {
-            install: rbr_root.to_path_buf(),
-            overlay: None,
-            maps: rbr_root.join("Maps"),
-        };
-        let pack_root = rbr_root.join("rsfdata/cars");
+        std::thread::Builder::new()
+            .stack_size(rerbr_sim::STACK_BYTES)
+            .spawn(move || {
+                let ipad_rbr = Path::new(r"C:\Users\adria\Desktop\Respaldo RBR iPad\RBR");
+                let overlay = ipad_rbr
+                    .join("Plugins/NGP.dll")
+                    .is_file()
+                    .then(|| ipad_rbr.to_path_buf());
+                let maps = if ipad_rbr.join("Maps").is_dir() {
+                    ipad_rbr.join("Maps")
+                } else {
+                    rbr_root.join("Maps")
+                };
+                let discovered = discover(rbr_root);
+                let paths = rerbr_sim::inputs::Paths {
+                    install: rbr_root.to_path_buf(),
+                    overlay,
+                    maps,
+                };
+                let pack_root = rbr_root.join("rsfdata/cars");
 
-        let installed_packs: Vec<_> = discovered.iter().filter(|d| !d.pack_missing).collect();
-        for d in &installed_packs {
-            let model_res = crate::car::load_vehicle_for_mode(rbr_root, &d.descriptor, true);
-            let fmod_res = d.fmod_bank.as_deref().map(|bank_rel| {
-                super::super::fmod_synth::FmodVehicleAudio::load_from_documents(
-                    rbr_root, bank_rel, 44100,
-                )
-            });
-            let pack_name = d.descriptor.rsf_pack.as_deref().unwrap_or("");
-            let pack_dir = pack_root.join(pack_name);
-            let sel = rerbr_content::Selection {
-                vehicle: d.descriptor.clone(),
-                stage: rerbr_content::StageDescriptor::harwood_forest(),
-            };
-            let sim_res = if pack_dir.is_dir() {
-                Some(rerbr_sim::drive::Session::boot_experimental_pack(
-                    &paths, &sel, &pack_dir, false,
-                ))
-            } else {
-                None
-            };
-            let (model_str, tex_count) = match &model_res {
-                Ok(car) => (
-                    format!("OK({} draws)", car.geometry.drawn.len()),
-                    car.textures.len(),
-                ),
-                Err(e) => (format!("ERR({e})"), 0),
-            };
-            let fmod_str = match &fmod_res {
-                Some(Ok(synth)) => {
-                    let st = synth.stats();
-                    format!("OK({}/{} decoded)", st.decoded_samples, st.total_samples)
+                let installed_packs: Vec<_> =
+                    discovered.iter().filter(|d| !d.pack_missing).collect();
+                let mut model_failures = Vec::new();
+                let mut fmod_failures = Vec::new();
+                let mut sim_failures = Vec::new();
+
+                for d in &installed_packs {
+                    let model_res = crate::car::load_vehicle_for_mode(rbr_root, &d.descriptor, true);
+                    let fmod_res = d.fmod_bank.as_deref().map(|bank_rel| {
+                        super::super::fmod_synth::FmodVehicleAudio::load_from_documents(
+                            rbr_root, bank_rel, 44100,
+                        )
+                    });
+                    let pack_name = d.descriptor.rsf_pack.as_deref().unwrap_or("");
+                    let pack_dir = pack_root.join(pack_name);
+                    let sel = rerbr_content::Selection {
+                        vehicle: d.descriptor.clone(),
+                        stage: rerbr_content::StageDescriptor::harwood_forest(),
+                    };
+                    let sim_res = if pack_dir.is_dir() {
+                        Some(rerbr_sim::drive::Session::boot_experimental_pack_with_aids(
+                            &paths, &sel, &pack_dir, false, true,
+                        ))
+                    } else {
+                        None
+                    };
+                    let (model_str, tex_count) = match &model_res {
+                        Ok(car) => (
+                            format!(
+                                "OK({} draws, cockpit={})",
+                                car.geometry.drawn.len(),
+                                car.cockpit.is_some()
+                            ),
+                            car.textures.len(),
+                        ),
+                        Err(e) => {
+                            model_failures.push(format!("{}: {e}", d.descriptor.id));
+                            (format!("ERR({e})"), 0)
+                        }
+                    };
+                    let fmod_str = match &fmod_res {
+                        Some(Ok(synth)) => {
+                            let st = synth.stats();
+                            if st.decoded_samples == 0 {
+                                fmod_failures
+                                    .push(format!("{}: 0/{}", d.descriptor.id, st.total_samples));
+                            }
+                            format!("OK({}/{} decoded)", st.decoded_samples, st.total_samples)
+                        }
+                        Some(Err(e)) => {
+                            fmod_failures.push(format!("{}: {e}", d.descriptor.id));
+                            format!("ERR({e})")
+                        }
+                        None => "NONE".into(),
+                    };
+                    let sim_str = match sim_res {
+                        Some(Ok(mut sess)) => {
+                            let mut peak_speed = 0.0f64;
+                            let mut grounded_seen = false;
+                            let mut step_err = None;
+                            let mut trace = Vec::new();
+                            for tick in 0..3240 {
+                                // Keep Neutral while start-line override holds car (0..1440), then shift to 1st gear at GO!
+                                let target_gear = if tick < 1440 { 1 } else { 2 };
+                                let steer = if (2000..2500).contains(&tick) {
+                                    0.3
+                                } else {
+                                    0.0
+                                };
+                                let brake = if tick >= 2880 { 0.9 } else { 0.0 };
+                                let throttle = if tick >= 2880 { 0.0 } else { 1.0 };
+                                let input = rerbr_sim::drive::Control {
+                                    throttle,
+                                    brake,
+                                    steering: steer,
+                                    flags: 4,
+                                    gear: Some(target_gear),
+                                    ..Default::default()
+                                };
+                                let cmd = super::super::controls::pending_selection(
+                                    input,
+                                    sess.sample().commanded_gear,
+                                );
+                                if let Err(e) = sess.step(cmd) {
+                                    step_err = Some(e);
+                                    break;
+                                }
+                                let sp = sess.sample();
+                                peak_speed = peak_speed.max(sp.speed());
+                                grounded_seen |= sp.wheel_ground.iter().any(|&g| g != 0);
+                                if tick % 360 == 359 {
+                                    trace.push(format!(
+                                        "t={}:v={:.2},rpm={:.0},g={}/{},thr={:.1},clu={:.1},gnd={:?},pos=({:.1},{:.1},{:.1})",
+                                        tick + 1,
+                                        sp.speed(),
+                                        sp.rpm,
+                                        sp.gear,
+                                        sp.commanded_gear,
+                                        sp.throttle_received,
+                                        sp.payload_clutch,
+                                        sp.wheel_ground,
+                                        sp.position[0],
+                                        sp.position[1],
+                                        sp.position[2],
+                                    ));
+                                }
+                            }
+                            let s = sess.sample();
+                            if let Some(e) = step_err {
+                                sim_failures.push(format!("{}: step err {e}", d.descriptor.id));
+                                format!("STEP ERR({e})")
+                            } else if !s.finite()
+                                || !grounded_seen
+                                || peak_speed <= 2.5
+                            {
+                                eprintln!("  LOW PEAK TRACE [{}]: {}", d.descriptor.id, trace.join(" | "));
+                                sim_failures.push(format!(
+                                    "{}: peak={peak_speed:.2} end={:.2} finite={}",
+                                    d.descriptor.id,
+                                    s.speed(),
+                                    s.finite()
+                                ));
+                                format!("DRIVE WARN(peak={peak_speed:.2} end={:.2})", s.speed())
+                            } else {
+                                format!(
+                                    "720Hz OK(peak={peak_speed:.2}m/s brk={:.2}m/s rpm={:.0} g={})",
+                                    s.speed(),
+                                    s.rpm,
+                                    s.gear
+                                )
+                            }
+                        }
+                        Some(Err(e)) => {
+                            sim_failures.push(format!("{}: {e}", d.descriptor.id));
+                            format!("BOOT ERR({e})")
+                        }
+                        None => "NO PACK DIR".into(),
+                    };
+                    eprintln!(
+                        "RSF FULL AUDIT [{:<36}] yr={:?} cat={:<10?} dt={:<10?} | model={}({}) tex={} | fmod={} | sim={}",
+                        d.descriptor.id,
+                        d.year,
+                        d.descriptor.category.as_deref().unwrap_or("-"),
+                        d.drivetrain.as_deref().unwrap_or("-"),
+                        d.descriptor.model,
+                        model_str,
+                        tex_count,
+                        fmod_str,
+                        sim_str,
+                    );
                 }
-                Some(Err(e)) => format!("ERR({e})"),
-                None => "NONE".into(),
-            };
-            let sim_str = match &sim_res {
-                Some(Ok(_)) => "BOOT OK".into(),
-                Some(Err(e)) => format!("BOOT ERR({e})"),
-                None => "NO PACK DIR".into(),
-            };
-            eprintln!(
-                "RSF FULL AUDIT [{}]: model={}({}) tex={} fmod={} sim={} fallback={}",
-                d.descriptor.id,
-                d.descriptor.model,
-                model_str,
-                tex_count,
-                fmod_str,
-                sim_str,
-                d.using_fallback_model
-            );
-            assert!(
-                model_res.is_ok(),
-                "RSF installed car {} failed 3D model load: {model_str}",
-                d.descriptor.id
-            );
-            if d.fmod_present {
-                assert!(
-                    matches!(&fmod_res, Some(Ok(s)) if s.stats().decoded_samples > 0),
-                    "RSF installed car {} failed FMOD decode: {fmod_str}",
-                    d.descriptor.id
+                eprintln!(
+                    "RSF AUDIT SUMMARY: total_installed={} model_fail={}({model_failures:?}) fmod_fail={}({fmod_failures:?}) sim_fail={}({sim_failures:?})",
+                    installed_packs.len(),
+                    model_failures.len(),
+                    fmod_failures.len(),
+                    sim_failures.len()
                 );
-            }
-        }
+                assert!(model_failures.is_empty(), "3D model failures: {model_failures:?}");
+                assert!(fmod_failures.is_empty(), "FMOD bank failures: {fmod_failures:?}");
+                assert!(sim_failures.is_empty(), "720Hz NGP sim failures: {sim_failures:?}");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -1472,6 +1587,7 @@ mod tests {
                 let discovered = discover(pc_rbr);
                 let harwood = rerbr_content::StageDescriptor::harwood_forest();
                 for target_id in [
+                    "rsf-renault-clio-rally5",
                     "rsf-citroen-ds3-wrc",
                     "rsf-citroen-xsara-wrc-2006",
                     "rsf-ford-fiesta-rally2",
@@ -1492,16 +1608,17 @@ mod tests {
                     )
                     .unwrap_or_else(|e| panic!("NGP 7.4 boot failed for {target_id}: {e}"));
                     let mut peak_speed = 0.0f64;
-                    for tick in 0..2880 {
-                        let steer = if (1600..2200).contains(&tick) { 0.3 } else { 0.0 };
-                        let brake = if tick >= 2400 { 0.9 } else { 0.0 };
-                        let throttle = if tick >= 2400 { 0.0 } else { 1.0 };
+                    for tick in 0..3240 {
+                        let target_gear = if tick < 1440 { 1 } else { 2 };
+                        let steer = if (2000..2500).contains(&tick) { 0.3 } else { 0.0 };
+                        let brake = if tick >= 2880 { 0.9 } else { 0.0 };
+                        let throttle = if tick >= 2880 { 0.0 } else { 1.0 };
                         let input = rerbr_sim::drive::Control {
                             throttle,
                             brake,
                             steering: steer,
                             flags: 4,
-                            gear: Some(2),
+                            gear: Some(target_gear),
                             ..Default::default()
                         };
                         let cmd = super::super::controls::pending_selection(

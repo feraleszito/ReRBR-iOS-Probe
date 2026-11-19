@@ -83,6 +83,7 @@ pub struct Session {
     dt: f32,
     steps: u32,
     clutch_help: bool,
+    is_experimental_pack: bool,
     finish_direction: Option<[f32; 3]>,
     finish_crossed_forward: bool,
     school_run: Option<SchoolRun>,
@@ -304,6 +305,7 @@ impl Session {
         if let Some(lesson) = aids.lesson {
             race = race.in_school(lesson);
         }
+        let is_experimental_pack = car_pack.is_some();
         let physics_audit = match &car_pack {
             Some(cp) => crate::physics_audit::inspect_pack(&audit_archive, &cp.pack, race.surface)?,
             None => {
@@ -381,6 +383,7 @@ impl Session {
             dt,
             steps: 0,
             clutch_help: aids.clutch_help,
+            is_experimental_pack,
             finish_direction,
             finish_crossed_forward: false,
             school_run,
@@ -458,14 +461,23 @@ impl Session {
     pub fn gear_ratios(&self) -> Result<Vec<f32>, String> {
         diagnostics::gear_ratios(&self.playback)
     }
-    pub fn step(&mut self, input: Control) -> Result<(), String> {
+    pub fn step(&mut self, mut input: Control) -> Result<(), String> {
         if [input.throttle, input.brake, input.clutch, input.handbrake, input.steering].iter().any(|x| !x.is_finite()) {
             return Err("nonfinite input".into());
         }
         if self.clutch_help {
             let car = self.playback.pure.mem.u32(pure::CAR_PTR);
             if car != 0 {
-                // Allow manual clutch pedal override (e.g. clutch kick / start-line rev) even when ClutchHelp is active.
+                if self.is_experimental_pack && input.clutch <= 0.05 && input.throttle > 0.05 && input.brake < 0.1 {
+                    let s = self.sample();
+                    // NGP6/NGP7 small-displacement (Rally5/Rally4/R2) & big-turbo cars stall if the clutch is
+                    // engaged at idle RPM; modulate launch clutch slip automatically when ClutchHelp is enabled.
+                    if (s.gear >= 2 || s.commanded_gear >= 2) && s.speed() < 6.0 && s.rpm < 3400.0 {
+                        let slip = ((3400.0 - s.rpm) / 1200.0).clamp(0.15, 0.97);
+                        input.clutch = input.clutch.max(slip);
+                    }
+                }
+                // Allow manual/auto clutch pedal override (e.g. clutch kick / start-line rev) even when ClutchHelp is active.
                 let scratch = rbr_physics::car_body::layout::scratch_at(car);
                 self.playback.pure.mem.set_u32(scratch + 0x4c, u32::from(input.clutch <= 0.05));
             }

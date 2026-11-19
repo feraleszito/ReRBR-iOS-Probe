@@ -39,6 +39,7 @@ pub enum Page {
     CareerCreate,
     CareerHub,
     Dealership,
+    NewDealership,
     CareerGarage,
     CareerChampionship,
 }
@@ -48,8 +49,21 @@ impl Page {
     pub fn is_showroom_page(self) -> bool {
         matches!(
             self,
-            Self::Title | Self::Main | Self::Garage | Self::Dealership | Self::CareerGarage
+            Self::Title
+                | Self::Main
+                | Self::Garage
+                | Self::Dealership
+                | Self::NewDealership
+                | Self::CareerGarage
         )
+    }
+
+    pub fn dealership_kind(self) -> Option<super::career::DealershipKind> {
+        match self {
+            Self::Dealership => Some(super::career::DealershipKind::UsedCars),
+            Self::NewDealership => Some(super::career::DealershipKind::NewSalon),
+            _ => None,
+        }
     }
 }
 
@@ -59,17 +73,19 @@ pub enum MainSection {
     TimeTrial,
     Online,
     Garage,
+    NewCars,
     UsedCars,
     RallySchool,
     Settings,
 }
 
 impl MainSection {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Career,
         Self::TimeTrial,
         Self::Online,
         Self::Garage,
+        Self::NewCars,
         Self::UsedCars,
         Self::RallySchool,
         Self::Settings,
@@ -85,6 +101,7 @@ impl MainSection {
             Self::TimeTrial => "CONTRARRELOJ",
             Self::Online => "ONLINE",
             Self::Garage => "GARAJE",
+            Self::NewCars => "SALÓN 0KM",
             Self::UsedCars => "2ª MANO",
             Self::RallySchool => "ACADEMIA",
             Self::Settings => "AJUSTES",
@@ -97,7 +114,8 @@ impl MainSection {
             Self::TimeTrial => "TRAMOS Y PB",
             Self::Online => "PRÓXIMAMENTE",
             Self::Garage => "SHOWROOM 3D",
-            Self::UsedCars => "TIENDA 3D",
+            Self::NewCars => "0 KM NUEVOS",
+            Self::UsedCars => "USADOS 3D",
             Self::RallySchool => "17 LECCIONES",
             Self::Settings => "OPCIONES",
         }
@@ -603,9 +621,15 @@ impl Menu {
             Page::CareerCreate => "NUEVO PILOTO — CARRERA",
             Page::CareerHub => "MODO CARRERA",
             Page::Dealership => "CONCESIONARIO 2ª MANO",
+            Page::NewDealership => "SALÓN AUTOMOTOR — 0 KM",
             Page::CareerGarage => "GARAJE DE CARRERA",
             Page::CareerChampionship => "COPA REGIONAL DE INICIACIÓN",
         }
+    }
+    pub fn active_dealership_kind(&self) -> super::career::DealershipKind {
+        self.page
+            .dealership_kind()
+            .unwrap_or(super::career::DealershipKind::UsedCars)
     }
     /// Filtered indices into `ctx.content.vehicles` for the active `GarageFilter`.
     pub fn garage_indices(&self, ctx: &Context) -> Vec<usize> {
@@ -626,9 +650,14 @@ impl Menu {
             filtered
         }
     }
-    /// Filtered indices into `ctx.content.vehicles` for the Used Car Dealership (`2ª MANO`),
-    /// sorted with affordable drivable initiation cars first so the player sees buyable cars immediately.
-    pub fn dealership_indices(&self, ctx: &Context) -> Vec<usize> {
+    /// Filtered indices into `ctx.content.vehicles` for a specific Dealership (`2ª MANO` or `SALÓN AUTOMOTOR 0 KM`),
+    /// strictly enforcing each vehicle's commercial channel (`spec.offered_in(kind)`) and sorting affordable
+    /// drivable initiation cars first.
+    pub fn dealership_indices_for(
+        &self,
+        ctx: &Context,
+        kind: super::career::DealershipKind,
+    ) -> Vec<usize> {
         let mut indices: Vec<usize> = ctx
             .content
             .vehicles
@@ -637,6 +666,9 @@ impl Menu {
             .filter(|(_, e)| {
                 let cap = e.capability(ctx.ngp_experimental);
                 let spec = super::career::vehicle_market_spec(e);
+                if !spec.offered_in(kind) {
+                    return false;
+                }
                 match self.dealership_filter {
                     DealershipFilter::Initiation => spec.tier.eligible_for_regional(),
                     DealershipFilter::Drivable => cap == DriveCapability::Drivable,
@@ -647,13 +679,21 @@ impl Menu {
             })
             .map(|(i, _)| i)
             .collect();
-        if indices.is_empty() && !ctx.content.vehicles.is_empty() {
-            indices = (0..ctx.content.vehicles.len()).collect();
+        if indices.is_empty() {
+            indices = ctx
+                .content
+                .vehicles
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| super::career::vehicle_market_spec(e).offered_in(kind))
+                .map(|(i, _)| i)
+                .collect();
         }
         indices.sort_by_key(|&i| {
             let e = &ctx.content.vehicles[i];
             let cap = e.capability(ctx.ngp_experimental);
             let spec = super::career::vehicle_market_spec(e);
+            let price = spec.price_for(kind).unwrap_or(u64::MAX);
             let drivable_rank = if cap == DriveCapability::Drivable {
                 0u8
             } else {
@@ -664,9 +704,13 @@ impl Menu {
             } else {
                 1u8
             };
-            (regional_rank, drivable_rank, spec.price_usd, i)
+            (regional_rank, drivable_rank, price, i)
         });
         indices
+    }
+    /// Filtered indices for whichever dealership page is active (defaults to `2ª MANO`).
+    pub fn dealership_indices(&self, ctx: &Context) -> Vec<usize> {
+        self.dealership_indices_for(ctx, self.active_dealership_kind())
     }
     /// Indices into `ctx.content.vehicles` for vehicles OWNED in the active Career profile.
     pub fn career_garage_indices(&self, ctx: &Context) -> Vec<usize> {
@@ -839,6 +883,13 @@ impl Menu {
                 }
                 if let Some(cat) = inspected.category.as_deref() {
                     rows.push(Row::info("CATEGORÍA", cat));
+                }
+                if let Some(entry) = entry {
+                    let spec = super::career::vehicle_market_spec(entry);
+                    if let Some(yr) = spec.anio {
+                        rows.push(Row::info("AÑO", yr.to_string()));
+                    }
+                    rows.push(Row::info("CANAL CARRERA", spec.concesionario.label()));
                 }
                 rows.push(Row::info("MODELO 3D", inspected.model.clone()));
                 if let Some(pack) = inspected.rsf_pack.as_deref() {
@@ -1720,7 +1771,11 @@ impl Menu {
                         Command::Open(Page::CareerGarage),
                     ));
                     rows.push(Row::action(
-                        "CONCESIONARIO 2ª MANO (SHOWROOM 3D)",
+                        "SALÓN AUTOMOTOR (COCHES 0 KM · 3D)",
+                        Command::Open(Page::NewDealership),
+                    ));
+                    rows.push(Row::action(
+                        "CONCESIONARIO 2ª MANO (USADOS · 3D)",
                         Command::Open(Page::Dealership),
                     ));
                 } else {
@@ -1732,7 +1787,7 @@ impl Menu {
                 rows.push(Row::action("VOLVER", Command::Back));
                 rows
             }
-            Page::Dealership => vec![
+            Page::Dealership | Page::NewDealership => vec![
                 Row::action("ANTERIOR", Command::DealershipPrevCar),
                 Row::action("SIGUIENTE", Command::DealershipNextCar),
                 Row::action("VOLVER", Command::Back),
@@ -2029,7 +2084,11 @@ impl Menu {
                 "CONTRARRELOJ SIGUE LIBRE CON CUALQUIER COCHE CONDUCIBLE".into(),
             ],
             Page::Dealership => vec![
-                "CONCESIONARIO 2ª MANO · PRECIOS PROVISIONALES EN USD".into(),
+                "CONCESIONARIO 2ª MANO · COCHES USADOS EN USD".into(),
+                "SOLO COCHES CONDUCIBLES SE PUEDEN COMPRAR".into(),
+            ],
+            Page::NewDealership => vec![
+                "SALÓN AUTOMOTOR · COCHES 0 KM NUEVOS EN USD".into(),
                 "SOLO COCHES CONDUCIBLES SE PUEDEN COMPRAR".into(),
             ],
             Page::CareerGarage => vec![
@@ -2078,7 +2137,9 @@ impl Menu {
         let yf = y as f32;
         match self.page {
             Page::Main => (0.105..=0.745).contains(&yf),
-            Page::Garage | Page::Dealership | Page::CareerGarage => (0.105..=0.695).contains(&yf),
+            Page::Garage | Page::Dealership | Page::NewDealership | Page::CareerGarage => {
+                (0.105..=0.695).contains(&yf)
+            }
             _ => false,
         }
     }
@@ -2191,7 +2252,7 @@ impl Menu {
                 }
                 None
             }
-            Page::Dealership => {
+            Page::Dealership | Page::NewDealership => {
                 if Self::garage_back_rect().contains(x, y) {
                     return Some(Command::Back);
                 }
@@ -2299,7 +2360,7 @@ impl Menu {
             self.draw_transition_fade(canvas, ctx.transition_alpha);
             return;
         }
-        if self.page == Page::Dealership {
+        if matches!(self.page, Page::Dealership | Page::NewDealership) {
             self.draw_dealership_showroom(canvas, ctx, status);
             self.draw_transition_fade(canvas, ctx.transition_alpha);
             return;
@@ -3143,7 +3204,7 @@ impl Menu {
             };
             let title = format!(
                 "{}  ({}/{})",
-                entry.descriptor.name,
+                entry.display_name_with_year(),
                 pos + 1,
                 indices.len().max(1)
             );
@@ -3230,25 +3291,29 @@ impl Menu {
         }
     }
 
-    /// Transparent 3D Showroom Used Car Dealership (`2ª MANO`):
-    /// Shows provisional USD price, real category, driving capability, ownership, balance,
-    /// and enforces explicit two-step purchase confirmation strictly for drivable vehicles.
+    /// Transparent 3D Showroom Dealership for both `2ª MANO (USADOS)` and `SALÓN AUTOMOTOR (0 KM)`:
+    /// Shows vehicle name & year, real category, `0 KM` vs `USADO` badge (with discount when applicable),
+    /// USD price for the active dealership, driving capability, ownership, balance, and 2-step confirmation.
     fn draw_dealership_showroom(&self, canvas: &mut Canvas, ctx: &Context, status: &str) {
+        let kind = self.active_dealership_kind();
         ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 0.106), [10, 13, 19, 200]);
         ui::rule(canvas, 0.0, 0.106, 1.0, LINE);
 
-        let indices = self.dealership_indices(ctx);
+        let indices = self.dealership_indices_for(ctx, kind);
         let pos = indices
             .iter()
             .position(|&i| i == self.dealership_vehicle)
             .unwrap_or(0);
         let active_idx = indices.get(pos).copied().unwrap_or(0);
-        let entry = ctx.content.vehicles.get(active_idx);
+        let entry = indices
+            .get(pos)
+            .and_then(|_| ctx.content.vehicles.get(active_idx));
         let profile = ctx.career.and_then(|c| c.profile.as_ref());
 
         ui::button(canvas, Self::garage_back_rect(), "VOLVER", false, true);
         let filter_label = format!(
-            "2ª MANO: {} ({})",
+            "{}: {} ({})",
+            kind.short_name(),
             self.dealership_filter.label(),
             indices.len()
         );
@@ -3290,13 +3355,14 @@ impl Menu {
         if let Some(entry) = entry {
             let cap = entry.capability(ctx.ngp_experimental);
             let spec = super::career::vehicle_market_spec(entry);
+            let active_price = spec.price_for(kind).unwrap_or(0);
             let owned = profile.is_some_and(|p| p.owns_vehicle(&entry.descriptor.id));
-            let affordable = profile.is_some_and(|p| p.can_afford(spec.price_usd));
+            let affordable = profile.is_some_and(|p| p.can_afford(active_price));
             let pending_this = ctx.pending_buy_vehicle_id == Some(entry.descriptor.id.as_str());
 
             let title = format!(
                 "{}  ({}/{})",
-                entry.descriptor.name,
+                entry.display_name_with_year(),
                 pos + 1,
                 indices.len().max(1)
             );
@@ -3307,7 +3373,11 @@ impl Menu {
                 ("EN TU GARAJE".to_string(), GOOD)
             } else {
                 (
-                    format!("{} (PROV.)", super::career::format_usd(spec.price_usd)),
+                    format!(
+                        "{} · {}",
+                        spec.condition_badge(kind),
+                        super::career::format_usd(active_price)
+                    ),
                     if cap == DriveCapability::Drivable && affordable {
                         GOOD
                     } else if cap == DriveCapability::Drivable {
@@ -3318,20 +3388,24 @@ impl Menu {
                 )
             };
             ui::panel(canvas, badge_rect, PANEL_DEEP, badge_col);
-            ui::text_center(canvas, badge_rect, &badge_text, 0.58, badge_col);
+            ui::text_center(canvas, badge_rect, &badge_text, 0.56, badge_col);
 
-            let cat = entry.descriptor.category.as_deref().unwrap_or("RBR / RSF");
-            let meta = format!("{} · {} · {}", spec.tier.label(), cat, cap.short_badge());
+            let meta = format!(
+                "{} · {} · {} · {}",
+                spec.condition_badge(kind),
+                spec.categoria,
+                spec.elegibilidad_carrera.label(),
+                cap.short_badge()
+            );
             ui::text_clipped(canvas, cx + 12.0, cy + 28.0, cw - 24.0, &meta, 0.58, DIM);
 
             let info_line = if pending_this {
                 format!(
-                    "CONFIRMA COMPRA POR {} (SALDO RESTANTE {})",
-                    super::career::format_usd(spec.price_usd),
+                    "CONFIRMA COMPRA {} POR {} (SALDO RESTANTE {})",
+                    kind.condition_label(),
+                    super::career::format_usd(active_price),
                     profile
-                        .map(|p| super::career::format_usd(
-                            p.cash_usd.saturating_sub(spec.price_usd)
-                        ))
+                        .map(|p| super::career::format_usd(p.cash_usd.saturating_sub(active_price)))
                         .unwrap_or_else(|| "US$0".into())
                 )
             } else if cap != DriveCapability::Drivable {
@@ -3340,7 +3414,21 @@ impl Menu {
                 "YA LO TIENES EN TU GARAJE DE CARRERA".to_string()
             } else if !status.is_empty() && status != "READY - TAP A ROW" {
                 status.to_string()
-            } else if spec.tier.eligible_for_regional() {
+            } else if kind == super::career::DealershipKind::UsedCars
+                && spec.precio_0km.is_some()
+                && spec.descuento_usado_pct > 0
+            {
+                format!(
+                    "0 KM: {} -> USADO CON -{}% DTO. ({})",
+                    super::career::format_usd(spec.precio_0km.unwrap_or(active_price)),
+                    spec.descuento_usado_pct,
+                    if spec.elegibilidad_carrera.eligible_for_regional() {
+                        "ELEGIBLE COPA REGIONAL"
+                    } else {
+                        "CATEGORÍA SUPERIOR"
+                    }
+                )
+            } else if spec.elegibilidad_carrera.eligible_for_regional() {
                 "ELEGIBLE PARA COPA REGIONAL DE INICIACIÓN".to_string()
             } else {
                 "CATEGORÍA SUPERIOR (NO ELEGIBLE PARA COPA REGIONAL)".to_string()
@@ -3382,8 +3470,12 @@ impl Menu {
                     [156, 30, 30, 238],
                     [240, 110, 110, 255],
                 );
-                let buy_txt = format!("COMPRAR {}", super::career::format_usd(spec.price_usd));
-                ui::text_center(canvas, action_rect, &buy_txt, 0.62, TEXT);
+                let buy_txt = format!(
+                    "COMPRAR {} {}",
+                    kind.condition_label(),
+                    super::career::format_usd(active_price)
+                );
+                ui::text_center(canvas, action_rect, &buy_txt, 0.60, TEXT);
             } else {
                 ui::panel(canvas, action_rect, PANEL_DEEP, BAD);
                 ui::text_center(canvas, action_rect, "SALDO INSUFICIENTE", 0.62, BAD);
@@ -3392,8 +3484,8 @@ impl Menu {
             ui::text_center(
                 canvas,
                 card,
-                "NO HAY COCHES DETECTADOS PARA EL CONCESIONARIO",
-                0.80,
+                "NO HAY COCHES INSTALADOS PARA ESTE CONCESIONARIO",
+                0.78,
                 WARN,
             );
         }
@@ -3902,14 +3994,15 @@ mod tests {
         menu.reset_to_main();
         assert_eq!(menu.page, Page::Main);
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.len(), 8);
         assert_eq!(rows[0].label, "CARRERA");
         assert_eq!(rows[1].label, "CONTRARRELOJ");
         assert_eq!(rows[2].label, "ONLINE");
         assert_eq!(rows[3].label, "GARAJE");
-        assert_eq!(rows[4].label, "2ª MANO");
-        assert_eq!(rows[5].label, "ACADEMIA");
-        assert_eq!(rows[6].label, "AJUSTES");
+        assert_eq!(rows[4].label, "SALÓN 0KM");
+        assert_eq!(rows[5].label, "2ª MANO");
+        assert_eq!(rows[6].label, "ACADEMIA");
+        assert_eq!(rows[7].label, "AJUSTES");
         // Quick drive button on horizontal main menu starts rally explicitly.
         let drive_btn = Menu::main_quick_drive_rect();
         assert_eq!(
@@ -4483,6 +4576,7 @@ mod tests {
             Page::CareerCreate,
             Page::CareerHub,
             Page::Dealership,
+            Page::NewDealership,
             Page::CareerGarage,
             Page::CareerChampionship,
         ];

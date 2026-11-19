@@ -96,6 +96,7 @@ pub struct VehicleEntry {
     pub files: FileAudit,
     pub tech_sheet: Option<super::ngp_proto::VehicleTechSheet>,
     pub classification: VehicleClassification,
+    pub year: Option<u32>,
     pub drivetrain: Option<String>,
     pub fmod_bank: Option<String>,
     pub using_fallback_model: bool,
@@ -104,7 +105,31 @@ pub struct VehicleEntry {
     pub notes: Vec<String>,
 }
 
+pub fn preset_year_for_vehicle_id(id: &str) -> Option<u32> {
+    match id {
+        "toyota-corolla-wrc" => Some(1999),
+        "subaru-impreza-2000" => Some(2000),
+        "peugeot-206-wrc" | "mitsubishi-lancer-evo-vii" => Some(2002),
+        "subaru-impreza-2003" | "citroen-xsara" | "hyundai-accent-wrc" => Some(2003),
+        "mg-zr-s1600" => Some(2004),
+        "ford-focus-rs-wrc-2006" => Some(2006),
+        _ => None,
+    }
+}
+
 impl VehicleEntry {
+    pub fn display_name_with_year(&self) -> String {
+        match self
+            .year
+            .or_else(|| preset_year_for_vehicle_id(&self.descriptor.id))
+        {
+            Some(yr) if !self.descriptor.name.contains(&yr.to_string()) => {
+                format!("{} ({yr})", self.descriptor.name)
+            }
+            _ => self.descriptor.name.clone(),
+        }
+    }
+
     /// Honest capability classification distinguishing drivable vehicles (original RBR or
     /// integrated RSF NGP) from visual-only 3D models discovered in `Cars/`.
     pub fn capability(&self, ngp_experimental: bool) -> DriveCapability {
@@ -182,12 +207,14 @@ impl Catalog {
                     &FileAudit::unchecked(),
                 );
                 let classification = descriptor.base_classification();
+                let year = preset_year_for_vehicle_id(&descriptor.id);
                 VehicleEntry {
                     descriptor,
                     state,
                     files: FileAudit::unchecked(),
                     tech_sheet: None,
                     classification,
+                    year,
                     drivetrain: None,
                     fmod_bank: None,
                     using_fallback_model: false,
@@ -202,6 +229,7 @@ impl Catalog {
             .any(|v| v.descriptor.id == selection.vehicle.id)
         {
             let classification = selection.vehicle.base_classification();
+            let year = preset_year_for_vehicle_id(&selection.vehicle.id);
             vehicles.insert(
                 0,
                 VehicleEntry {
@@ -214,6 +242,7 @@ impl Catalog {
                     files: FileAudit::unchecked(),
                     tech_sheet: None,
                     classification,
+                    year,
                     drivetrain: None,
                     fmod_bank: None,
                     using_fallback_model: false,
@@ -345,6 +374,7 @@ impl Catalog {
                 existing.files = files;
                 existing.tech_sheet = item.tech_sheet;
                 existing.classification = item.classification;
+                existing.year = item.year.or(existing.year);
                 existing.drivetrain = item.drivetrain;
                 existing.fmod_bank = item.fmod_bank;
                 existing.notes = item.notes;
@@ -382,6 +412,7 @@ impl Catalog {
                     files,
                     tech_sheet: item.tech_sheet,
                     classification: item.classification,
+                    year: item.year,
                     drivetrain: item.drivetrain,
                     fmod_bank: item.fmod_bank,
                     using_fallback_model: item.using_fallback_model,
@@ -416,6 +447,7 @@ impl Catalog {
                 files,
                 tech_sheet: None,
                 classification: VehicleClassification::VisualInspectionOnly,
+                year: item.year,
                 drivetrain: item.drivetrain,
                 fmod_bank: None,
                 using_fallback_model: false,

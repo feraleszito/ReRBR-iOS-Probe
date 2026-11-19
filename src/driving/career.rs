@@ -62,161 +62,565 @@ impl CareerTier {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DealershipKind {
+    #[default]
+    UsedCars,
+    NewSalon,
+}
+
+impl DealershipKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::UsedCars => "CONCESIONARIO 2ª MANO",
+            Self::NewSalon => "SALÓN AUTOMOTOR — 0 KM",
+        }
+    }
+
+    pub fn short_name(self) -> &'static str {
+        match self {
+            Self::UsedCars => "2ª MANO",
+            Self::NewSalon => "SALÓN 0KM",
+        }
+    }
+
+    pub fn condition_label(self) -> &'static str {
+        match self {
+            Self::UsedCars => "USADO",
+            Self::NewSalon => "0 KM",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DealershipChannel {
+    /// Offered exclusively in `SALÓN AUTOMOTOR` as a brand-new `0 KM` vehicle.
+    NewSalonOnly,
+    /// Offered exclusively in `2ª MANO` as a `USADO` vehicle.
+    UsedOnly,
+    /// Offered in BOTH `SALÓN AUTOMOTOR` (`0 KM`) and `2ª MANO` (`USADO` with discount).
+    Both,
+    /// Validated for Time Trial (`CONTRARRELOJ`) & General `GARAJE`, but excluded from both
+    /// Career dealerships until its commercial year rule (e.g. WRC 2013/2016/2017) is defined.
+    PendingCommercialRule,
+}
+
+impl DealershipChannel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NewSalonOnly => "SALÓN AUTOMOTOR (0 KM)",
+            Self::UsedOnly => "2ª MANO (USADO)",
+            Self::Both => "SALÓN AUTOMOTOR (0 KM) Y 2ª MANO (USADO)",
+            Self::PendingCommercialRule => "PENDIENTE REGLA COMERCIAL",
+        }
+    }
+
+    pub fn includes(self, kind: DealershipKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::NewSalonOnly | Self::Both, DealershipKind::NewSalon)
+                | (Self::UsedOnly | Self::Both, DealershipKind::UsedCars)
+        )
+    }
+}
+
+/// Configurable table of WRC vehicles from years not yet assigned to a commercial rule (2013, 2016, 2017, 2021).
+/// Keeping them here lets future updates assign them to `NewSalonOnly`, `UsedOnly`, or `Both` without
+/// arbitrary placement today. They remain 100% drivable in `CONTRARRELOJ` and viewable in `GARAJE`.
+pub const PENDING_COMMERCIAL_RULE_WRC_IDS: &[&str] = &[
+    "rsf-mini-jcw-wrc",
+    "rsf-vw-polo-r-wrc-2016",
+    "rsf-citroen-c3-wrc-2017",
+    "rsf-hyundai-i20-coupe-wrc-2017",
+    "rsf-hyundai-i20-coupe-wrc-2021",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VehicleMarketSpec {
+    pub precio_0km: Option<u64>,
+    pub precio_usado: Option<u64>,
+    pub descuento_usado_pct: u8,
+    pub concesionario: DealershipChannel,
+    pub categoria: String,
+    pub anio: Option<u32>,
+    pub elegibilidad_carrera: CareerTier,
+    /// Legacy convenience price (`precio_usado.or(precio_0km).unwrap_or(0)`).
     pub price_usd: u64,
+    /// Legacy alias for `elegibilidad_carrera`.
     pub tier: CareerTier,
     pub is_provisional: bool,
 }
 
-/// Configurable provisional market specification for any installed vehicle.
-/// Changing prices in future versions never invalidates already-owned cars.
-pub fn vehicle_market_spec(entry: &VehicleEntry) -> VehicleMarketSpec {
-    let id = entry.descriptor.id.as_str();
-    let cat_lower = entry
+impl VehicleMarketSpec {
+    fn build(
+        precio_0km: Option<u64>,
+        precio_usado: Option<u64>,
+        concesionario: DealershipChannel,
+        categoria: impl Into<String>,
+        anio: Option<u32>,
+        elegibilidad_carrera: CareerTier,
+    ) -> Self {
+        let descuento_usado_pct = match (precio_0km, precio_usado) {
+            (Some(new_p), Some(used_p)) if new_p > 0 && used_p < new_p => {
+                (((new_p - used_p) * 100) / new_p) as u8
+            }
+            _ => 0,
+        };
+        let price_usd = precio_usado.or(precio_0km).unwrap_or(0);
+        Self {
+            precio_0km,
+            precio_usado,
+            descuento_usado_pct,
+            concesionario,
+            categoria: categoria.into(),
+            anio,
+            elegibilidad_carrera,
+            price_usd,
+            tier: elegibilidad_carrera,
+            is_provisional: true,
+        }
+    }
+
+    pub fn offered_in(&self, kind: DealershipKind) -> bool {
+        self.concesionario.includes(kind) && self.price_for(kind).is_some_and(|p| p > 0)
+    }
+
+    pub fn price_for(&self, kind: DealershipKind) -> Option<u64> {
+        if !self.concesionario.includes(kind) {
+            return None;
+        }
+        match kind {
+            DealershipKind::NewSalon => self.precio_0km,
+            DealershipKind::UsedCars => self.precio_usado,
+        }
+    }
+
+    pub fn condition_badge(&self, kind: DealershipKind) -> String {
+        match kind {
+            DealershipKind::NewSalon => "0 KM".into(),
+            DealershipKind::UsedCars => {
+                if self.descuento_usado_pct > 0 && self.precio_0km.is_some() {
+                    format!("USADO (-{}%)", self.descuento_usado_pct)
+                } else {
+                    "USADO".into()
+                }
+            }
+        }
+    }
+}
+
+fn infer_vehicle_year(entry: &VehicleEntry) -> Option<u32> {
+    if let Some(y) = entry
+        .year
+        .or_else(|| super::content_manager::preset_year_for_vehicle_id(&entry.descriptor.id))
+    {
+        return Some(y);
+    }
+    match entry.descriptor.id.as_str() {
+        "rsf-renault-clio-rally5"
+        | "rsf-renault-clio-rally4"
+        | "rsf-ford-fiesta-rally4"
+        | "rsf-peugeot-208-rally4"
+        | "rsf-ford-fiesta-rally3" => Some(2021),
+        "rsf-renault-clio-rally3"
+        | "rsf-ford-fiesta-rally3-evo"
+        | "rsf-ford-fiesta-rally2"
+        | "rsf-hyundai-i20-n-rally2" => Some(2023),
+        "rsf-toyota-gr-yaris-rally2" | "rsf-skoda-fabia-rs-rally2" => Some(2024),
+        "rsf-ford-fiesta-mk-viii-r2" | "rsf-ford-fiesta-wrc-2019" => Some(2019),
+        "rsf-opel-adam-r2" | "rsf-mini-jcw-wrc" => Some(2013),
+        "rsf-peugeot-208-r2" => Some(2012),
+        "rsf-citroen-c2-r2-max" => Some(2011),
+        "rsf-citroen-ds3-wrc" | "rsf-ford-fiesta-rs-wrc-2014" => Some(2014),
+        "rsf-vw-polo-r-wrc-2016" => Some(2016),
+        "rsf-citroen-c3-wrc-2017" | "rsf-hyundai-i20-coupe-wrc-2017" => Some(2017),
+        "rsf-toyota-yaris-wrc-2018" => Some(2018),
+        "rsf-hyundai-i20-coupe-wrc-2020" => Some(2020),
+        "rsf-hyundai-i20-coupe-wrc-2021" => Some(2021),
+        "ford-focus-rs-wrc-2006"
+        | "rsf-citroen-xsara-wrc-2006"
+        | "rsf-subaru-impreza-gda-wrc2003-s9"
+        | "rsf-skoda-fabia-wrc-2006" => Some(2006),
+        "rsf-citroen-c4-wrc-2008" => Some(2008),
+        "rsf-peugeot-306-maxi-kit-car" => Some(1998),
+        "rsf-audi-200-quattro-grpa" => Some(1988),
+        "rsf-bmw-m3-e30-grpa" => Some(1990),
+        "rsf-audi-quattro-a1-grpb" => Some(1983),
+        "rsf-audi-quattro-a2-grpb" | "rsf-bmw-m1-grpb" => Some(1984),
+        "rsf-audi-sport-quattro-grpb"
+        | "rsf-peugeot-205-t16-grpb"
+        | "rsf-porsche-911-sc-rs-grpb"
+        | "rsf-toyota-celica-tct-ta64-grpb" => Some(1985),
+        _ => None,
+    }
+}
+
+fn infer_real_category(entry: &VehicleEntry) -> String {
+    if let Some(cat) = entry
         .descriptor
         .category
         .as_deref()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let name_lower = entry.descriptor.name.to_ascii_lowercase();
-
-    // Explicit provisional prices for known initiation & key RSF/retail vehicles.
-    match id {
-        // Verified immediately playable on iPad right now (FWD Super 1600, authentic RBR 1.02)
-        "mg-zr-s1600" => {
-            return VehicleMarketSpec {
-                price_usd: 12_500,
-                tier: CareerTier::Regional,
-                is_provisional: true,
-            };
+        .filter(|c| !c.is_empty() && *c != "RBR Original")
+    {
+        return cat.to_string();
+    }
+    match entry.descriptor.id.as_str() {
+        "mg-zr-s1600" => "Super 1600".into(),
+        id if entry.descriptor.is_original_rbr() || id == "ford-focus-rs-wrc-2006" => {
+            "WRC 2.0".into()
         }
-        // RSF Rally5 / R2 / Rally4 initiation cars (purchasable automatically once NGP packs are installed)
+        _ => entry
+            .descriptor
+            .category
+            .clone()
+            .unwrap_or_else(|| "Rally".into()),
+    }
+}
+
+/// Configurable provisional market specification for any installed vehicle,
+/// enforcing strict commercial placement across `SALÓN AUTOMOTOR (0 KM)` and `2ª MANO (USADO)`.
+/// Changing prices in future versions never invalidates already-owned cars.
+pub fn vehicle_market_spec(entry: &VehicleEntry) -> VehicleMarketSpec {
+    let id = entry.descriptor.id.as_str();
+    let real_cat = infer_real_category(entry);
+    let cat_lower = real_cat.to_ascii_lowercase();
+    let name_lower = entry.descriptor.name.to_ascii_lowercase();
+    let year = infer_vehicle_year(entry);
+
+    // 1. Explicit Pending Commercial Rule table (WRC 2013, 2016, 2017, 2021)
+    if PENDING_COMMERCIAL_RULE_WRC_IDS.contains(&id) {
+        return VehicleMarketSpec::build(
+            None,
+            None,
+            DealershipChannel::PendingCommercialRule,
+            real_cat,
+            year,
+            CareerTier::Wrc,
+        );
+    }
+
+    // 2. Explicit vehicle-level specifications
+    match id {
+        // 2.1 Rally5: Exclusively in SALÓN AUTOMOTOR (0 KM), affordable with initial US$15,000
         "rsf-renault-clio-rally5" => {
-            return VehicleMarketSpec {
-                price_usd: 13_500,
-                tier: CareerTier::Regional,
-                is_provisional: true,
-            };
+            return VehicleMarketSpec::build(
+                Some(13_800),
+                None,
+                DealershipChannel::NewSalonOnly,
+                "Rally 5",
+                year.or(Some(2021)),
+                CareerTier::Regional,
+            );
+        }
+        // 2.2 Rally4: Offered in BOTH SALÓN AUTOMOTOR (0 KM) and 2ª MANO (USADO with discount < 0 KM)
+        "rsf-renault-clio-rally4" | "rsf-ford-fiesta-rally4" | "rsf-peugeot-208-rally4" => {
+            return VehicleMarketSpec::build(
+                Some(24_000),
+                Some(18_500),
+                DealershipChannel::Both,
+                "Rally 4",
+                year.or(Some(2021)),
+                CareerTier::Regional,
+            );
+        }
+        // 2.3 R2 and Super 1600: Exclusively in 2ª MANO (USADO), keeping their real category
+        "mg-zr-s1600" => {
+            return VehicleMarketSpec::build(
+                None,
+                Some(12_500),
+                DealershipChannel::UsedOnly,
+                "Super 1600",
+                year.or(Some(2004)),
+                CareerTier::Regional,
+            );
+        }
+        "rsf-citroen-c2-r2-max" => {
+            return VehicleMarketSpec::build(
+                None,
+                Some(13_200),
+                DealershipChannel::UsedOnly,
+                "Group R2",
+                year.or(Some(2011)),
+                CareerTier::Regional,
+            );
+        }
+        "rsf-peugeot-208-r2" => {
+            return VehicleMarketSpec::build(
+                None,
+                Some(13_900),
+                DealershipChannel::UsedOnly,
+                "Group R2",
+                year.or(Some(2012)),
+                CareerTier::Regional,
+            );
+        }
+        "rsf-opel-adam-r2" => {
+            return VehicleMarketSpec::build(
+                None,
+                Some(14_400),
+                DealershipChannel::UsedOnly,
+                "Group R2",
+                year.or(Some(2013)),
+                CareerTier::Regional,
+            );
         }
         "rsf-ford-fiesta-mk-viii-r2" => {
-            return VehicleMarketSpec {
-                price_usd: 14_000,
-                tier: CareerTier::Regional,
-                is_provisional: true,
-            };
+            return VehicleMarketSpec::build(
+                None,
+                Some(14_800),
+                DealershipChannel::UsedOnly,
+                "Group R2",
+                year.or(Some(2019)),
+                CareerTier::Regional,
+            );
         }
-        "rsf-ford-fiesta-rally4" | "rsf-renault-clio-rally4" | "rsf-peugeot-208-rally4" => {
-            return VehicleMarketSpec {
-                price_usd: 14_800,
-                tier: CareerTier::Regional,
-                is_provisional: true,
-            };
+        // 2.4 Rally3:
+        // - Ford Fiesta Rally3 Evo: Exclusively in SALÓN AUTOMOTOR (0 KM)
+        // - Ford Fiesta Rally3 standard & Renault Clio Rally3: Exclusively in 2ª MANO (USADO)
+        "rsf-ford-fiesta-rally3-evo" => {
+            return VehicleMarketSpec::build(
+                Some(46_000),
+                None,
+                DealershipChannel::NewSalonOnly,
+                "Rally 3",
+                year.or(Some(2023)),
+                CareerTier::Rally3,
+            );
         }
-        // Rally 3
-        "rsf-ford-fiesta-rally3" | "rsf-renault-clio-rally3" | "rsf-ford-fiesta-rally3-evo" => {
-            return VehicleMarketSpec {
-                price_usd: 38_000,
-                tier: CareerTier::Rally3,
-                is_provisional: true,
-            };
+        "rsf-ford-fiesta-rally3" | "rsf-renault-clio-rally3" => {
+            return VehicleMarketSpec::build(
+                None,
+                Some(36_500),
+                DealershipChannel::UsedOnly,
+                "Rally 3",
+                year,
+                CareerTier::Rally3,
+            );
         }
-        // Kit Car / Group A7
-        "rsf-peugeot-306-maxi-kit-car" => {
-            return VehicleMarketSpec {
-                price_usd: 45_000,
-                tier: CareerTier::KitCarGroupA,
-                is_provisional: true,
-            };
+        // 2.5 Rally2 & R5:
+        // - Modern Rally2 (GR Yaris Rally2, Fabia RS Rally2, Fiesta Rally2, i20 N Rally2): BOTH (0 KM and USADO)
+        "rsf-toyota-gr-yaris-rally2"
+        | "rsf-skoda-fabia-rs-rally2"
+        | "rsf-ford-fiesta-rally2"
+        | "rsf-hyundai-i20-n-rally2" => {
+            return VehicleMarketSpec::build(
+                Some(115_000),
+                Some(89_000),
+                DealershipChannel::Both,
+                "Rally 2",
+                year,
+                CareerTier::Rally2,
+            );
         }
-        // Rally 2
-        "rsf-toyota-gr-yaris-rally2" | "rsf-ford-fiesta-rally2" | "rsf-skoda-fabia-rs-rally2" => {
-            return VehicleMarketSpec {
-                price_usd: 95_000,
-                tier: CareerTier::Rally2,
-                is_provisional: true,
-            };
+        // 2.6 WRC 2018–2020: Exclusively in SALÓN AUTOMOTOR (0 KM), NEVER in 2ª MANO
+        "rsf-toyota-yaris-wrc-2018"
+        | "rsf-ford-fiesta-wrc-2019"
+        | "rsf-hyundai-i20-coupe-wrc-2020" => {
+            return VehicleMarketSpec::build(
+                Some(245_000),
+                None,
+                DealershipChannel::NewSalonOnly,
+                "WRC 1.6",
+                year,
+                CareerTier::Wrc,
+            );
         }
-        // WRC (RSF & Retail)
+        // 2.7 WRC 2014–2015: Exclusively in 2ª MANO (USADO), NEVER as 0 KM
+        "rsf-citroen-ds3-wrc" | "rsf-ford-fiesta-rs-wrc-2014" => {
+            return VehicleMarketSpec::build(
+                None,
+                Some(155_000),
+                DealershipChannel::UsedOnly,
+                "WRC 1.6",
+                year.or(Some(2014)),
+                CareerTier::Wrc,
+            );
+        }
+        // 2.8 WRC 2.0 2000–2009: Exclusively in 2ª MANO (USADO), NEVER as 0 KM
         "ford-focus-rs-wrc-2006"
-        | "rsf-toyota-yaris-wrc-2018"
-        | "rsf-citroen-ds3-wrc"
-        | "rsf-citroen-xsara-wrc-2006" => {
-            return VehicleMarketSpec {
-                price_usd: 180_000,
-                tier: CareerTier::Wrc,
-                is_provisional: true,
-            };
+        | "rsf-citroen-xsara-wrc-2006"
+        | "rsf-citroen-c4-wrc-2008"
+        | "rsf-subaru-impreza-gda-wrc2003-s9"
+        | "rsf-skoda-fabia-wrc-2006" => {
+            return VehicleMarketSpec::build(
+                None,
+                Some(138_000),
+                DealershipChannel::UsedOnly,
+                "WRC 2.0",
+                year,
+                CareerTier::Wrc,
+            );
+        }
+        // 2.9 Historic Group A / Kit Car: Exclusively in 2ª MANO (USADO)
+        "rsf-peugeot-306-maxi-kit-car" => {
+            return VehicleMarketSpec::build(
+                None,
+                Some(45_000),
+                DealershipChannel::UsedOnly,
+                "Group A7",
+                year.or(Some(1998)),
+                CareerTier::KitCarGroupA,
+            );
+        }
+        "rsf-audi-200-quattro-grpa" | "rsf-bmw-m3-e30-grpa" => {
+            return VehicleMarketSpec::build(
+                None,
+                Some(58_000),
+                DealershipChannel::UsedOnly,
+                "Group A8",
+                year,
+                CareerTier::KitCarGroupA,
+            );
         }
         _ => {}
     }
 
-    // Category-driven fallback for dynamically installed RSF/retail models.
+    // 3. Category & year-driven fallback rules for any other installed RSF/retail models
     if cat_lower.contains("rally 5") || name_lower.contains("rally5") {
-        VehicleMarketSpec {
-            price_usd: 13_500,
-            tier: CareerTier::Regional,
-            is_provisional: true,
-        }
-    } else if cat_lower.contains("group r2") || name_lower.contains(" r2") {
-        VehicleMarketSpec {
-            price_usd: 14_000,
-            tier: CareerTier::Regional,
-            is_provisional: true,
-        }
-    } else if cat_lower.contains("rally 4")
-        || name_lower.contains("rally4")
+        VehicleMarketSpec::build(
+            Some(13_800),
+            None,
+            DealershipChannel::NewSalonOnly,
+            real_cat,
+            year,
+            CareerTier::Regional,
+        )
+    } else if cat_lower.contains("rally 4") || name_lower.contains("rally4") {
+        VehicleMarketSpec::build(
+            Some(24_000),
+            Some(18_500),
+            DealershipChannel::Both,
+            real_cat,
+            year,
+            CareerTier::Regional,
+        )
+    } else if cat_lower.contains("group r2")
+        || name_lower.contains(" r2")
         || cat_lower.contains("super 1600")
         || name_lower.contains("s1600")
         || name_lower.contains("super 1600")
     {
-        VehicleMarketSpec {
-            price_usd: 14_500,
-            tier: CareerTier::Regional,
-            is_provisional: true,
-        }
+        VehicleMarketSpec::build(
+            None,
+            Some(14_200),
+            DealershipChannel::UsedOnly,
+            real_cat,
+            year,
+            CareerTier::Regional,
+        )
     } else if cat_lower.contains("rally 3") || name_lower.contains("rally3") {
-        VehicleMarketSpec {
-            price_usd: 38_000,
-            tier: CareerTier::Rally3,
-            is_provisional: true,
+        if name_lower.contains("evo") {
+            VehicleMarketSpec::build(
+                Some(46_000),
+                None,
+                DealershipChannel::NewSalonOnly,
+                real_cat,
+                year,
+                CareerTier::Rally3,
+            )
+        } else {
+            VehicleMarketSpec::build(
+                None,
+                Some(36_500),
+                DealershipChannel::UsedOnly,
+                real_cat,
+                year,
+                CareerTier::Rally3,
+            )
         }
-    } else if cat_lower.contains("rally 2")
-        || cat_lower.contains("r5")
-        || name_lower.contains("rally2")
-    {
-        VehicleMarketSpec {
-            price_usd: 95_000,
-            tier: CareerTier::Rally2,
-            is_provisional: true,
-        }
+    } else if cat_lower.contains("rally 2") || name_lower.contains("rally2") {
+        VehicleMarketSpec::build(
+            Some(115_000),
+            Some(89_000),
+            DealershipChannel::Both,
+            real_cat,
+            year,
+            CareerTier::Rally2,
+        )
+    } else if cat_lower.contains("r5") || name_lower.contains(" r5") {
+        VehicleMarketSpec::build(
+            None,
+            Some(74_000),
+            DealershipChannel::UsedOnly,
+            real_cat,
+            year,
+            CareerTier::Rally2,
+        )
     } else if cat_lower.contains("group b") || name_lower.contains("grpb") {
-        VehicleMarketSpec {
-            price_usd: 160_000,
-            tier: CareerTier::Historic,
-            is_provisional: true,
-        }
+        VehicleMarketSpec::build(
+            None,
+            Some(160_000),
+            DealershipChannel::UsedOnly,
+            "Group B",
+            year,
+            CareerTier::Historic,
+        )
     } else if cat_lower.contains("group a") || cat_lower.contains("kit car") {
-        VehicleMarketSpec {
-            price_usd: 45_000,
-            tier: CareerTier::KitCarGroupA,
-            is_provisional: true,
-        }
+        VehicleMarketSpec::build(
+            None,
+            Some(52_000),
+            DealershipChannel::UsedOnly,
+            real_cat,
+            year,
+            CareerTier::KitCarGroupA,
+        )
     } else if cat_lower.contains("wrc")
         || entry.descriptor.is_original_rbr()
         || name_lower.contains("wrc")
     {
-        VehicleMarketSpec {
-            price_usd: 180_000,
-            tier: CareerTier::Wrc,
-            is_provisional: true,
+        match year {
+            Some(2018..=2020) => VehicleMarketSpec::build(
+                Some(245_000),
+                None,
+                DealershipChannel::NewSalonOnly,
+                real_cat,
+                year,
+                CareerTier::Wrc,
+            ),
+            Some(2014..=2015) => VehicleMarketSpec::build(
+                None,
+                Some(155_000),
+                DealershipChannel::UsedOnly,
+                real_cat,
+                year,
+                CareerTier::Wrc,
+            ),
+            Some(1997..=2009) => VehicleMarketSpec::build(
+                None,
+                Some(138_000),
+                DealershipChannel::UsedOnly,
+                "WRC 2.0",
+                year,
+                CareerTier::Wrc,
+            ),
+            _ if entry.descriptor.is_original_rbr() || cat_lower.contains("wrc 2.0") => {
+                VehicleMarketSpec::build(
+                    None,
+                    Some(138_000),
+                    DealershipChannel::UsedOnly,
+                    "WRC 2.0",
+                    year,
+                    CareerTier::Wrc,
+                )
+            }
+            _ => VehicleMarketSpec::build(
+                None,
+                None,
+                DealershipChannel::PendingCommercialRule,
+                real_cat,
+                year,
+                CareerTier::Wrc,
+            ),
         }
     } else {
-        VehicleMarketSpec {
-            price_usd: 65_000,
-            tier: CareerTier::KitCarGroupA,
-            is_provisional: true,
-        }
+        VehicleMarketSpec::build(
+            None,
+            Some(65_000),
+            DealershipChannel::UsedOnly,
+            real_cat,
+            year,
+            CareerTier::KitCarGroupA,
+        )
     }
 }
 
@@ -655,13 +1059,15 @@ impl CareerProfile {
             .is_some_and(|c| !c.finished)
     }
 
-    /// Strict dealership purchase validation:
+    /// Strict dealership purchase validation for a specific dealership (`2ª MANO` or `SALÓN AUTOMOTOR 0 KM`):
     /// - Vehicle must be genuinely `Drivable` (never visual-only or unavailable).
-    /// - Must have a configured positive price.
-    /// - Prevents duplicate ownership and overdrafts.
-    pub fn buy_vehicle(
+    /// - Vehicle must be commercially offered in `kind` (`spec.offered_in(kind)`).
+    /// - Uses the exact dealership price (`spec.price_for(kind)`).
+    /// - Prevents duplicate ownership across both dealerships and overdrafts.
+    pub fn buy_vehicle_in_dealership(
         &mut self,
         entry: &VehicleEntry,
+        kind: DealershipKind,
         ngp_experimental: bool,
     ) -> Result<u64, String> {
         let cap = entry.capability(ngp_experimental);
@@ -675,33 +1081,55 @@ impl CareerProfile {
             });
         }
         let spec = vehicle_market_spec(entry);
-        if spec.price_usd == 0 {
-            return Err("PRECIO NO CONFIGURADO PARA ESTE VEHÍCULO".into());
-        }
+        let Some(price) = spec.price_for(kind).filter(|&p| p > 0) else {
+            return Err(format!(
+                "ESTE VEHÍCULO NO SE VENDE EN {}",
+                kind.short_name()
+            ));
+        };
         if self.owns_vehicle(&entry.descriptor.id) {
             return Err("YA TIENES ESTE VEHÍCULO EN TU GARAJE DE CARRERA".into());
         }
-        if self.cash_usd < spec.price_usd {
+        if self.cash_usd < price {
             return Err(format!(
                 "SALDO INSUFICIENTE (NECESITAS {}, TIENES {})",
-                format_usd(spec.price_usd),
+                format_usd(price),
                 format_usd(self.cash_usd)
             ));
         }
 
-        self.cash_usd -= spec.price_usd;
+        self.cash_usd -= price;
         self.owned_vehicle_ids.push(entry.descriptor.id.clone());
         if self.active_career_vehicle_id.is_none() {
             self.active_career_vehicle_id = Some(entry.descriptor.id.clone());
         }
         self.transactions.push(Transaction {
             kind: TransactionKind::VehiclePurchase,
-            delta_usd: -(spec.price_usd as i64),
+            delta_usd: -(price as i64),
             balance_after_usd: self.cash_usd,
-            description: format!("Compra {}", entry.descriptor.name),
+            description: format!(
+                "Compra {} {}",
+                kind.condition_label(),
+                entry.descriptor.name
+            ),
             timestamp_unix_s: unix_now_s(),
         });
-        Ok(spec.price_usd)
+        Ok(price)
+    }
+
+    /// Convenience purchase helper that buys from `2ª MANO` when offered there, or `SALÓN AUTOMOTOR` otherwise.
+    pub fn buy_vehicle(
+        &mut self,
+        entry: &VehicleEntry,
+        ngp_experimental: bool,
+    ) -> Result<u64, String> {
+        let spec = vehicle_market_spec(entry);
+        let kind = if spec.offered_in(DealershipKind::UsedCars) {
+            DealershipKind::UsedCars
+        } else {
+            DealershipKind::NewSalon
+        };
+        self.buy_vehicle_in_dealership(entry, kind, ngp_experimental)
     }
 
     pub fn select_career_vehicle(&mut self, vehicle_id: &str) -> Result<(), String> {
@@ -1732,12 +2160,14 @@ mod tests {
     use rerbr_content::{Selection, VehicleClassification, VehicleDescriptor};
 
     fn make_entry(desc: VehicleDescriptor, visual_only: bool) -> VehicleEntry {
+        let year = super::super::content_manager::preset_year_for_vehicle_id(&desc.id);
         VehicleEntry {
             classification: if visual_only {
                 VehicleClassification::VisualInspectionOnly
             } else {
                 desc.base_classification()
             },
+            year,
             descriptor: desc,
             state: EntryState::Installed,
             files: FileAudit::unchecked(),
@@ -1974,5 +2404,222 @@ mod tests {
         assert!(spec.price_usd <= INITIAL_CASH_USD);
         assert_eq!(format_usd(15_000), "US$15,000");
         assert_eq!(format_usd(1_000_000), "US$1,000,000");
+    }
+
+    fn make_rsf_entry(id: &str, name: &str, category: &str, year: u32) -> VehicleEntry {
+        let mut desc = VehicleDescriptor::ford_focus_2006();
+        desc.id = id.into();
+        desc.name = name.into();
+        desc.category = Some(category.into());
+        desc.rsf_pack = Some(format!("{id}_ngp6"));
+        let mut e = make_entry(desc, false);
+        e.year = Some(year);
+        e
+    }
+
+    #[test]
+    fn commercial_dealership_rules_enforce_new_salon_0km_vs_used_2a_mano_and_unified_garage() {
+        // 1. Rally5: exclusively in SALÓN AUTOMOTOR (0 KM), affordable with initial US$15,000, never in 2ª MANO.
+        let clio_r5 = make_rsf_entry(
+            "rsf-renault-clio-rally5",
+            "Renault Clio Rally5",
+            "Rally 5",
+            2021,
+        );
+        let s_r5 = vehicle_market_spec(&clio_r5);
+        assert_eq!(s_r5.concesionario, DealershipChannel::NewSalonOnly);
+        assert!(s_r5.offered_in(DealershipKind::NewSalon));
+        assert!(!s_r5.offered_in(DealershipKind::UsedCars));
+        assert!(s_r5.precio_0km.unwrap() <= INITIAL_CASH_USD);
+        assert!(s_r5.precio_usado.is_none());
+
+        // 2. Rally4: offered in BOTH SALÓN AUTOMOTOR (0 KM) and 2ª MANO (USADO with discount < 0 KM).
+        for (id, name) in [
+            ("rsf-renault-clio-rally4", "Renault Clio Rally4"),
+            ("rsf-ford-fiesta-rally4", "Ford Fiesta Rally4"),
+            ("rsf-peugeot-208-rally4", "Peugeot 208 Rally4"),
+        ] {
+            let car = make_rsf_entry(id, name, "Rally 4", 2021);
+            let sp = vehicle_market_spec(&car);
+            assert_eq!(sp.concesionario, DealershipChannel::Both);
+            assert!(sp.offered_in(DealershipKind::NewSalon));
+            assert!(sp.offered_in(DealershipKind::UsedCars));
+            assert!(sp.precio_usado.unwrap() < sp.precio_0km.unwrap());
+            assert!(sp.descuento_usado_pct > 0);
+        }
+
+        // 3. R2 and Super 1600: exclusively in 2ª MANO (USADO), keeping real category.
+        for (id, name, yr) in [
+            ("rsf-opel-adam-r2", "Opel ADAM R2", 2013),
+            ("rsf-ford-fiesta-mk-viii-r2", "Ford Fiesta Mk VIII R2", 2019),
+            ("rsf-peugeot-208-r2", "Peugeot 208 R2", 2012),
+            ("rsf-citroen-c2-r2-max", "Citroen C2 R2 Max", 2011),
+        ] {
+            let car = make_rsf_entry(id, name, "Group R2", yr);
+            let sp = vehicle_market_spec(&car);
+            assert_eq!(sp.concesionario, DealershipChannel::UsedOnly);
+            assert!(!sp.offered_in(DealershipKind::NewSalon));
+            assert!(sp.offered_in(DealershipKind::UsedCars));
+            assert_eq!(sp.categoria, "Group R2");
+        }
+        let zr = mg_zr_entry();
+        let sp_zr = vehicle_market_spec(&zr);
+        assert_eq!(sp_zr.concesionario, DealershipChannel::UsedOnly);
+        assert_eq!(sp_zr.categoria, "Super 1600");
+
+        // 4. Rally3: Fiesta Rally3 Evo in SALÓN AUTOMOTOR (0 KM); standard Fiesta Rally3 & Clio Rally3 in 2ª MANO.
+        let evo = make_rsf_entry(
+            "rsf-ford-fiesta-rally3-evo",
+            "Ford Fiesta rally3 evo",
+            "Rally 3",
+            2023,
+        );
+        let sp_evo = vehicle_market_spec(&evo);
+        assert_eq!(sp_evo.concesionario, DealershipChannel::NewSalonOnly);
+        assert!(sp_evo.offered_in(DealershipKind::NewSalon));
+        assert!(!sp_evo.offered_in(DealershipKind::UsedCars));
+        for (id, name, yr) in [
+            ("rsf-ford-fiesta-rally3", "Ford Fiesta Rally3", 2021),
+            ("rsf-renault-clio-rally3", "Renault Clio Rally3", 2023),
+        ] {
+            let car = make_rsf_entry(id, name, "Rally 3", yr);
+            let sp = vehicle_market_spec(&car);
+            assert_eq!(sp.concesionario, DealershipChannel::UsedOnly);
+            assert!(!sp.offered_in(DealershipKind::NewSalon));
+            assert!(sp.offered_in(DealershipKind::UsedCars));
+        }
+
+        // 5. Rally2 / R5: Modern Rally2 in BOTH; older R5 exclusively in 2ª MANO.
+        for (id, name, yr) in [
+            ("rsf-toyota-gr-yaris-rally2", "Toyota GR Yaris Rally2", 2024),
+            ("rsf-skoda-fabia-rs-rally2", "Skoda Fabia RS Rally2", 2024),
+            ("rsf-ford-fiesta-rally2", "Ford Fiesta Rally2", 2023),
+        ] {
+            let car = make_rsf_entry(id, name, "Rally 2", yr);
+            let sp = vehicle_market_spec(&car);
+            assert_eq!(sp.concesionario, DealershipChannel::Both);
+            assert!(sp.precio_usado.unwrap() < sp.precio_0km.unwrap());
+        }
+        let r5 = make_rsf_entry("rsf-citroen-c3-r5", "Citroen C3 R5", "Group R5", 2020);
+        let sp_r5 = vehicle_market_spec(&r5);
+        assert_eq!(sp_r5.concesionario, DealershipChannel::UsedOnly);
+
+        // 6. WRC 2018–2020: exclusively in SALÓN AUTOMOTOR (0 KM), NEVER in 2ª MANO.
+        for (id, name, yr) in [
+            ("rsf-toyota-yaris-wrc-2018", "Toyota Yaris WRC 2018", 2018),
+            ("rsf-ford-fiesta-wrc-2019", "Ford Fiesta WRC 2019", 2019),
+            (
+                "rsf-hyundai-i20-coupe-wrc-2020",
+                "Hyundai i20 Coupe WRC 2020",
+                2020,
+            ),
+        ] {
+            let car = make_rsf_entry(id, name, "WRC 1.6", yr);
+            let sp = vehicle_market_spec(&car);
+            assert_eq!(sp.concesionario, DealershipChannel::NewSalonOnly);
+            assert!(sp.offered_in(DealershipKind::NewSalon));
+            assert!(!sp.offered_in(DealershipKind::UsedCars));
+        }
+
+        // 7. WRC 2014–2015: exclusively in 2ª MANO (USADO), NEVER as 0 KM.
+        for (id, name) in [
+            ("rsf-citroen-ds3-wrc", "Citroen DS3 WRC"),
+            ("rsf-ford-fiesta-rs-wrc-2014", "Ford Fiesta RS WRC 2014"),
+        ] {
+            let car = make_rsf_entry(id, name, "WRC 1.6", 2014);
+            let sp = vehicle_market_spec(&car);
+            assert_eq!(sp.concesionario, DealershipChannel::UsedOnly);
+            assert!(!sp.offered_in(DealershipKind::NewSalon));
+            assert!(sp.offered_in(DealershipKind::UsedCars));
+        }
+
+        // 8. WRC 2.0 2000–2009 & Group B & Group A: exclusively in 2ª MANO (USADO), NEVER as 0 KM.
+        for (id, name, cat, yr) in [
+            (
+                "ford-focus-rs-wrc-2006",
+                "Ford Focus Mk II RS WRC 2006",
+                "WRC 2.0",
+                2006,
+            ),
+            (
+                "rsf-citroen-xsara-wrc-2006",
+                "Citroen Xsara WRC 2006",
+                "WRC 2.0",
+                2006,
+            ),
+            (
+                "rsf-citroen-c4-wrc-2008",
+                "Citroen C4 WRC 2008",
+                "WRC 2.0",
+                2008,
+            ),
+            (
+                "rsf-audi-sport-quattro-grpb",
+                "Audi Sport quattro GrpB",
+                "Group B",
+                1985,
+            ),
+            (
+                "rsf-peugeot-205-t16-grpb",
+                "Peugeot 205 T16 GrpB",
+                "Group B",
+                1985,
+            ),
+            (
+                "rsf-peugeot-306-maxi-kit-car",
+                "Peugeot 306 Maxi Kit Car",
+                "Group A7",
+                1998,
+            ),
+        ] {
+            let car = make_rsf_entry(id, name, cat, yr);
+            let sp = vehicle_market_spec(&car);
+            assert_eq!(sp.concesionario, DealershipChannel::UsedOnly);
+            assert!(!sp.offered_in(DealershipKind::NewSalon));
+            assert!(sp.offered_in(DealershipKind::UsedCars));
+        }
+
+        // 9. WRC of undefined commercial years (2016, 2017): PendingCommercialRule (neither dealership).
+        for (id, name, yr) in [
+            ("rsf-vw-polo-r-wrc-2016", "VW Polo R WRC 2016", 2016),
+            ("rsf-citroen-c3-wrc-2017", "Citroen C3 WRC 2017", 2017),
+        ] {
+            let car = make_rsf_entry(id, name, "WRC 1.6", yr);
+            let sp = vehicle_market_spec(&car);
+            assert_eq!(sp.concesionario, DealershipChannel::PendingCommercialRule);
+            assert!(!sp.offered_in(DealershipKind::NewSalon));
+            assert!(!sp.offered_in(DealershipKind::UsedCars));
+        }
+
+        // 10. Unified personal Career Garage & duplicate protection across both dealerships:
+        let mut profile = CareerProfile::create("Adrian").unwrap();
+        // Cannot buy Clio Rally5 in 2ª MANO:
+        assert!(profile
+            .buy_vehicle_in_dealership(&clio_r5, DealershipKind::UsedCars, true)
+            .is_err());
+        // Buy Clio Rally5 0 KM in SALÓN AUTOMOTOR with initial US$15,000:
+        let paid_r5 = profile
+            .buy_vehicle_in_dealership(&clio_r5, DealershipKind::NewSalon, true)
+            .unwrap();
+        assert_eq!(paid_r5, 13_800);
+        assert!(profile.owns_vehicle("rsf-renault-clio-rally5"));
+
+        // Grant cash and buy a Rally4 (offered in BOTH) from 2ª MANO:
+        profile.cash_usd = 100_000;
+        let clio_r4 = make_rsf_entry(
+            "rsf-renault-clio-rally4",
+            "Renault Clio Rally4",
+            "Rally 4",
+            2021,
+        );
+        let paid_used_r4 = profile
+            .buy_vehicle_in_dealership(&clio_r4, DealershipKind::UsedCars, true)
+            .unwrap();
+        assert_eq!(paid_used_r4, 18_500);
+        // Attempting to buy the same Rally4 again in SALÓN AUTOMOTOR (0 KM) is blocked!
+        assert!(profile
+            .buy_vehicle_in_dealership(&clio_r4, DealershipKind::NewSalon, true)
+            .is_err());
+        assert_eq!(profile.owned_vehicle_ids.len(), 2);
     }
 }
