@@ -593,3 +593,68 @@ fn real_pc_toyota_models_and_cockpits_load_without_fallback() {
         );
     }
 }
+
+#[test]
+fn audit_all_installed_rsf_showroom_models_if_pc_present() {
+    let rbr = std::path::Path::new(r"C:\Richard Burns Rally");
+    let cars_dir = rbr.join("Cars");
+    if !cars_dir.is_dir() {
+        return;
+    }
+    let mut dirs: Vec<_> = std::fs::read_dir(&cars_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+
+    let mut total_with_sgc = 0usize;
+    let mut passed = 0usize;
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for dir in dirs {
+        let Some(folder) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let sgc = std::fs::read_dir(&dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("sgc")));
+        let Some(sgc_path) = sgc else {
+            continue;
+        };
+        let Some(stem) = sgc_path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        total_with_sgc += 1;
+        let mut desc = rerbr_content::VehicleDescriptor::ford_focus_2006();
+        desc.id = format!("audit-{}", folder.to_ascii_lowercase());
+        desc.name = folder.to_string();
+        desc.model = format!("Cars/{folder}/{stem}.sgc");
+        desc.parts = format!("Cars/{folder}/{stem}.ini");
+        desc.shaders = format!("Cars/{folder}/{stem}_shaders.ini");
+        desc.shader_settings = format!("Cars/{folder}/{stem}_shader_settings_clear.ini");
+        desc.required_textures.clear();
+        desc.optional_textures.clear();
+        match load_showroom_model(rbr, &desc) {
+            Ok(car) => {
+                passed += 1;
+                let _ = car;
+            }
+            Err(err) => {
+                failures.push((format!("{folder}/{stem}"), err));
+            }
+        }
+    }
+    eprintln!("=== 3D SHOWROOM AUDIT: {passed}/{total_with_sgc} SGC models loaded cleanly ===");
+    for (name, err) in &failures {
+        eprintln!("  FAIL {name}: {err}");
+    }
+    assert!(
+        passed >= 80,
+        "expected most installed RSF SGC models to load cleanly, got {passed}/{total_with_sgc}"
+    );
+}

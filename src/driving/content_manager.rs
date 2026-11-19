@@ -14,6 +14,33 @@ pub enum EntryState {
     MissingFiles,
     Unsupported,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriveCapability {
+    /// Authentic retail RBR or integrated RSF NGP car with required physics + 3D files present.
+    Drivable,
+    /// Installed 3D `.sgc` model verified for Showroom/Garage visualization only (no physics).
+    VisualOnly,
+    /// Missing required 3D model or config files.
+    Unavailable,
+}
+
+impl DriveCapability {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Drivable => "DISPONIBLE PARA CONDUCIR",
+            Self::VisualOnly => "SOLO VISUALIZACIÓN",
+            Self::Unavailable => "ARCHIVOS FALTANTES",
+        }
+    }
+    pub fn short_badge(self) -> &'static str {
+        match self {
+            Self::Drivable => "CONDUCIBLE",
+            Self::VisualOnly => "SOLO VISUAL",
+            Self::Unavailable => "INCOMPLETO",
+        }
+    }
+}
 impl EntryState {
     pub fn label(self) -> &'static str {
         match self {
@@ -73,7 +100,55 @@ pub struct VehicleEntry {
     pub fmod_bank: Option<String>,
     pub using_fallback_model: bool,
     pub model_missing: bool,
+    pub has_3d_model: bool,
     pub notes: Vec<String>,
+}
+
+impl VehicleEntry {
+    /// Honest capability classification distinguishing drivable vehicles (original RBR or
+    /// integrated RSF NGP) from visual-only 3D models discovered in `Cars/`.
+    pub fn capability(&self, ngp_experimental: bool) -> DriveCapability {
+        if self.classification == VehicleClassification::VisualInspectionOnly {
+            return if self.has_3d_model && !self.model_missing {
+                DriveCapability::VisualOnly
+            } else {
+                DriveCapability::Unavailable
+            };
+        }
+        let is_ngp = self.descriptor.is_ngp_experimental_car();
+        if is_ngp {
+            let can_drive = ngp_experimental
+                && matches!(
+                    self.classification,
+                    VehicleClassification::RsfNgpVerified | VehicleClassification::RsfNgpPartial
+                )
+                && !self.model_missing
+                && !self.using_fallback_model
+                && (!self.files.checked || self.files.missing.is_empty());
+            if can_drive {
+                DriveCapability::Drivable
+            } else if self.has_3d_model && !self.model_missing {
+                DriveCapability::VisualOnly
+            } else {
+                DriveCapability::Unavailable
+            }
+        } else {
+            let can_drive = self.descriptor.validate_current_backend().is_ok()
+                && !self.model_missing
+                && (!self.files.checked || self.files.missing.is_empty());
+            if can_drive {
+                DriveCapability::Drivable
+            } else if self.has_3d_model && !self.model_missing {
+                DriveCapability::VisualOnly
+            } else {
+                DriveCapability::Unavailable
+            }
+        }
+    }
+
+    pub fn can_showroom_view(&self) -> bool {
+        self.has_3d_model && !self.model_missing && !self.using_fallback_model
+    }
 }
 #[derive(Debug, Clone)]
 pub struct StageEntry {
@@ -117,6 +192,7 @@ impl Catalog {
                     fmod_bank: None,
                     using_fallback_model: false,
                     model_missing: false,
+                    has_3d_model: false,
                     notes: Vec::new(),
                 }
             })
@@ -142,6 +218,7 @@ impl Catalog {
                     fmod_bank: None,
                     using_fallback_model: false,
                     model_missing: false,
+                    has_3d_model: false,
                     notes: Vec::new(),
                 },
             );
@@ -200,8 +277,12 @@ impl Catalog {
         let mut catalog = Self::descriptors(selection);
         catalog.root = Some(root.to_path_buf());
         catalog.inspected = true;
+        let rbr_root = root.join("RBR");
         for vehicle in &mut catalog.vehicles {
             vehicle.files = audit_vehicle(root, &vehicle.descriptor);
+            vehicle.has_3d_model =
+                rerbr_sim::rbr_formats::cars::resolve(&rbr_root, &vehicle.descriptor.model)
+                    .is_some();
             vehicle.tech_sheet =
                 super::ngp_proto::inspect_vehicle_in_documents(root, &vehicle.descriptor);
             if let Some(sheet) = &vehicle.tech_sheet {
@@ -215,7 +296,6 @@ impl Catalog {
             );
         }
         // Dynamically merge installed RSF NGP vehicles (cleanroom NGPCarMenu / RBRCIT discovery)
-        let rbr_root = root.join("RBR");
         for item in super::rsf_catalog::discover(&rbr_root) {
             if item.using_fallback_model {
                 eprintln!(
@@ -268,6 +348,9 @@ impl Catalog {
                 existing.drivetrain = item.drivetrain;
                 existing.fmod_bank = item.fmod_bank;
                 existing.notes = item.notes;
+                existing.has_3d_model =
+                    rerbr_sim::rbr_formats::cars::resolve(&rbr_root, &existing.descriptor.model)
+                        .is_some();
                 existing.state = state;
             } else {
                 let mut files = audit_vehicle(root, &item.descriptor);
@@ -290,6 +373,9 @@ impl Catalog {
                     supported,
                     &files,
                 );
+                let has_3d_model =
+                    rerbr_sim::rbr_formats::cars::resolve(&rbr_root, &item.descriptor.model)
+                        .is_some();
                 catalog.vehicles.push(VehicleEntry {
                     descriptor: item.descriptor,
                     state,
@@ -300,9 +386,43 @@ impl Catalog {
                     fmod_bank: item.fmod_bank,
                     using_fallback_model: item.using_fallback_model,
                     model_missing: item.model_missing,
+                    has_3d_model,
                     notes: item.notes,
                 });
             }
+        }
+        // Discover any additional 3D `.sgc` car folders installed under `Documents/RBR/Cars/`
+        // strictly as `VisualInspectionOnly` so they can be viewed in the Title Screen & Garage
+        // without enabling unverified driving.
+        let existing_models: std::collections::BTreeSet<String> = catalog
+            .vehicles
+            .iter()
+            .map(|v| v.descriptor.model.replace('\\', "/").to_ascii_lowercase())
+            .collect();
+        let mut existing_ids: std::collections::BTreeSet<String> = catalog
+            .vehicles
+            .iter()
+            .map(|v| v.descriptor.id.clone())
+            .collect();
+        for item in super::rsf_catalog::discover_visual_car_folders(
+            &rbr_root,
+            &existing_models,
+            &mut existing_ids,
+        ) {
+            let files = audit_vehicle(root, &item.descriptor);
+            catalog.vehicles.push(VehicleEntry {
+                descriptor: item.descriptor,
+                state: EntryState::Unsupported,
+                files,
+                tech_sheet: None,
+                classification: VehicleClassification::VisualInspectionOnly,
+                drivetrain: item.drivetrain,
+                fmod_bank: None,
+                using_fallback_model: false,
+                model_missing: false,
+                has_3d_model: true,
+                notes: item.notes,
+            });
         }
         for stage in &mut catalog.stages {
             if let Some(discovered_maps) = resolve_stage_maps_dir(root, &stage.descriptor) {
@@ -340,6 +460,14 @@ impl Catalog {
     }
     pub fn stage(&self, id: &str) -> Option<&StageEntry> {
         self.stages.iter().find(|s| s.descriptor.id == id)
+    }
+    /// All catalog vehicles whose own `.sgc` 3D model is present on disk and eligible for
+    /// 3D Showroom / Title Screen / Garage rendering (both drivable and visual-only).
+    pub fn showroom_candidates(&self) -> Vec<&VehicleEntry> {
+        self.vehicles
+            .iter()
+            .filter(|v| v.can_showroom_view())
+            .collect()
     }
 }
 

@@ -6,6 +6,8 @@ pub mod mesh;
 pub mod placement;
 pub(crate) mod runtime;
 pub mod selection;
+#[cfg(feature = "physics-drive")]
+pub(crate) mod showroom;
 
 use crate::harwood::texture::upload_plan;
 use rerbr_asset_formats::{cars, ini, sgc};
@@ -339,6 +341,123 @@ pub fn load_vehicle_for_mode(
 }
 pub fn private_root(documents: &Path) -> PathBuf {
     documents.join("RBR")
+}
+
+/// Safe read of a relative file under `root` (`Documents/RBR`) for 3D showroom inspection.
+/// Never allows path traversal or reading outside `root`.
+#[cfg(any(feature = "physics-drive", test))]
+fn read_showroom_file(root: &Path, rel: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let norm = rel.replace('\\', "/");
+    if norm
+        .split('/')
+        .any(|p| p.is_empty() || p == "." || p == ".." || p.contains(':'))
+    {
+        return Err(format!("SHOWROOM PATH: invalid {rel}"));
+    }
+    let resolved =
+        cars::resolve(root, &norm).ok_or_else(|| format!("SHOWROOM READ: missing {norm}"))?;
+    let canonical = resolved.canonicalize().map_err(|e| e.to_string())?;
+    let root_canon = root.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical.starts_with(&root_canon) {
+        return Err("SHOWROOM PATH: escapes private root".into());
+    }
+    let mut data = Vec::new();
+    std::fs::File::open(&canonical)
+        .map_err(|e| e.to_string())?
+        .take(limit + 1)
+        .read_to_end(&mut data)
+        .map_err(|e| e.to_string())?;
+    if data.len() as u64 > limit {
+        return Err(format!("SHOWROOM READ: {norm} exceeds limit"));
+    }
+    Ok(data)
+}
+
+/// Loads any installed RBR or RallySimFans 3D exterior car model (`.sgc`, `.ini`, `_shaders.ini`,
+/// `_shader_settings_{clear,overcast}.ini`, and `.dds` textures) purely for 3D showroom/garage
+/// visualization, without requiring physics NGP packs or `Cars/Cars.ini` slot registration.
+#[cfg(any(feature = "physics-drive", test))]
+pub fn load_showroom_model(
+    root: &Path,
+    vehicle: &rerbr_content::VehicleDescriptor,
+) -> Result<Car, String> {
+    let sgc_bytes = read_showroom_file(root, &vehicle.model, 128 * 1024 * 1024)?;
+    let elements = sgc::parse(&sgc_bytes).map_err(|e| format!("SHOWROOM SGC: {e}"))?;
+    let parts_bytes = read_showroom_file(root, &vehicle.parts, 2 * 1024 * 1024)?;
+    let parts = ini::parse(&String::from_utf8_lossy(&parts_bytes))
+        .map_err(|e| format!("SHOWROOM PARTS INI: {e}"))?;
+    let shaders_bytes = read_showroom_file(root, &vehicle.shaders, 2 * 1024 * 1024)?;
+    let shaders = ini::parse(&String::from_utf8_lossy(&shaders_bytes))
+        .map_err(|e| format!("SHOWROOM SHADERS INI: {e}"))?;
+    let settings_bytes = read_showroom_file(root, &vehicle.shader_settings, 2 * 1024 * 1024)
+        .or_else(|_| {
+            let alt = vehicle
+                .shader_settings
+                .replace("_clear.ini", "_overcast.ini");
+            read_showroom_file(root, &alt, 2 * 1024 * 1024)
+        })?;
+    let settings = ini::parse(&String::from_utf8_lossy(&settings_bytes))
+        .map_err(|e| format!("SHOWROOM SETTINGS INI: {e}"))?;
+
+    let geometry = mesh::convert_for_mode(&elements, &parts, &shaders, &settings, true)?;
+    let model_dir = vehicle
+        .model
+        .replace('\\', "/")
+        .rsplit_once('/')
+        .map(|(dir, _)| dir.to_string())
+        .unwrap_or_default();
+
+    let mut textures = BTreeMap::new();
+    let mut files = vec![
+        vehicle.model.clone(),
+        vehicle.parts.clone(),
+        vehicle.shaders.clone(),
+        vehicle.shader_settings.clone(),
+    ];
+    for path in geometry
+        .materials
+        .iter()
+        .map(|m| m.path.clone())
+        .collect::<BTreeSet<_>>()
+    {
+        let bytes = read_showroom_file(root, &path, 64 * 1024 * 1024).or_else(|first_err| {
+            // Some community RSF car packs rename the outer folder while keeping the original
+            // filename inside `<model_dir>/textures/<basename>`. Resolve strictly inside the same car folder.
+            let basename = path.replace('\\', "/");
+            let basename = basename.rsplit('/').next().unwrap_or("");
+            if !model_dir.is_empty() && !basename.is_empty() {
+                let fallback = format!("{model_dir}/textures/{basename}");
+                read_showroom_file(root, &fallback, 64 * 1024 * 1024)
+            } else {
+                Err(first_err)
+            }
+        })?;
+        let plan = upload_plan(&bytes, u32::MAX)?;
+        let first = plan.mips.first().ok_or("SHOWROOM DDS: missing mip chain")?;
+        let info = crate::asset_probe::TextureInfo {
+            request: path.clone(),
+            resolved: path.clone(),
+            width: first.width,
+            height: first.height,
+            mip_count: plan.mips.len() as u32,
+            format: plan.format,
+        };
+        files.push(path.clone());
+        textures.insert(path, crate::asset_probe::TextureData { info, bytes });
+    }
+    #[cfg(feature = "physics-stage")]
+    let cameras = crate::driving::cameras::Mounts::parse(&parts)
+        .unwrap_or_else(|_| crate::driving::cameras::Mounts::fallback());
+    Ok(Car {
+        vehicle: vehicle.clone(),
+        #[cfg(feature = "physics-stage")]
+        cameras,
+        geometry,
+        textures,
+        files,
+        cockpit: None,
+        cockpit_error: None,
+    })
 }
 
 #[cfg(test)]

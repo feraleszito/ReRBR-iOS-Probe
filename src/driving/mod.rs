@@ -126,6 +126,16 @@ pub struct Runtime {
     last_finish_splits_ms: Vec<u64>,
     last_run_prev_pb_splits_ms: Option<Vec<u64>>,
     last_finish_crossed_forward: bool,
+    pub showroom_camera: crate::car::showroom::ShowroomCamera,
+    showroom_drag: Option<(u64, f32, f32)>,
+    title_started: Instant,
+    transition_started: Option<Instant>,
+    title_vehicle_order: Vec<rerbr_content::VehicleDescriptor>,
+    pub last_driven_vehicle_id: Option<String>,
+    showroom_active_name: Option<String>,
+    showroom_loading: bool,
+    showroom_error: Option<String>,
+    coming_soon_notice: Option<(String, Instant)>,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -138,8 +148,15 @@ impl Runtime {
         let default_selection = rerbr_content::Selection::default();
         let scanned = Catalog::scan(&default_selection);
         let stage = restored_stage(&scanned, &settings.stage_id);
-        let vehicle = restored_vehicle(&scanned, &settings.vehicle_id, settings.ngp_experimental);
+        let preferred_vehicle_id = settings
+            .last_driven_vehicle_id
+            .as_deref()
+            .unwrap_or(&settings.vehicle_id);
+        let vehicle = restored_vehicle(&scanned, preferred_vehicle_id, settings.ngp_experimental);
         let selection = rerbr_content::Selection { vehicle, stage };
+        let content = Catalog::scan(&selection);
+        let title_vehicle_order = shuffled_showroom_candidates(&content);
+        let last_driven_vehicle_id = settings.last_driven_vehicle_id.clone();
         let mut controls = Controls::new();
         controls.sensitivity = settings.sensitivity;
         controls.dead_zone = settings.dead_zone;
@@ -179,7 +196,7 @@ impl Runtime {
             drawable_size: (1024, 768),
             effective_fov: 65.0,
             worker: worker::Worker::idle(),
-            content: Catalog::scan(&selection),
+            content,
             selection,
             pending_scene_action: None,
             race: race::Clock::default(),
@@ -239,7 +256,107 @@ impl Runtime {
             last_finish_splits_ms: Vec::new(),
             last_run_prev_pb_splits_ms: None,
             last_finish_crossed_forward: false,
+            showroom_camera: crate::car::showroom::ShowroomCamera::default(),
+            showroom_drag: None,
+            title_started: Instant::now(),
+            transition_started: None,
+            title_vehicle_order,
+            last_driven_vehicle_id,
+            showroom_active_name: None,
+            showroom_loading: false,
+            showroom_error: None,
+            coming_soon_notice: None,
         }
+    }
+
+    /// Returns `(primary, fallbacks)` for the 3D Showroom when a showroom page is active.
+    /// - Title Screen: random car chosen once at app startup (independent of last-driven car).
+    /// - Main Menu: last-driven car (persisted across restarts & stage returns), falling back cleanly.
+    /// - Garage: currently inspected car (drivable or visual-only), with no silent car substitution.
+    pub fn showroom_request(
+        &self,
+    ) -> Option<(
+        crate::car::showroom::ShowroomMode,
+        rerbr_content::VehicleDescriptor,
+        Vec<rerbr_content::VehicleDescriptor>,
+    )> {
+        use crate::car::showroom::ShowroomMode;
+        match self.menu.page {
+            menu::Page::Title => {
+                let first = self.title_vehicle_order.first()?.clone();
+                let rest = self.title_vehicle_order.iter().skip(1).cloned().collect();
+                Some((ShowroomMode::Title, first, rest))
+            }
+            menu::Page::Main => {
+                let mut candidates: Vec<rerbr_content::VehicleDescriptor> = Vec::new();
+                if let Some(last_id) = &self.last_driven_vehicle_id {
+                    if let Some(entry) = self
+                        .content
+                        .vehicle(last_id)
+                        .filter(|e| e.can_showroom_view())
+                    {
+                        candidates.push(entry.descriptor.clone());
+                    }
+                }
+                if let Some(entry) = self
+                    .content
+                    .vehicle(&self.selection.vehicle.id)
+                    .filter(|e| e.can_showroom_view())
+                {
+                    if !candidates.iter().any(|c| c.id == entry.descriptor.id) {
+                        candidates.push(entry.descriptor.clone());
+                    }
+                }
+                for entry in self.content.showroom_candidates() {
+                    if !candidates.iter().any(|c| c.id == entry.descriptor.id) {
+                        candidates.push(entry.descriptor.clone());
+                    }
+                }
+                let primary = candidates.first()?.clone();
+                let fallbacks = candidates.into_iter().skip(1).collect();
+                Some((ShowroomMode::MainMenu, primary, fallbacks))
+            }
+            menu::Page::Garage => {
+                let ctx = self.context();
+                let indices = self.menu.garage_indices(&ctx);
+                let active_idx = if indices.contains(&self.menu.inspected_vehicle) {
+                    self.menu.inspected_vehicle
+                } else {
+                    indices.first().copied().unwrap_or(0)
+                };
+                let entry = self.content.vehicles.get(active_idx)?;
+                if !entry.can_showroom_view() {
+                    return None;
+                }
+                Some((ShowroomMode::Garage, entry.descriptor.clone(), Vec::new()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_showroom_page(&self) -> bool {
+        self.menu.page.is_showroom_page()
+    }
+
+    pub fn sync_showroom_status(
+        &mut self,
+        active_id: Option<&str>,
+        loading: bool,
+        error: Option<&str>,
+    ) {
+        self.showroom_loading = loading;
+        self.showroom_error = error.map(str::to_string);
+        self.showroom_active_name = active_id.and_then(|id| {
+            self.content
+                .vehicle(id)
+                .map(|e| e.descriptor.name.clone())
+                .or_else(|| {
+                    self.title_vehicle_order
+                        .iter()
+                        .find(|v| v.id == id)
+                        .map(|v| v.name.clone())
+                })
+        });
     }
     pub fn process_gamepad_snapshot(&mut self, snap: &gamepad::GamepadSnapshot, now_secs: f64) {
         if self.menu.page == menu::Page::Driving {
@@ -274,6 +391,50 @@ impl Runtime {
                 self.menu.rows(&ctx)
             };
             for ev in events {
+                if self.menu.page == menu::Page::Title {
+                    if matches!(
+                        ev,
+                        gamepad::MenuNavEvent::Confirm | gamepad::MenuNavEvent::Pause
+                    ) {
+                        self.menu_command(menu::Command::EnterMainMenu);
+                    }
+                    continue;
+                }
+                if self.menu.page == menu::Page::Main {
+                    match ev {
+                        gamepad::MenuNavEvent::Left => {
+                            self.menu_command(menu::Command::MainSectionStep(-1));
+                        }
+                        gamepad::MenuNavEvent::Right => {
+                            self.menu_command(menu::Command::MainSectionStep(1));
+                        }
+                        gamepad::MenuNavEvent::Confirm => {
+                            let idx = self.menu.main_section;
+                            self.menu_command(menu::Command::MainSectionActivate(idx));
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                if self.menu.page == menu::Page::Garage {
+                    match ev {
+                        gamepad::MenuNavEvent::Left => {
+                            self.menu_command(menu::Command::GaragePrevCar);
+                        }
+                        gamepad::MenuNavEvent::Right => {
+                            self.menu_command(menu::Command::GarageNextCar);
+                        }
+                        gamepad::MenuNavEvent::Confirm => {
+                            let idx = self.menu.inspected_vehicle;
+                            self.menu_command(menu::Command::SelectVehicle(idx));
+                        }
+                        gamepad::MenuNavEvent::Back => {
+                            self.menu_command(menu::Command::Back);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 match ev {
                     gamepad::MenuNavEvent::Up => self.menu.focus_move(&rows, -1),
                     gamepad::MenuNavEvent::Down => self.menu.focus_move(&rows, 1),
@@ -576,6 +737,7 @@ impl Runtime {
             codriver_volume: self.codriver_volume,
             camera: self.camera_index(),
             vehicle_id: self.selection.vehicle.id.clone(),
+            last_driven_vehicle_id: self.last_driven_vehicle_id.clone(),
             stage_id: self.selection.stage.id.clone(),
             ngp_experimental: self.ngp_experimental,
         }
@@ -588,13 +750,112 @@ impl Runtime {
     fn apply_command(&mut self, command: menu::Command) {
         use menu::Command::*;
         match command {
+            EnterMainMenu => {
+                if self.menu.page == menu::Page::Title {
+                    self.transition_started = Some(Instant::now());
+                    self.showroom_camera
+                        .set_mode(crate::car::showroom::ShowroomMode::MainMenu);
+                    self.showroom_drag = None;
+                    self.coming_soon_notice = None;
+                    self.menu.reset_to_main();
+                }
+            }
+            MainSectionStep(delta) => {
+                let len = menu::MainSection::ALL.len() as isize;
+                self.menu.main_section =
+                    ((self.menu.main_section as isize + delta as isize).rem_euclid(len)) as usize;
+                self.coming_soon_notice = None;
+            }
+            MainSectionActivate(index) => {
+                let len = menu::MainSection::ALL.len();
+                self.menu.main_section = index % len;
+                let section = menu::MainSection::from_index(self.menu.main_section);
+                if let Some(detail) = section.coming_soon_detail() {
+                    self.coming_soon_notice =
+                        Some((detail.into(), Instant::now() + Duration::from_secs(4)));
+                } else {
+                    self.coming_soon_notice = None;
+                    match section {
+                        menu::MainSection::TimeTrial => self.menu.open(menu::Page::Drive),
+                        menu::MainSection::Garage => {
+                            if let Some(pos) = self
+                                .content
+                                .vehicles
+                                .iter()
+                                .position(|v| v.descriptor.id == self.selection.vehicle.id)
+                            {
+                                self.menu.inspected_vehicle = pos;
+                            }
+                            self.showroom_camera
+                                .set_mode(crate::car::showroom::ShowroomMode::Garage);
+                            self.menu.open(menu::Page::Garage);
+                        }
+                        menu::MainSection::RallySchool => self.menu.open(menu::Page::RallySchool),
+                        menu::MainSection::Settings => self.menu.open(menu::Page::Settings),
+                        _ => {}
+                    }
+                }
+            }
+            GaragePrevCar | GarageNextCar => {
+                let indices = {
+                    let ctx = self.context();
+                    self.menu.garage_indices(&ctx)
+                };
+                if !indices.is_empty() {
+                    let pos = indices
+                        .iter()
+                        .position(|&i| i == self.menu.inspected_vehicle)
+                        .unwrap_or(0);
+                    let delta = if matches!(command, GarageNextCar) {
+                        1isize
+                    } else {
+                        -1isize
+                    };
+                    let next = ((pos as isize + delta).rem_euclid(indices.len() as isize)) as usize;
+                    self.menu.inspected_vehicle = indices[next];
+                    self.message = None;
+                }
+            }
+            GarageFilterCycle => {
+                self.menu.garage_filter = self.menu.garage_filter.next();
+                let indices = {
+                    let ctx = self.context();
+                    self.menu.garage_indices(&ctx)
+                };
+                if !indices.contains(&self.menu.inspected_vehicle) {
+                    if let Some(&first) = indices.first() {
+                        self.menu.inspected_vehicle = first;
+                    }
+                }
+            }
             Open(page) => {
                 if page == menu::Page::NgpExperimental {
                     self.refresh_focus_diagnostics();
+                } else if page == menu::Page::Garage {
+                    if let Some(pos) = self
+                        .content
+                        .vehicles
+                        .iter()
+                        .position(|v| v.descriptor.id == self.selection.vehicle.id)
+                    {
+                        self.menu.inspected_vehicle = pos;
+                    }
+                    self.showroom_camera
+                        .set_mode(crate::car::showroom::ShowroomMode::Garage);
                 }
+                self.coming_soon_notice = None;
                 self.menu.open(page);
             }
-            Back => self.menu.back(),
+            Back => {
+                self.menu.back();
+                if self.menu.page == menu::Page::Main {
+                    self.showroom_camera
+                        .set_mode(crate::car::showroom::ShowroomMode::MainMenu);
+                } else if self.menu.page == menu::Page::Garage {
+                    self.showroom_camera
+                        .set_mode(crate::car::showroom::ShowroomMode::Garage);
+                }
+            }
             ResetToMain => {
                 self.pause();
                 self.capture_session_snapshot(false);
@@ -615,6 +876,10 @@ impl Runtime {
                 self.last_finish_splits_ms.clear();
                 self.last_run_prev_pb_splits_ms = None;
                 self.last_record_outcome = None;
+                self.showroom_drag = None;
+                self.coming_soon_notice = None;
+                self.showroom_camera
+                    .set_mode(crate::car::showroom::ShowroomMode::MainMenu);
                 self.pending_scene_action = Some(SceneAction::Unload);
                 self.menu.reset_to_main();
                 self.message = None;
@@ -701,6 +966,7 @@ impl Runtime {
                         self.last_run_prev_pb_splits_ms = None;
                         self.last_finish_crossed_forward = false;
                         if let Some(pack) = pack_path {
+                            self.last_driven_vehicle_id = Some(self.selection.vehicle.id.clone());
                             self.experimental_visual_only = false;
                             self.experimental_physics_reason = None;
                             eprintln!(
@@ -761,6 +1027,7 @@ impl Runtime {
                     self.last_finish_splits_ms.clear();
                     self.last_run_prev_pb_splits_ms = None;
                     self.last_finish_crossed_forward = false;
+                    self.last_driven_vehicle_id = Some(self.selection.vehicle.id.clone());
                     self.worker = worker::Worker::new_selected_with_aids(
                         self.selection.clone(),
                         false,
@@ -1135,6 +1402,12 @@ impl Runtime {
             SelectVehicle(index) => {
                 let candidate = match self.content.vehicles.get(index) {
                     None => Err("UNKNOWN VEHICLE".to_string()),
+                    Some(entry)
+                        if entry.classification
+                            == rerbr_content::VehicleClassification::VisualInspectionOnly =>
+                    {
+                        Err("SOLO VISUALIZACIÓN 3D (SIN FÍSICA NGP INTEGRADA)".into())
+                    }
                     Some(entry) if entry.using_fallback_model || entry.model_missing => {
                         Err(format!(
                             "MODELO 3D PROPIO AUSENTE PARA {} (SIN FALLBACK)",
@@ -1700,6 +1973,40 @@ impl Runtime {
             return;
         }
         if self.menu.page != menu::Page::Driving {
+            if self.menu.page.is_showroom_page() {
+                match t.phase {
+                    TouchPhase::Started => {
+                        if self.menu.is_showroom_orbit_zone(x, y) {
+                            self.showroom_drag = Some((t.id, x as f32, y as f32));
+                            return;
+                        }
+                        let cmd = {
+                            let context = self.context();
+                            let rows = self.menu.rows(&context);
+                            self.menu.press_with_ctx(x, y, &context, &rows)
+                        };
+                        if let Some(command) = cmd {
+                            self.menu_command(command);
+                        }
+                    }
+                    TouchPhase::Moved => {
+                        if let Some((id, lx, ly)) = self.showroom_drag {
+                            if id == t.id {
+                                let (xf, yf) = (x as f32, y as f32);
+                                self.showroom_camera.drag(xf - lx, yf - ly);
+                                self.showroom_drag = Some((id, xf, yf));
+                            }
+                        }
+                    }
+                    TouchPhase::Ended | TouchPhase::Cancelled => {
+                        if self.showroom_drag.is_some_and(|(id, ..)| id == t.id) {
+                            self.showroom_camera.end_drag();
+                            self.showroom_drag = None;
+                        }
+                    }
+                }
+                return;
+            }
             if t.phase == TouchPhase::Started {
                 let rows = {
                     let context = self.context();
@@ -2364,6 +2671,18 @@ impl Runtime {
             record_outcome: self.last_record_outcome.as_ref(),
             run_splits_ms: &self.last_finish_splits_ms,
             comparison_pb_splits_ms: self.last_run_prev_pb_splits_ms.as_deref(),
+            showroom_vehicle_name: self.showroom_active_name.as_deref(),
+            showroom_loading: self.showroom_loading,
+            showroom_error: self.showroom_error.as_deref(),
+            title_pulse: (self.title_started.elapsed().as_secs_f32() * 2.4).sin() * 0.5 + 0.5,
+            transition_alpha: self.transition_started.map_or(0.0, |t| {
+                let dt = t.elapsed().as_secs_f32();
+                (1.0 - dt / 0.32).clamp(0.0, 1.0)
+            }),
+            coming_soon_notice: self
+                .coming_soon_notice
+                .as_ref()
+                .and_then(|(msg, until)| (Instant::now() < *until).then_some(msg.as_str())),
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
@@ -3158,12 +3477,43 @@ fn restored_vehicle(
     catalog
         .vehicle(id)
         .filter(|entry| {
-            (ngp_experimental || !entry.descriptor.is_ngp_experimental_car())
+            entry.classification != rerbr_content::VehicleClassification::VisualInspectionOnly
+                && (ngp_experimental || !entry.descriptor.is_ngp_experimental_car())
                 && (!entry.files.checked || entry.files.missing.is_empty())
         })
         .or_else(|| catalog.vehicle(&default.id))
         .map(|entry| entry.descriptor.clone())
         .unwrap_or(default)
+}
+
+/// Builds a startup-shuffled list of all installed 3D car models (drivable + visual-only)
+/// for the Title Screen. Executed ONCE at app startup — never per frame — using lightweight
+/// SplitMix64 entropy from system clock + PID with zero extra crate dependencies.
+fn shuffled_showroom_candidates(catalog: &Catalog) -> Vec<rerbr_content::VehicleDescriptor> {
+    let mut items: Vec<rerbr_content::VehicleDescriptor> = catalog
+        .showroom_candidates()
+        .into_iter()
+        .map(|e| e.descriptor.clone())
+        .collect();
+    if items.len() <= 1 {
+        return items;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0x9E37_79B9_7F4A_7C15u64, |d| d.as_nanos() as u64);
+    let mut state = nanos ^ (u64::from(std::process::id()).wrapping_mul(0xBF58_476D_1CE4_E5B9));
+    let mut next_u64 = || -> u64 {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    for i in (1..items.len()).rev() {
+        let j = (next_u64() as usize) % (i + 1);
+        items.swap(i, j);
+    }
+    items
 }
 
 // The partial Harwood benchmark is intentionally kept available as a fallback.
@@ -3201,6 +3551,8 @@ mod reload_tests {
     #[test]
     fn main_menu_browsing_keeps_all_four_stages_and_never_starts_scene_workers() {
         let mut app = Runtime::new();
+        assert_eq!(app.menu.page, menu::Page::Title);
+        app.apply_command(menu::Command::EnterMainMenu);
         assert_eq!(app.menu.page, menu::Page::Main);
         assert!(app.worker.is_idle());
         assert!(app.pending_scene_action.is_none());
@@ -3549,6 +3901,7 @@ mod reload_tests {
         assert_eq!(app.selection.stage.id, "harwood-forest");
 
         // Attempting StartRally with unsupported vehicle is blocked
+        app.apply_command(menu::Command::EnterMainMenu);
         app.selection.vehicle = rerbr_content::VehicleDescriptor::ford_focus_2006();
         app.apply_command(menu::Command::StartRally);
         assert_eq!(app.menu.page, menu::Page::Main);
@@ -3885,5 +4238,124 @@ mod reload_tests {
             "Loading -> Driving must preserve experimental_physics_reason, got {:?}",
             app.experimental_physics_reason
         );
+    }
+
+    #[test]
+    fn title_screen_handles_missing_assets_and_transitions_cleanly_to_horizontal_main() {
+        let mut app = Runtime::new();
+        assert_eq!(app.menu.page, menu::Page::Title);
+        // Without private assets installed, showroom_request is None and never panics or blocks.
+        app.title_vehicle_order.clear();
+        assert!(app.showroom_request().is_none());
+
+        app.apply_command(menu::Command::EnterMainMenu);
+        assert_eq!(app.menu.page, menu::Page::Main);
+        assert!(app.transition_started.is_some());
+
+        // Coming-soon sections show a clear notice without inventing unimplemented systems.
+        app.apply_command(menu::Command::MainSectionActivate(0)); // Carrera
+        assert_eq!(app.menu.page, menu::Page::Main);
+        assert!(app.coming_soon_notice.is_some());
+
+        // Contrarreloj opens the working stage/driving hub.
+        app.apply_command(menu::Command::MainSectionActivate(1));
+        assert_eq!(app.menu.page, menu::Page::Drive);
+        app.apply_command(menu::Command::Back);
+        assert_eq!(app.menu.page, menu::Page::Main);
+
+        // Garage opens the 3D Showroom Garage.
+        app.apply_command(menu::Command::MainSectionActivate(3));
+        assert_eq!(app.menu.page, menu::Page::Garage);
+    }
+
+    #[test]
+    fn main_menu_remembers_last_driven_car_separately_from_random_title_car() {
+        let mut app = Runtime::new();
+        for v in &mut app.content.vehicles {
+            v.has_3d_model = true;
+        }
+        let impreza = app.content.vehicles[5].descriptor.clone();
+        let corolla = app.content.vehicles[0].descriptor.clone();
+        // Title screen shows a random car (e.g. Impreza), independent of last-driven Corolla.
+        app.title_vehicle_order = vec![impreza.clone(), corolla.clone()];
+        app.last_driven_vehicle_id = Some(corolla.id.clone());
+        app.selection.vehicle = corolla.clone();
+
+        // On Title Screen -> showcases random title car (Impreza).
+        let (mode, primary, _) = app.showroom_request().expect("title showroom");
+        assert_eq!(mode, crate::car::showroom::ShowroomMode::Title);
+        assert_eq!(primary.id, impreza.id);
+
+        // Entering Main Menu -> switches to last-driven car (Corolla), NOT random title car.
+        app.apply_command(menu::Command::EnterMainMenu);
+        let (mode, primary, _) = app.showroom_request().expect("main showroom");
+        assert_eq!(mode, crate::car::showroom::ShowroomMode::MainMenu);
+        assert_eq!(primary.id, corolla.id);
+
+        // If last_driven_vehicle_id is uninstalled/missing, falls back cleanly to a valid model.
+        app.last_driven_vehicle_id = Some("rsf-deleted-car".into());
+        let (_, fallback_primary, _) = app.showroom_request().expect("fallback main showroom");
+        assert_eq!(fallback_primary.id, corolla.id);
+    }
+
+    #[test]
+    fn visual_only_car_is_viewable_in_garage_but_strictly_blocked_from_driving() {
+        let mut app = Runtime::new();
+        let mut visual_desc = rerbr_content::VehicleDescriptor::ford_focus_2006();
+        visual_desc.id = "rsf-alpine-a110-2020".into();
+        visual_desc.name = "Alpine A110 2020".into();
+        visual_desc.model = "Cars/Alpine_A110_2020/Alpine_A110_2020.sgc".into();
+        visual_desc.rsf_pack = None;
+        let idx = app.content.vehicles.len();
+        app.content.vehicles.push(content_manager::VehicleEntry {
+            descriptor: visual_desc.clone(),
+            state: content_manager::EntryState::Unsupported,
+            files: content_manager::FileAudit::unchecked(),
+            tech_sheet: None,
+            classification: rerbr_content::VehicleClassification::VisualInspectionOnly,
+            drivetrain: None,
+            fmod_bank: None,
+            using_fallback_model: false,
+            model_missing: false,
+            has_3d_model: true,
+            notes: vec!["SOLO VISUALIZACIÓN 3D".into()],
+        });
+
+        assert_eq!(
+            app.content.vehicles[idx].capability(true),
+            content_manager::DriveCapability::VisualOnly
+        );
+        assert!(app.content.vehicles[idx].can_showroom_view());
+
+        // Inspecting in 3D Garage serves its real 3D model.
+        app.menu.open(menu::Page::Garage);
+        app.menu.inspected_vehicle = idx;
+        let (mode, primary, fallbacks) = app.showroom_request().expect("garage visual car");
+        assert_eq!(mode, crate::car::showroom::ShowroomMode::Garage);
+        assert_eq!(primary.id, "rsf-alpine-a110-2020");
+        assert!(fallbacks.is_empty());
+
+        // Attempting to select it for driving MUST be rejected without changing active car.
+        let prev_car = app.selection.vehicle.id.clone();
+        app.apply_command(menu::Command::SelectVehicle(idx));
+        assert_eq!(app.selection.vehicle.id, prev_car);
+        assert!(app
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("SOLO VISUALIZACIÓN")));
+    }
+
+    #[test]
+    fn showroom_camera_orbit_clamps_pitch_and_keeps_finite_bounds() {
+        let mut cam = crate::car::showroom::ShowroomCamera::default();
+        cam.set_mode(crate::car::showroom::ShowroomMode::Garage);
+        cam.drag(0.35, 10.0); // Extreme pitch drag
+        assert!(cam.pitch <= 0.64 && cam.pitch >= 0.10);
+        cam.drag(-0.5, -10.0);
+        assert!(cam.pitch <= 0.64 && cam.pitch >= 0.10);
+        cam.end_drag();
+        let (c, fov) = cam.camera_and_fov(0.72, 2.2, 2556.0 / 1179.0);
+        assert!(c.eye.is_finite() && c.target.is_finite() && fov > 30.0 && fov < 60.0);
+        assert!(c.eye.y >= 0.35);
     }
 }

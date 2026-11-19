@@ -1,14 +1,15 @@
 //! Native menu model for the validated Corolla/Harwood preset.
 //! Every row and hit region is shared; unsupported content is never offered as playable.
 
-use super::content_manager::{physics_report, Catalog, EntryState, IMPORT_STEPS};
+use super::content_manager::{physics_report, Catalog, DriveCapability, EntryState, IMPORT_STEPS};
 use super::layout::Rect;
-use super::ui::{self, ACCENT, BAD, DIM, GOOD, LINE, PANEL_ACTIVE, PANEL_DEEP, TEXT, WARN};
+use super::ui::{self, ACCENT, BAD, DIM, GOOD, INFO, LINE, PANEL_ACTIVE, PANEL_DEEP, TEXT, WARN};
 use crate::harwood::benchmark::hud::Canvas;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Page {
     #[default]
+    Title,
     Main,
     Loading,
     Drive,
@@ -37,6 +38,111 @@ pub enum Page {
     SchoolResult,
 }
 
+impl Page {
+    /// Pages that render transparently over the live 3D Rally Showroom.
+    pub fn is_showroom_page(self) -> bool {
+        matches!(self, Self::Title | Self::Main | Self::Garage)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainSection {
+    Career,
+    TimeTrial,
+    Online,
+    Garage,
+    UsedCars,
+    RallySchool,
+    Settings,
+}
+
+impl MainSection {
+    pub const ALL: [Self; 7] = [
+        Self::Career,
+        Self::TimeTrial,
+        Self::Online,
+        Self::Garage,
+        Self::UsedCars,
+        Self::RallySchool,
+        Self::Settings,
+    ];
+
+    pub fn from_index(index: usize) -> Self {
+        Self::ALL[index % Self::ALL.len()]
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Career => "CARRERA",
+            Self::TimeTrial => "CONTRARRELOJ",
+            Self::Online => "ONLINE",
+            Self::Garage => "GARAJE",
+            Self::UsedCars => "2ª MANO",
+            Self::RallySchool => "ACADEMIA",
+            Self::Settings => "AJUSTES",
+        }
+    }
+
+    pub fn subtitle(self) -> &'static str {
+        match self {
+            Self::Career => "PRÓXIMAMENTE",
+            Self::TimeTrial => "TRAMOS Y PB",
+            Self::Online => "PRÓXIMAMENTE",
+            Self::Garage => "SHOWROOM 3D",
+            Self::UsedCars => "PRÓXIMAMENTE",
+            Self::RallySchool => "17 LECCIONES",
+            Self::Settings => "OPCIONES",
+        }
+    }
+
+    pub fn is_coming_soon(self) -> bool {
+        matches!(self, Self::Career | Self::Online | Self::UsedCars)
+    }
+
+    pub fn coming_soon_detail(self) -> Option<&'static str> {
+        match self {
+            Self::Career => Some("MODO CARRERA — PRÓXIMAMENTE (USA CONTRARRELOJ O CAMPEONATO RBR)"),
+            Self::Online => Some("ONLINE Y RANKINGS — PRÓXIMAMENTE EN UNA FASE POSTERIOR"),
+            Self::UsedCars => Some("TIENDA DE SEGUNDA MANO — PRÓXIMAMENTE EN UNA FASE POSTERIOR"),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GarageFilter {
+    #[default]
+    All,
+    Drivable,
+    VisualOnly,
+}
+
+impl GarageFilter {
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Drivable,
+            Self::Drivable => Self::VisualOnly,
+            Self::VisualOnly => Self::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "TODOS",
+            Self::Drivable => "CONDUCIBLES",
+            Self::VisualOnly => "SOLO VISUAL",
+        }
+    }
+
+    pub fn matches(self, cap: DriveCapability) -> bool {
+        match self {
+            Self::All => true,
+            Self::Drivable => cap == DriveCapability::Drivable,
+            Self::VisualOnly => cap == DriveCapability::VisualOnly,
+        }
+    }
+}
+
 pub(crate) fn format_stage_time(seconds: f64) -> String {
     let tenths = (seconds.max(0.0) * 10.0).round() as u64;
     let mins = tenths / 600;
@@ -46,6 +152,12 @@ pub(crate) fn format_stage_time(seconds: f64) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
+    EnterMainMenu,
+    MainSectionActivate(usize),
+    MainSectionStep(i32),
+    GaragePrevCar,
+    GarageNextCar,
+    GarageFilterCycle,
     Open(Page),
     Back,
     ResetToMain,
@@ -266,18 +378,46 @@ pub struct Context<'a> {
     pub run_splits_ms: &'a [u64],
     /// Stored PB run's split times (snapshotted before overwrite on new PB) for exact per-split deltas.
     pub comparison_pb_splits_ms: Option<&'a [u64]>,
+    /// Name of the vehicle currently showcased in the 3D Showroom (random on Title, last-driven on Main, inspected on Garage).
+    pub showroom_vehicle_name: Option<&'a str>,
+    pub showroom_loading: bool,
+    pub showroom_error: Option<&'a str>,
+    /// Smooth 0..1 pulse for the "TOCA PARA COMENZAR" prompt on Title Screen.
+    pub title_pulse: f32,
+    /// Smooth 0..1 screen transition fade (e.g. Title -> Main Menu).
+    pub transition_alpha: f32,
+    /// Optional non-blocking notice shown in the horizontal menu for "Próximamente" sections.
+    pub coming_soon_notice: Option<&'a str>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Menu {
     pub page: Page,
     stack: Vec<Page>,
+    pub main_section: usize,
+    pub garage_filter: GarageFilter,
     pub inspected_vehicle: usize,
     pub inspected_stage: usize,
     pub garage_page: usize,
     pub stage_page: usize,
     pub focused_row: usize,
     pub gamepad_focus_active: bool,
+}
+impl Default for Menu {
+    fn default() -> Self {
+        Self {
+            page: Page::Title,
+            stack: Vec::new(),
+            main_section: 1, // Contrarreloj focused by default for immediate driving access
+            garage_filter: GarageFilter::All,
+            inspected_vehicle: 0,
+            inspected_stage: 0,
+            garage_page: 0,
+            stage_page: 0,
+            focused_row: 0,
+            gamepad_focus_active: false,
+        }
+    }
 }
 impl Menu {
     pub fn open(&mut self, page: Page) {
@@ -371,14 +511,14 @@ impl Menu {
     }
     pub fn title(&self) -> &'static str {
         match self.page {
-            Page::Main | Page::Loading => "RICHARD BURNS RALLY",
-            Page::Drive => "INICIAR RALLY",
-            Page::Garage | Page::GarageDetail => "SELECCIONAR COCHE",
+            Page::Title | Page::Main | Page::Loading => "RICHARD BURNS RALLY",
+            Page::Drive => "CONTRARRELOJ",
+            Page::Garage | Page::GarageDetail => "GARAJE 3D",
             Page::Stages | Page::StageDetail => "SELECCIONAR TRAMO",
             Page::Content | Page::ContentImport | Page::ContentCompatibility => {
                 "GESTOR DE CONTENIDO"
             }
-            Page::Settings => "CONFIGURACIÓN",
+            Page::Settings => "AJUSTES",
             Page::Controls => "CONTROLES",
             Page::CameraEditor => "EDITOR DE CÁMARAS",
             Page::ControlsEditor => "EDITOR DE CONTROLES",
@@ -391,9 +531,28 @@ impl Menu {
             Page::GamepadSettings => "MANDO / GAMEPAD",
             Page::PacenoteHudSettings => "NOTAS VISUALES",
             Page::Championship => "CAMPEONATO RBR",
-            Page::RallySchool => "ESCUELA DE RALLY",
+            Page::RallySchool => "ACADEMIA DE RALLY",
             Page::SchoolBriefing => "INSTRUCCIONES DE LECCIÓN",
             Page::SchoolResult => "RESULTADO ESCUELA DE RALLY",
+        }
+    }
+    /// Filtered indices into `ctx.content.vehicles` for the active `GarageFilter`.
+    pub fn garage_indices(&self, ctx: &Context) -> Vec<usize> {
+        let filtered: Vec<usize> = ctx
+            .content
+            .vehicles
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                self.garage_filter
+                    .matches(e.capability(ctx.ngp_experimental))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if filtered.is_empty() && !ctx.content.vehicles.is_empty() {
+            (0..ctx.content.vehicles.len()).collect()
+        } else {
+            filtered
         }
     }
     pub fn rows(&self, ctx: &Context) -> Vec<Row> {
@@ -408,23 +567,12 @@ impl Menu {
             .stage(&stage.id)
             .map_or(EntryState::Selected, |entry| entry.state);
         match self.page {
-            Page::Main => vec![
-                Row::action(
-                    format!("SELECCIONAR COCHE: {}", vehicle.name),
-                    Command::Open(Page::Garage),
-                ),
-                Row::action(
-                    format!("SELECCIONAR TRAMO: {}", stage.name),
-                    Command::Open(Page::Stages),
-                ),
-                Row::action("INICIAR RALLY", Command::StartRally),
-                Row::action("CONFIGURACIÓN", Command::Open(Page::Settings)),
-                Row::action("CONTROLES", Command::Open(Page::Controls)),
-                Row::action("CAMPEONATO RBR", Command::Open(Page::Championship)),
-                Row::action("ESCUELA DE RALLY", Command::Open(Page::RallySchool)),
-                Row::action("GESTOR DE CONTENIDO", Command::Open(Page::Content)),
-                Row::action("ACERCA DE", Command::Open(Page::About)),
-            ],
+            Page::Title => vec![Row::action("TOCA PARA COMENZAR", Command::EnterMainMenu)],
+            Page::Main => MainSection::ALL
+                .iter()
+                .enumerate()
+                .map(|(i, sec)| Row::action(sec.title(), Command::MainSectionActivate(i)))
+                .collect(),
             Page::Loading => {
                 if ctx.loading_error.is_some() {
                     vec![Row::action(
@@ -435,22 +583,40 @@ impl Menu {
                     vec![Row::action("CANCELAR", Command::ResetToMain)]
                 }
             }
-            Page::Drive => vec![
-                Row::info("TRAMO", stage.name.clone()),
-                Row::info("COCHE", vehicle.name.clone()),
-                Row {
-                    label: if ctx.steering_ready {
-                        "INICIAR RALLY".into()
-                    } else {
-                        "INICIAR RALLY - SUJETA EN HORIZONTAL".into()
+            Page::Drive => {
+                let pb_text = ctx
+                    .personal_best_ms
+                    .map(|ms| format!(" · PB {}", super::records::format_time_ms(ms)))
+                    .unwrap_or_default();
+                vec![
+                    Row::action(
+                        format!("COCHE ACTIVO: {}", vehicle.name),
+                        Command::Open(Page::Garage),
+                    ),
+                    Row::action(
+                        format!("TRAMO: {} ({}){pb_text}", stage.name, stage.surface()),
+                        Command::Open(Page::Stages),
+                    ),
+                    Row {
+                        label: if ctx.steering_ready {
+                            "INICIAR RALLY".into()
+                        } else {
+                            "INICIAR RALLY - SUJETA EN HORIZONTAL".into()
+                        },
+                        kind: RowKind::Action {
+                            command: Command::StartRally,
+                            enabled: ctx.steering_ready,
+                        },
                     },
-                    kind: RowKind::Action {
-                        command: Command::StartRally,
-                        enabled: ctx.steering_ready,
-                    },
-                },
-                Row::action("VOLVER", Command::Back),
-            ],
+                    Row::action("CAMPEONATO RBR", Command::Open(Page::Championship)),
+                    Row::action(
+                        format!("MODO NGP EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
+                        Command::ToggleExperimentalMode,
+                    ),
+                    Row::action("DIAGNÓSTICO NGP (10 ETAPAS)", Command::RunFocusDiagnostics),
+                    Row::action("VOLVER", Command::Back),
+                ]
+            }
             Page::Garage => {
                 const PER_PAGE: usize = 9;
                 let total_vehicles = ctx.content.vehicles.len();
@@ -502,13 +668,23 @@ impl Menu {
                         || e.model_missing
                         || (ctx.content.inspected && !e.files.missing.is_empty())
                 });
-                let supported = if is_ngp_car {
+                let is_visual_only = entry.is_some_and(|e| {
+                    e.classification == rerbr_content::VehicleClassification::VisualInspectionOnly
+                });
+                let supported = if is_visual_only {
+                    false
+                } else if is_ngp_car {
                     ctx.ngp_experimental && !incomplete_rsf
                 } else {
                     inspected.validate_current_backend().is_ok()
                 };
                 let mut rows = Vec::new();
-                if is_ngp_car {
+                if is_visual_only {
+                    rows.push(Row::info(
+                        "CLASIFICACIÓN",
+                        "SOLO VISUALIZACIÓN 3D (SIN FÍSICA INTEGRADA)",
+                    ));
+                } else if is_ngp_car {
                     let class_text = entry.map(|e| e.classification.badge()).unwrap_or("RSF NGP");
                     let fb_warn =
                         if entry.is_some_and(|e| e.using_fallback_model || e.model_missing) {
@@ -552,6 +728,8 @@ impl Menu {
                             } else {
                                 "SELECCIONAR COCHE".into()
                             }
+                        } else if is_visual_only {
+                            "SOLO VISUALIZACIÓN (SIN FÍSICA NGP)".into()
                         } else if incomplete_rsf {
                             "INCOMPLETO (FALTAN ARCHIVOS PROPIOS)".into()
                         } else {
@@ -834,6 +1012,9 @@ impl Menu {
                     "NOTAS VISUALES COPILOTO",
                     Command::Open(Page::PacenoteHudSettings),
                 ),
+                Row::action("CONTROLES Y MANDO", Command::Open(Page::Controls)),
+                Row::action("GESTOR DE CONTENIDO / NGP", Command::Open(Page::Content)),
+                Row::action("ACERCA DE", Command::Open(Page::About)),
                 Row::action("VOLVER", Command::Back),
             ],
             Page::PacenoteHudSettings => {
@@ -1324,8 +1505,8 @@ impl Menu {
         let vehicle = &ctx.selection.vehicle;
         let stage = &ctx.selection.stage;
         match self.page {
-            Page::Main | Page::Loading => vec![
-                "iOS ALPHA".into(),
+            Page::Title | Page::Main | Page::Loading => vec![
+                "RBR MOBILE".into(),
                 format!("{} — {}", vehicle.name, stage.name),
             ],
             Page::Drive => vec![
@@ -1540,6 +1721,132 @@ impl Menu {
         let value_width = ui::texture_width(value, 0.78);
         (right_px - 34.0 - value_width * 0.5) / 640.0
     }
+    /// Returns `true` if a touch at normalized `(x, y)` lies in the open 3D Showroom viewport
+    /// where dragging orbits the camera around the car without interfering with menu controls.
+    pub fn is_showroom_orbit_zone(&self, x: f64, y: f64) -> bool {
+        if !x.is_finite() || !y.is_finite() {
+            return false;
+        }
+        let yf = y as f32;
+        match self.page {
+            Page::Main => (0.105..=0.745).contains(&yf),
+            Page::Garage => (0.105..=0.695).contains(&yf),
+            _ => false,
+        }
+    }
+
+    fn main_quick_drive_rect() -> Rect {
+        Rect::new(0.755, 0.022, 0.220, 0.068)
+    }
+
+    fn main_section_rect(&self, index: usize) -> Rect {
+        let count = MainSection::ALL.len();
+        let total_w = 0.956;
+        let gap = 0.010;
+        let card_w = (total_w - gap * (count - 1) as f32) / count as f32;
+        let x = 0.022 + index as f32 * (card_w + gap);
+        let active = index == self.main_section;
+        if active {
+            Rect::new(x, 0.766, card_w, 0.194)
+        } else {
+            Rect::new(x, 0.788, card_w, 0.172)
+        }
+    }
+
+    fn garage_back_rect() -> Rect {
+        Rect::new(0.025, 0.022, 0.160, 0.068)
+    }
+
+    fn garage_filter_rect() -> Rect {
+        Rect::new(0.205, 0.022, 0.445, 0.068)
+    }
+
+    fn garage_details_rect() -> Rect {
+        Rect::new(0.670, 0.022, 0.305, 0.068)
+    }
+
+    fn garage_prev_rect() -> Rect {
+        Rect::new(0.025, 0.720, 0.075, 0.228)
+    }
+
+    fn garage_next_rect() -> Rect {
+        Rect::new(0.900, 0.720, 0.075, 0.228)
+    }
+
+    fn garage_action_rect() -> Rect {
+        Rect::new(0.560, 0.858, 0.310, 0.074)
+    }
+
+    /// Context-aware hit test supporting Title Screen, Horizontal Main Menu, 3D Garage,
+    /// and all standard vertical row pages using the exact same rectangles used for drawing.
+    pub fn press_with_ctx(&self, x: f64, y: f64, ctx: &Context, rows: &[Row]) -> Option<Command> {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        match self.page {
+            Page::Title => Some(Command::EnterMainMenu),
+            Page::Main => {
+                if Self::main_quick_drive_rect().contains(x, y) {
+                    return Some(Command::StartRally);
+                }
+                for idx in 0..MainSection::ALL.len() {
+                    if self.main_section_rect(idx).contains(x, y) {
+                        return Some(Command::MainSectionActivate(idx));
+                    }
+                }
+                None
+            }
+            Page::Garage => {
+                if Self::garage_back_rect().contains(x, y) {
+                    return Some(Command::Back);
+                }
+                if Self::garage_filter_rect().contains(x, y) {
+                    return Some(Command::GarageFilterCycle);
+                }
+                let indices = self.garage_indices(ctx);
+                let active_idx = if indices.contains(&self.inspected_vehicle) {
+                    self.inspected_vehicle
+                } else {
+                    indices.first().copied().unwrap_or(0)
+                };
+                if Self::garage_details_rect().contains(x, y)
+                    && active_idx < ctx.content.vehicles.len()
+                {
+                    return Some(Command::OpenVehicle(active_idx));
+                }
+                if Self::garage_prev_rect().contains(x, y) {
+                    return Some(Command::GaragePrevCar);
+                }
+                if Self::garage_next_rect().contains(x, y) {
+                    return Some(Command::GarageNextCar);
+                }
+                if Self::garage_action_rect().contains(x, y) {
+                    if let Some(entry) = ctx.content.vehicles.get(active_idx) {
+                        let cap = entry.capability(ctx.ngp_experimental);
+                        if cap == DriveCapability::Drivable {
+                            if entry.descriptor.id == ctx.selection.vehicle.id {
+                                return Some(Command::Open(Page::Drive));
+                            }
+                            return Some(Command::SelectVehicle(active_idx));
+                        }
+                        if !ctx.ngp_experimental
+                            && entry.descriptor.is_ngp_experimental_car()
+                            && matches!(
+                                entry.classification,
+                                rerbr_content::VehicleClassification::RsfNgpVerified
+                                    | rerbr_content::VehicleClassification::RsfNgpPartial
+                            )
+                        {
+                            return Some(Command::ToggleExperimentalMode);
+                        }
+                    }
+                }
+                None
+            }
+            _ => self.press(x, y, rows),
+        }
+    }
+
     /// Resolves a touch to a command using the same rectangles used for drawing.
     pub fn press(&self, x: f64, y: f64, rows: &[Row]) -> Option<Command> {
         if !x.is_finite() || !y.is_finite() || rows.is_empty() {
@@ -1564,6 +1871,21 @@ impl Menu {
     }
     /// Draws the complete menu screen. Uses only the existing Metal HUD atlas.
     pub fn draw(&self, canvas: &mut Canvas, ctx: &Context, status: &str) {
+        if self.page == Page::Title {
+            self.draw_title(canvas, ctx);
+            self.draw_transition_fade(canvas, ctx.transition_alpha);
+            return;
+        }
+        if self.page == Page::Main {
+            self.draw_horizontal_main(canvas, ctx, status);
+            self.draw_transition_fade(canvas, ctx.transition_alpha);
+            return;
+        }
+        if self.page == Page::Garage {
+            self.draw_showroom_garage(canvas, ctx, status);
+            self.draw_transition_fade(canvas, ctx.transition_alpha);
+            return;
+        }
         if self.page == Page::Loading {
             self.draw_loading(canvas, ctx);
             return;
@@ -2073,6 +2395,405 @@ impl Menu {
             }
         }
     }
+
+    fn draw_transition_fade(&self, canvas: &mut Canvas, alpha: f32) {
+        if alpha > 0.005 {
+            let a = (alpha.clamp(0.0, 1.0) * 230.0).round() as u8;
+            ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 1.0), [8, 10, 14, a]);
+        }
+    }
+
+    /// Transparent Title Screen rendered over the cinematic 3D Showroom car.
+    fn draw_title(&self, canvas: &mut Canvas, ctx: &Context) {
+        let h = canvas.height();
+        // Subtle top-left brand badge.
+        let badge = Rect::new(0.025, 0.028, 0.23, 0.056);
+        ui::fill(canvas, badge, [10, 13, 19, 175]);
+        ui::fill(canvas, Rect::new(badge.x, badge.y, 0.006, badge.h), ACCENT);
+        canvas.text(
+            (badge.x + 0.016) * 640.0,
+            (badge.y + 0.014) * h,
+            "RBR MOBILE",
+            0.92,
+            TEXT,
+        );
+
+        // Sleek bottom gradient strip so title & CTA stay razor-sharp without hiding the car.
+        ui::fill(canvas, Rect::new(0.0, 0.72, 1.0, 0.28), [8, 10, 15, 165]);
+        ui::fill(canvas, Rect::new(0.0, 0.72, 1.0, 0.004), ACCENT);
+
+        // Main title lockup.
+        ui::text_center(
+            canvas,
+            Rect::new(0.05, 0.742, 0.90, 0.078),
+            "RICHARD BURNS RALLY",
+            1.65,
+            TEXT,
+        );
+        ui::text_center(
+            canvas,
+            Rect::new(0.18, 0.816, 0.64, 0.042),
+            "iOS / iPadOS · SHOWROOM 3D",
+            0.70,
+            DIM,
+        );
+
+        // Pulsing "TOCA PARA COMENZAR" prompt pill.
+        let pulse = 0.62 + 0.38 * ctx.title_pulse.clamp(0.0, 1.0);
+        let prompt_rect = Rect::new(0.30, 0.875, 0.40, 0.072);
+        ui::panel(
+            canvas,
+            prompt_rect,
+            [18, 22, 32, 220],
+            ui::with_alpha(ACCENT, pulse),
+        );
+        ui::text_center(
+            canvas,
+            prompt_rect,
+            "TOCA PARA COMENZAR",
+            0.92,
+            ui::with_alpha(TEXT, pulse),
+        );
+
+        // Subtle showcase car caption bottom-left (honest loading/fallback status).
+        let car_caption = if let Some(name) = ctx.showroom_vehicle_name {
+            format!("MODELO: {name}")
+        } else if ctx.showroom_loading {
+            "CARGANDO MODELO 3D...".into()
+        } else if ctx.showroom_error.is_some() {
+            "SIN MODELOS 3D EN DOCUMENTS/RBR/CARS".into()
+        } else {
+            "LISTO PARA INICIAR".into()
+        };
+        let cap_rect = Rect::new(0.025, 0.915, 0.26, 0.046);
+        let (cx, cy, cw, _) = ui::px(cap_rect, canvas);
+        ui::text_clipped(canvas, cx, cy, cw, &car_caption, 0.56, DIM);
+    }
+
+    /// Transparent Horizontal Main Menu rendered over the interactive 3D Showroom car
+    /// (showing the last-driven car by default).
+    fn draw_horizontal_main(&self, canvas: &mut Canvas, ctx: &Context, status: &str) {
+        let h = canvas.height();
+        let vehicle = &ctx.selection.vehicle;
+        let stage = &ctx.selection.stage;
+
+        // Top translucent header strip.
+        ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 0.106), [10, 13, 19, 195]);
+        ui::rule(canvas, 0.0, 0.106, 1.0, LINE);
+
+        // Top-left brand mark.
+        ui::fill(canvas, Rect::new(0.025, 0.026, 0.006, 0.056), ACCENT);
+        canvas.text(0.040 * 640.0, 0.024 * h, "RBR MOBILE", 1.15, TEXT);
+        canvas.text(0.040 * 640.0, 0.068 * h, "SHOWROOM", 0.56, DIM);
+
+        // Top-center active car & stage summary pill.
+        let summary_rect = Rect::new(0.245, 0.022, 0.495, 0.068);
+        ui::panel(canvas, summary_rect, [16, 20, 28, 210], LINE);
+        let (sx, sy, sw, _) = ui::px(summary_rect, canvas);
+        let car_label = format!("COCHE: {}", vehicle.name);
+        let stage_label = format!("TRAMO: {} ({})", stage.name, stage.surface());
+        ui::text_clipped(
+            canvas,
+            sx + 10.0,
+            sy + 4.0,
+            sw - 20.0,
+            &car_label,
+            0.68,
+            TEXT,
+        );
+        ui::text_clipped(
+            canvas,
+            sx + 10.0,
+            sy + 17.5,
+            sw - 20.0,
+            &stage_label,
+            0.58,
+            INFO,
+        );
+
+        // Top-right 1-tap quick drive CTA so existing driving & stage testing are always 1 tap away.
+        let drive_rect = Self::main_quick_drive_rect();
+        ui::panel(canvas, drive_rect, [156, 30, 30, 238], [240, 110, 110, 255]);
+        ui::text_center(canvas, drive_rect, "INICIAR TRAMO", 0.78, TEXT);
+
+        // Optional non-blocking notice (coming soon / status / showroom loading).
+        if let Some(notice) = ctx.coming_soon_notice {
+            let nrect = Rect::new(0.18, 0.120, 0.64, 0.052);
+            ui::panel(canvas, nrect, [16, 20, 28, 224], WARN);
+            let (nx, ny, nw, nh) = ui::px(nrect, canvas);
+            ui::text_clipped(
+                canvas,
+                nx + 10.0,
+                ny + (nh - 10.0).max(0.0) * 0.5,
+                nw - 20.0,
+                notice,
+                0.64,
+                WARN,
+            );
+        } else if !status.is_empty()
+            && status != "READY - TAP A ROW"
+            && !status.starts_with("LOADING PRIVATE")
+        {
+            let nrect = Rect::new(0.20, 0.120, 0.60, 0.048);
+            ui::panel(canvas, nrect, [16, 20, 28, 210], INFO);
+            let (nx, ny, nw, nh) = ui::px(nrect, canvas);
+            ui::text_clipped(
+                canvas,
+                nx + 10.0,
+                ny + (nh - 10.0).max(0.0) * 0.5,
+                nw - 20.0,
+                status,
+                0.62,
+                TEXT,
+            );
+        }
+
+        // Subtle interactive orbit hint just above the dock (never covers the car).
+        let hint_text = if ctx.showroom_loading {
+            "CARGANDO COCHE 3D..."
+        } else if ctx.showroom_vehicle_name.is_some() {
+            "ARRASTRA PARA GIRAR EL COCHE 3D"
+        } else {
+            "SIN MODELO 3D INSTALADO"
+        };
+        let hint_rect = Rect::new(0.68, 0.718, 0.295, 0.036);
+        let (hx, hy, hw, _) = ui::px(hint_rect, canvas);
+        ui::text_clipped(canvas, hx, hy, hw, hint_text, 0.52, DIM);
+
+        // Bottom horizontal dock background.
+        ui::fill(canvas, Rect::new(0.0, 0.758, 1.0, 0.242), [9, 12, 18, 205]);
+        ui::rule(canvas, 0.0, 0.758, 1.0, LINE);
+
+        // All 7 horizontal sections side-by-side.
+        for (idx, sec) in MainSection::ALL.iter().enumerate() {
+            let rect = self.main_section_rect(idx);
+            let active = idx == self.main_section;
+            let soon = sec.is_coming_soon();
+            let fill = if active {
+                [28, 36, 50, 240]
+            } else if soon {
+                [14, 17, 24, 215]
+            } else {
+                PANEL_ACTIVE
+            };
+            let border = if active {
+                ACCENT
+            } else if soon {
+                [38, 44, 56, 220]
+            } else {
+                LINE
+            };
+            ui::panel(canvas, rect, fill, border);
+            if active {
+                ui::fill(canvas, Rect::new(rect.x, rect.y, rect.w, 0.010), ACCENT);
+            }
+            let (rx, ry, rw, rh) = ui::px(rect, canvas);
+            let title = sec.title();
+            let base_scale = if active { 0.68 } else { 0.60 };
+            let needed = ui::texture_width(title, base_scale);
+            let fit = (rw - 8.0).max(1.0);
+            let t_scale = if needed > fit {
+                (base_scale * fit / needed).clamp(0.42, base_scale)
+            } else {
+                base_scale
+            };
+            let title_col = if soon && !active { DIM } else { TEXT };
+            let tw = ui::texture_width(title, t_scale);
+            canvas.text(
+                rx + (rw - tw).max(0.0) * 0.5,
+                ry + rh * 0.24,
+                title,
+                t_scale,
+                title_col,
+            );
+
+            let sub = if *sec == MainSection::Garage {
+                format!("{} COCHES", ctx.content.vehicles.len())
+            } else {
+                sec.subtitle().to_string()
+            };
+            let sub_col = if soon {
+                WARN
+            } else if active {
+                GOOD
+            } else {
+                INFO
+            };
+            let s_base = 0.46;
+            let s_needed = ui::texture_width(&sub, s_base);
+            let s_scale = if s_needed > fit {
+                (s_base * fit / s_needed).clamp(0.36, s_base)
+            } else {
+                s_base
+            };
+            let sw = ui::texture_width(&sub, s_scale);
+            canvas.text(
+                rx + (rw - sw).max(0.0) * 0.5,
+                ry + rh * 0.64,
+                &sub,
+                s_scale,
+                sub_col,
+            );
+        }
+    }
+
+    /// Transparent 3D Showroom Garage letting the user inspect ALL installed cars (drivable + visual-only).
+    fn draw_showroom_garage(&self, canvas: &mut Canvas, ctx: &Context, status: &str) {
+        // Top translucent bar.
+        ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 0.106), [10, 13, 19, 198]);
+        ui::rule(canvas, 0.0, 0.106, 1.0, LINE);
+
+        let indices = self.garage_indices(ctx);
+        let pos = indices
+            .iter()
+            .position(|&i| i == self.inspected_vehicle)
+            .unwrap_or(0);
+        let active_idx = indices.get(pos).copied().unwrap_or(0);
+        let entry = ctx.content.vehicles.get(active_idx);
+
+        // Top buttons: BACK, FILTER, DETAILS.
+        ui::button(canvas, Self::garage_back_rect(), "VOLVER", false, true);
+        let drivable_count = ctx
+            .content
+            .vehicles
+            .iter()
+            .filter(|v| v.capability(ctx.ngp_experimental) == DriveCapability::Drivable)
+            .count();
+        let visual_count = ctx
+            .content
+            .vehicles
+            .iter()
+            .filter(|v| v.capability(ctx.ngp_experimental) == DriveCapability::VisualOnly)
+            .count();
+        let filter_label = format!(
+            "FILTRO: {} ({}) · COND {} / VIS {}",
+            self.garage_filter.label(),
+            indices.len(),
+            drivable_count,
+            visual_count
+        );
+        ui::button(
+            canvas,
+            Self::garage_filter_rect(),
+            &filter_label,
+            false,
+            true,
+        );
+        ui::button(
+            canvas,
+            Self::garage_details_rect(),
+            "FICHA Y DIAGNÓSTICO",
+            false,
+            entry.is_some(),
+        );
+
+        // Bottom inspector dock.
+        ui::fill(canvas, Rect::new(0.0, 0.705, 1.0, 0.295), [9, 12, 18, 210]);
+        ui::rule(canvas, 0.0, 0.705, 1.0, LINE);
+
+        let can_nav = indices.len() > 1;
+        ui::button(canvas, Self::garage_prev_rect(), "<", false, can_nav);
+        ui::button(canvas, Self::garage_next_rect(), ">", false, can_nav);
+
+        let card = Rect::new(0.115, 0.720, 0.770, 0.228);
+        ui::panel(canvas, card, [16, 20, 28, 232], LINE);
+        let (cx, cy, cw, _) = ui::px(card, canvas);
+
+        if let Some(entry) = entry {
+            let cap = entry.capability(ctx.ngp_experimental);
+            let cap_color = match cap {
+                DriveCapability::Drivable => GOOD,
+                DriveCapability::VisualOnly => WARN,
+                DriveCapability::Unavailable => BAD,
+            };
+            let title = format!(
+                "{}  ({}/{})",
+                entry.descriptor.name,
+                pos + 1,
+                indices.len().max(1)
+            );
+            ui::text_clipped(canvas, cx + 12.0, cy + 8.0, cw * 0.62, &title, 0.96, TEXT);
+
+            let badge_rect = Rect::new(0.60, 0.732, 0.270, 0.044);
+            ui::panel(canvas, badge_rect, PANEL_DEEP, cap_color);
+            ui::text_center(canvas, badge_rect, cap.label(), 0.56, cap_color);
+
+            let cat = entry.descriptor.category.as_deref().unwrap_or("RBR / RSF");
+            let meta = format!(
+                "{} · {} · {}",
+                entry.classification.badge(),
+                cat,
+                entry.descriptor.model
+            );
+            ui::text_clipped(canvas, cx + 12.0, cy + 28.0, cw - 24.0, &meta, 0.58, DIM);
+
+            let state_line = if ctx.showroom_loading {
+                "CARGANDO MODELO 3D BAJO DEMANDA...".to_string()
+            } else if let Some(err) = ctx.showroom_error {
+                format!("VISUAL 3D NO DISPONIBLE: {err}")
+            } else if cap == DriveCapability::VisualOnly {
+                "SOLO VISUALIZACIÓN 3D · ARRASTRA PARA GIRAR (SIN FÍSICA INTEGRADA)".to_string()
+            } else if !status.is_empty() && status != "READY - TAP A ROW" {
+                status.to_string()
+            } else {
+                "ARRASTRA ARRIBA PARA GIRAR LA CÁMARA ALREDEDOR DEL COCHE".to_string()
+            };
+            let state_col = if ctx.showroom_error.is_some() {
+                BAD
+            } else if cap == DriveCapability::VisualOnly {
+                WARN
+            } else {
+                INFO
+            };
+            ui::text_clipped(
+                canvas,
+                cx + 12.0,
+                cy + 46.0,
+                cw * 0.54,
+                &state_line,
+                0.56,
+                state_col,
+            );
+
+            // Bottom-right contextual action button.
+            let action_rect = Self::garage_action_rect();
+            if cap == DriveCapability::Drivable {
+                if entry.descriptor.id == ctx.selection.vehicle.id {
+                    ui::panel(canvas, action_rect, [22, 68, 48, 235], GOOD);
+                    ui::text_center(canvas, action_rect, "ACTIVO · IR A TRAMOS", 0.68, TEXT);
+                } else {
+                    ui::panel(
+                        canvas,
+                        action_rect,
+                        [156, 30, 30, 238],
+                        [240, 110, 110, 255],
+                    );
+                    ui::text_center(canvas, action_rect, "SELECCIONAR PARA CONDUCIR", 0.64, TEXT);
+                }
+            } else if !ctx.ngp_experimental
+                && entry.descriptor.is_ngp_experimental_car()
+                && matches!(
+                    entry.classification,
+                    rerbr_content::VehicleClassification::RsfNgpVerified
+                        | rerbr_content::VehicleClassification::RsfNgpPartial
+                )
+            {
+                ui::panel(canvas, action_rect, [95, 62, 16, 235], WARN);
+                ui::text_center(canvas, action_rect, "ACTIVAR MODO NGP", 0.66, TEXT);
+            } else {
+                ui::panel(canvas, action_rect, PANEL_DEEP, LINE);
+                ui::text_center(canvas, action_rect, "SOLO VISUALIZACIÓN", 0.64, DIM);
+            }
+        } else {
+            ui::text_center(
+                canvas,
+                card,
+                "NO HAY COCHES DETECTADOS EN DOCUMENTS/RBR/CARS",
+                0.82,
+                WARN,
+            );
+        }
+    }
 }
 
 fn on_off(value: bool) -> &'static str {
@@ -2120,6 +2841,7 @@ pub struct Settings {
     pub codriver_volume: f64,
     pub camera: u8,
     pub vehicle_id: String,
+    pub last_driven_vehicle_id: Option<String>,
     pub stage_id: String,
     pub ngp_experimental: bool,
 }
@@ -2138,6 +2860,7 @@ impl Default for Settings {
             codriver_volume: 0.85,
             camera: 0,
             vehicle_id: rerbr_content::VehicleDescriptor::default().id,
+            last_driven_vehicle_id: None,
             stage_id: rerbr_content::StageDescriptor::default().id,
             ngp_experimental: false,
         }
@@ -2199,6 +2922,9 @@ impl Settings {
                 "vehicle_id" if !value.trim().is_empty() => {
                     settings.vehicle_id = value.trim().to_string();
                 }
+                "last_driven_vehicle_id" if !value.trim().is_empty() => {
+                    settings.last_driven_vehicle_id = Some(value.trim().to_string());
+                }
                 "stage_id" if !value.trim().is_empty() => {
                     settings.stage_id = value.trim().to_string();
                 }
@@ -2218,11 +2944,17 @@ impl Settings {
             .map_or_else(Self::default, |s| Self::parse(&s))
     }
     fn encode(&self) -> String {
-        format!(
+        let mut out = format!(
             "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nclutch_help={}\nvolume={}\nmusic_volume={}\ncodriver_volume={}\ncamera={}\nvehicle_id={}\nstage_id={}\nngp_experimental={}\n",
             self.sensitivity, self.dead_zone, self.fps, self.diagnostics,
             self.minimal_hud, self.invert_pedals, self.clutch_help, self.volume, self.music_volume, self.codriver_volume, self.camera, self.vehicle_id, self.stage_id, self.ngp_experimental
-        )
+        );
+        if let Some(id) = &self.last_driven_vehicle_id {
+            if !id.trim().is_empty() {
+                out.push_str(&format!("last_driven_vehicle_id={}\n", id.trim()));
+            }
+        }
+        out
     }
     pub fn save(&self) {
         if let Some(path) = Self::path() {
@@ -2283,6 +3015,12 @@ mod tests {
             record_outcome: None,
             run_splits_ms: &[],
             comparison_pb_splits_ms: None,
+            showroom_vehicle_name: Some("Toyota Corolla WRC"),
+            showroom_loading: false,
+            showroom_error: None,
+            title_pulse: 0.5,
+            transition_alpha: 0.0,
+            coming_soon_notice: None,
         }
     }
 
@@ -2292,21 +3030,39 @@ mod tests {
         let content = Catalog::descriptors(&selection);
         let ctx = context(&selection, &content);
         let mut menu = Menu::default();
-        let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 9);
-        assert!(rows[0].label.contains("SELECCIONAR COCHE"));
-        assert!(rows[1].label.contains("SELECCIONAR TRAMO"));
-        assert_eq!(rows[2].label, "INICIAR RALLY");
-        assert_eq!(rows[3].label, "CONFIGURACIÓN");
-        let start_rect = menu.row_rect_for(2, rows.len());
+        // Starts on Title Screen; tapping enters horizontal Main Menu.
+        assert_eq!(menu.page, Page::Title);
         assert_eq!(
-            menu.press(
-                start_rect.center_x() as f64,
-                start_rect.y as f64 + 0.01,
+            menu.press_with_ctx(0.5, 0.5, &ctx, &menu.rows(&ctx)),
+            Some(Command::EnterMainMenu)
+        );
+        menu.reset_to_main();
+        assert_eq!(menu.page, Page::Main);
+        let rows = menu.rows(&ctx);
+        assert_eq!(rows.len(), 7);
+        assert_eq!(rows[0].label, "CARRERA");
+        assert_eq!(rows[1].label, "CONTRARRELOJ");
+        assert_eq!(rows[2].label, "ONLINE");
+        assert_eq!(rows[3].label, "GARAJE");
+        assert_eq!(rows[4].label, "2ª MANO");
+        assert_eq!(rows[5].label, "ACADEMIA");
+        assert_eq!(rows[6].label, "AJUSTES");
+        // Quick drive button on horizontal main menu starts rally explicitly.
+        let drive_btn = Menu::main_quick_drive_rect();
+        assert_eq!(
+            menu.press_with_ctx(
+                drive_btn.center_x() as f64,
+                (drive_btn.y + drive_btn.h * 0.5) as f64,
+                &ctx,
                 &rows
             ),
             Some(Command::StartRally)
         );
+        // Open center viewport is touch-orbit zone and does NOT accidentally trigger menu buttons.
+        assert!(menu.is_showroom_orbit_zone(0.5, 0.45));
+        assert_eq!(menu.press_with_ctx(0.5, 0.45, &ctx, &rows), None);
+
+        // Drive hub retains explicit StartRally.
         menu.open(Page::Drive);
         let drive = menu.rows(&ctx);
         let start_row = drive
@@ -2378,7 +3134,7 @@ mod tests {
             ..Menu::default()
         };
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 15);
+        assert_eq!(rows.len(), 18);
         for (row_idx, value, expected_down, expected_up) in [
             (0usize, "2.00", Command::SensDown, Command::SensUp),
             (3usize, "80%", Command::VolumeDown, Command::VolumeUp),
@@ -2737,7 +3493,8 @@ mod tests {
         let ctx = context(&selection, &content);
         let mut menu = Menu::default();
 
-        // 1. Enter and exit all submenus
+        // 1. Enter and exit all submenus from Main
+        menu.reset_to_main();
         for page in [
             Page::Garage,
             Page::Stages,
@@ -2838,6 +3595,7 @@ mod tests {
         let ctx = context(&selection, &content);
 
         let all_pages = [
+            Page::Title,
             Page::Main,
             Page::Loading,
             Page::Drive,
@@ -2861,22 +3619,46 @@ mod tests {
             Page::SchoolResult,
         ];
 
-        for page in all_pages {
-            let menu = Menu {
-                page,
-                ..Menu::default()
-            };
-            let mut canvas = Canvas::new((1024, 768));
-            menu.draw(&mut canvas, &ctx, "PRUEBA ESTADO HUD");
-            let bytes = canvas.finish();
-            assert!(
-                bytes.len() / 20 <= MAX_CANVAS_VERTICES,
-                "Page {:?} exceeded vertex budget: {} > {}",
-                page,
-                bytes.len() / 20,
-                MAX_CANVAS_VERTICES
-            );
+        // Verify both iPad mini A17 Pro (1024x768) and iPhone 15 wide landscape (2556x1179).
+        for size in [(1024, 768), (2556, 1179)] {
+            for page in all_pages {
+                let menu = Menu {
+                    page,
+                    ..Menu::default()
+                };
+                let mut canvas = Canvas::new(size);
+                menu.draw(&mut canvas, &ctx, "PRUEBA ESTADO HUD");
+                let bytes = canvas.finish();
+                assert!(
+                    bytes.len() / 20 <= MAX_CANVAS_VERTICES,
+                    "Page {:?} at {:?} exceeded vertex budget: {} > {}",
+                    page,
+                    size,
+                    bytes.len() / 20,
+                    MAX_CANVAS_VERTICES
+                );
+            }
         }
+    }
+
+    #[test]
+    fn settings_persists_last_driven_vehicle_id_independently() {
+        let s = Settings {
+            vehicle_id: "ford-focus-rs-wrc-2006".into(),
+            last_driven_vehicle_id: Some("rsf-toyota-gr-yaris-rally2".into()),
+            ..Default::default()
+        };
+        let encoded = s.encode();
+        let parsed = Settings::parse(&encoded);
+        assert_eq!(parsed.vehicle_id, "ford-focus-rs-wrc-2006");
+        assert_eq!(
+            parsed.last_driven_vehicle_id.as_deref(),
+            Some("rsf-toyota-gr-yaris-rally2")
+        );
+        // Legacy settings without `last_driven_vehicle_id` parse cleanly as None.
+        let legacy = Settings::parse("vehicle_id=toyota-corolla-wrc\nstage_id=harwood-forest\n");
+        assert_eq!(legacy.vehicle_id, "toyota-corolla-wrc");
+        assert_eq!(legacy.last_driven_vehicle_id, None);
     }
 
     #[test]

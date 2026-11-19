@@ -713,6 +713,156 @@ fn build_missing_pack_entry(
     })
 }
 
+/// Scans `Documents/RBR/Cars/*` directly for any installed 3D `.sgc` car folders that are not
+/// yet represented in `existing_models` (e.g. RallySimFans models copied to the iPad without
+/// `rsfdata/` or without integrated NGP physics packs).
+/// All entries returned here are strictly `VehicleClassification::VisualInspectionOnly` so they
+/// can be showcased in the Title Screen and 3D Garage without ever enabling unverified driving.
+pub fn discover_visual_car_folders(
+    rbr_root: &Path,
+    existing_models: &BTreeSet<String>,
+    existing_ids: &mut BTreeSet<String>,
+) -> Vec<DiscoveredRsfVehicle> {
+    let Some(cars_dir) = cars::resolve(rbr_root, "Cars").filter(|p| p.is_dir()) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&cars_dir) else {
+        return Vec::new();
+    };
+    let mut folders: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    folders.sort();
+
+    // Optional pretty-name lookup from RSF `carmodels.json` + `cars.json` if present.
+    let mut folder_names: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
+    if let Ok(install) = rsf::Install::open(rbr_root) {
+        for car in &install.cars {
+            if let Some(cm) = install.models.iter().find(|m| m.id == car.model) {
+                folder_names
+                    .entry(cm.path.to_ascii_lowercase())
+                    .or_insert_with(|| (car.name.clone(), car.group.clone()));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for folder_path in folders {
+        let Some(folder_name) = folder_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let sgc_path = std::fs::read_dir(&folder_path)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("sgc")));
+        let Some(sgc_path) = sgc_path else {
+            continue;
+        };
+        let Some(stem) = sgc_path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let model_rel = format!("Cars/{folder_name}/{stem}.sgc");
+        if existing_models.contains(&model_rel.to_ascii_lowercase()) {
+            continue;
+        }
+        let parts_rel = format!("Cars/{folder_name}/{stem}.ini");
+        let shaders_rel = format!("Cars/{folder_name}/{stem}_shaders.ini");
+        let clear_rel = format!("Cars/{folder_name}/{stem}_shader_settings_clear.ini");
+        let overcast_rel = format!("Cars/{folder_name}/{stem}_shader_settings_overcast.ini");
+        if cars::resolve(rbr_root, &parts_rel).is_none()
+            || cars::resolve(rbr_root, &shaders_rel).is_none()
+        {
+            continue;
+        }
+        let settings_rel = if cars::resolve(rbr_root, &clear_rel).is_some() {
+            clear_rel
+        } else if cars::resolve(rbr_root, &overcast_rel).is_some() {
+            overcast_rel
+        } else {
+            continue;
+        };
+
+        let (display_name, category) = folder_names
+            .get(&folder_name.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_else(|| (prettify_folder_name(folder_name), Some("RSF VISUAL".into())));
+        let mut id = slugify_id(&display_name);
+        dedup_id(&mut id, existing_ids);
+
+        let required_textures = collect_shader_textures(rbr_root, &shaders_rel);
+        let descriptor = VehicleDescriptor {
+            id,
+            name: display_name,
+            original_slot: car_pack::SLOT,
+            tyre_type: 4,
+            forward_gears: 5,
+            index: "Cars/Cars.ini".into(),
+            model: model_rel,
+            parts: parts_rel,
+            shaders: shaders_rel,
+            shader_settings: settings_rel,
+            required_textures,
+            optional_textures: Vec::new(),
+            audio_index: "AudioFMOD/SIN_BANCO_FMOD.bank".into(),
+            category,
+            rsf_pack: None,
+        };
+        if descriptor.validate_schema().is_ok() {
+            out.push(DiscoveredRsfVehicle {
+                descriptor,
+                classification: VehicleClassification::VisualInspectionOnly,
+                tech_sheet: None,
+                drivetrain: None,
+                year: None,
+                fmod_bank: None,
+                fmod_present: false,
+                using_fallback_model: false,
+                model_missing: false,
+                pack_missing: true,
+                notes: vec![
+                    "SOLO VISUALIZACIÓN 3D — SIN FÍSICA NGP INTEGRADA".into(),
+                    format!("MODELO EN Cars/{folder_name}/{stem}.sgc"),
+                ],
+            });
+        }
+    }
+    out.sort_by(|a, b| a.descriptor.name.cmp(&b.descriptor.name));
+    out
+}
+
+fn prettify_folder_name(raw: &str) -> String {
+    raw.replace(['_', '-'], " ")
+        .split_whitespace()
+        .map(|tok| {
+            let mut chars = tok.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(_)
+                    if tok
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) =>
+                {
+                    tok.to_string()
+                }
+                Some(first) => {
+                    let mut s = String::new();
+                    for u in first.to_uppercase() {
+                        s.push(u);
+                    }
+                    s.push_str(chars.as_str());
+                    s
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

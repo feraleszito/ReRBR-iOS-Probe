@@ -239,16 +239,24 @@ fn convert_set(
                 .position(|m| m.shader == block.shader && m.name == mat_name)
             {
                 Some(i) => i,
-                None => {
-                    let i = result.materials.len();
-                    result.materials.push(materials::resolve(
-                        shaders,
-                        settings,
-                        &block.shader,
-                        mat_name,
-                    )?);
-                    i
-                }
+                None => match materials::resolve(shaders, settings, &block.shader, mat_name) {
+                    Ok(mat) => {
+                        let i = result.materials.len();
+                        result.materials.push(mat);
+                        i
+                    }
+                    Err(err)
+                        if allow_material_override
+                            && (mat_name.eq_ignore_ascii_case("Default Material")
+                                || block.shader.trim().is_empty()) =>
+                    {
+                        result
+                            .skipped
+                            .push((format!("{}::{mat_name}", mesh.node.name), err));
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                },
             };
             let start = face.start_index as usize;
             let triangles = if start.is_multiple_of(3) {

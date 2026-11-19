@@ -58,6 +58,20 @@ pub struct Mounts {
     pub cockpit: Mount,
 }
 impl Mounts {
+    /// Safe geometric fallback mounts used purely for visual-only showroom cars whose `.ini`
+    /// omits standard camera sections. Never alters driving camera mounts when present.
+    pub fn fallback() -> Self {
+        Self {
+            bonnet: Mount {
+                eye: Vec3::new(0.0, 1.05, 0.35),
+                target: Vec3::new(0.0, 0.95, 5.0),
+            },
+            cockpit: Mount {
+                eye: Vec3::new(-0.32, 1.05, -0.15),
+                target: Vec3::new(-0.32, 0.98, 5.0),
+            },
+        }
+    }
     pub fn parse(parts: &[Section]) -> Result<Self, String> {
         let mount = |name: &str| -> Result<Mount, String> {
             let part = parts

@@ -245,6 +245,64 @@ impl Gpu {
         steering_angle: f32,
         fov_degrees: Option<f32>,
     ) {
+        self.draw_internal(
+            queue,
+            encoder,
+            target,
+            depth,
+            size,
+            format,
+            frame,
+            interior,
+            steering_angle,
+            fov_degrees,
+            false,
+        );
+    }
+
+    #[cfg(feature = "physics-drive")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_showroom(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        size: (u32, u32),
+        format: wgpu::TextureFormat,
+        frame: &Frame,
+        fov_degrees: f32,
+    ) {
+        self.draw_internal(
+            queue,
+            encoder,
+            target,
+            depth,
+            size,
+            format,
+            frame,
+            false,
+            0.0,
+            Some(fov_degrees),
+            true,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_internal(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        size: (u32, u32),
+        format: wgpu::TextureFormat,
+        frame: &Frame,
+        interior: bool,
+        steering_angle: f32,
+        fov_degrees: Option<f32>,
+        studio_lighting: bool,
+    ) {
         let aspect = size.0 as f32 / size.1 as f32;
         let vp = fov_degrees.map_or_else(
             || super::placement::view_projection(frame.camera, aspect),
@@ -270,9 +328,14 @@ impl Gpu {
                 .flat_map(f32::to_ne_bytes),
         );
         bytes.extend(
-            [u32::from(format.is_srgb()), 0, 0, 0]
-                .into_iter()
-                .flat_map(u32::to_ne_bytes),
+            [
+                u32::from(format.is_srgb()),
+                u32::from(studio_lighting),
+                0,
+                0,
+            ]
+            .into_iter()
+            .flat_map(u32::to_ne_bytes),
         );
         queue.write_buffer(&self.uniform, 0, &bytes);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

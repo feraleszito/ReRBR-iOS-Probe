@@ -24,6 +24,8 @@ pub(crate) struct Scene {
     pending: Option<mpsc::Receiver<Result<Payload, String>>>,
     #[cfg(feature = "physics-drive")]
     loader: crate::driving::loading::Loader<(crate::car::runtime::Uploaded, Block)>,
+    #[cfg(feature = "physics-drive")]
+    showroom: crate::car::showroom::Showroom,
     gpu: Option<Block>,
     failed: bool,
     mode: u32,
@@ -44,6 +46,8 @@ impl Scene {
             pending: None,
             #[cfg(feature = "physics-drive")]
             loader: crate::driving::loading::Loader::default(),
+            #[cfg(feature = "physics-drive")]
+            showroom: crate::car::showroom::Showroom::default(),
             gpu: None,
             failed: false,
             mode: 0,
@@ -167,6 +171,8 @@ impl Scene {
                         selection,
                         experimental_ngp,
                     } => {
+                        // Release 3D showroom GPU resources immediately before loading a driving stage.
+                        self.showroom.unload();
                         let device = device.clone();
                         let queue = queue.clone();
                         self.loader.request(Box::new(move |cancel| {
@@ -260,29 +266,61 @@ impl Scene {
                 format,
             );
         } else {
-            let color = if self.failed {
-                wgpu::Color {
-                    r: 0.3,
-                    g: 0.0,
-                    b: 0.03,
-                    a: 1.0,
+            #[cfg(feature = "physics-drive")]
+            let drew_showroom = if !self.failed && self.benchmark.driving.is_showroom_page() {
+                if let Some((mode, primary, fallbacks)) = self.benchmark.driving.showroom_request()
+                {
+                    self.benchmark.driving.showroom_camera.set_mode(mode);
+                    self.showroom
+                        .ensure_vehicle(device, queue, format, &primary, fallbacks);
+                } else {
+                    self.showroom.unload();
                 }
+                self.showroom.draw(
+                    device,
+                    queue,
+                    encoder,
+                    target,
+                    size,
+                    format,
+                    &mut self.benchmark.driving.showroom_camera,
+                );
+                self.benchmark.driving.sync_showroom_status(
+                    self.showroom.active_vehicle_id(),
+                    self.showroom.loading,
+                    self.showroom.last_error.as_deref(),
+                );
+                true
             } else {
-                background
+                false
             };
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("harwood loading/error background"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
+            #[cfg(not(feature = "physics-drive"))]
+            let drew_showroom = false;
+            if !drew_showroom {
+                let color = if self.failed {
+                    wgpu::Color {
+                        r: 0.3,
+                        g: 0.0,
+                        b: 0.03,
+                        a: 1.0,
+                    }
+                } else {
+                    background
+                };
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("harwood loading/error background"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(color),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+            }
         }
         #[cfg(feature = "harwood-benchmark")]
         self.benchmark
