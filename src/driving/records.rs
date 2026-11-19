@@ -12,11 +12,12 @@ use std::{
     collections::BTreeMap,
     fmt::Write as _,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub const RECORDS_SCHEMA_VERSION: u32 = 1;
 pub const RULES_VERSION_PREFIX: &str = "rules-v1";
+pub const SPLIT_BANNER_DURATION_SECS: f64 = 4.0;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RecordKey {
@@ -147,10 +148,165 @@ impl RunSubmission {
         if self.splits_passed < self.splits_total {
             return Err("CHECKPOINTS OMITTED");
         }
+        if self.splits_total > 0 && !self.splits_ms.is_empty() {
+            if self.splits_ms.len() != self.splits_total {
+                return Err("INCOMPLETE SPLIT RECORD");
+            }
+            if self.splits_ms.windows(2).any(|w| w[1] < w[0]) {
+                return Err("OUT-OF-ORDER SPLITS");
+            }
+        }
         if self.driving_ms == 0 || self.total_ms() == 0 {
             return Err("ZERO SIMULATION TIME");
         }
         Ok(())
+    }
+}
+
+/// Temporary in-race HUD banner shown when the car crosses an original `.dls` split marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitBanner {
+    /// 1-based split index (`1..=splits_total`).
+    pub split_number: usize,
+    pub splits_total: usize,
+    /// Cumulative split time from stage start in milliseconds (720 Hz simulation time).
+    pub cumulative_ms: u64,
+    /// Signed delta vs the stored PB run's split at the exact same index
+    /// (`cumulative_ms - pb_split_ms`). Negative means faster (green), positive means slower (red).
+    pub delta_ms: Option<i64>,
+}
+
+impl SplitBanner {
+    pub fn headline(&self) -> String {
+        match self.delta_ms {
+            Some(delta) => format!(
+                "PARCIAL {} — {} — {}",
+                self.split_number,
+                format_time_ms(self.cumulative_ms),
+                format_split_delta_ms(delta)
+            ),
+            None => format!(
+                "PARCIAL {} — {}",
+                self.split_number,
+                format_time_ms(self.cumulative_ms)
+            ),
+        }
+    }
+
+    /// `Some(true)` if faster/equal to PB split, `Some(false)` if slower, `None` without PB split.
+    pub fn is_faster(&self) -> Option<bool> {
+        self.delta_ms.map(|d| d <= 0)
+    }
+}
+
+/// Per-run sequential intermediate split tracker driven by authentic 720 Hz `StageTiming`.
+/// Supports any split count `0..=16` dynamically from `.dls` markers without hardcoding 2.
+#[derive(Debug, Clone, Default)]
+pub struct SplitTracker {
+    splits_total: usize,
+    recorded_ms: Vec<u64>,
+    active_banner: Option<(SplitBanner, Instant)>,
+    order_violation: bool,
+}
+
+impl SplitTracker {
+    pub fn reset(&mut self) {
+        self.splits_total = 0;
+        self.recorded_ms.clear();
+        self.active_banner = None;
+        self.order_violation = false;
+    }
+
+    pub fn recorded_ms(&self) -> &[u64] {
+        &self.recorded_ms
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn splits_total(&self) -> usize {
+        self.splits_total
+    }
+
+    pub fn has_order_violation(&self) -> bool {
+        self.order_violation
+    }
+
+    pub fn active_banner(&self, now: Instant) -> Option<&SplitBanner> {
+        self.active_banner
+            .as_ref()
+            .and_then(|(banner, until)| (now < *until).then_some(banner))
+    }
+
+    /// Synchronizes live simulation split state. Each split can fire at most once and strictly
+    /// in ascending order; lingering on a split marker never produces duplicates.
+    pub fn sync(
+        &mut self,
+        now: Instant,
+        splits_passed: usize,
+        splits_total: usize,
+        split_times_s: &[Option<f64>],
+        fallback_elapsed_s: Option<f64>,
+        pb_splits_ms: Option<&[u64]>,
+    ) -> Option<SplitBanner> {
+        self.splits_total = splits_total;
+        if splits_total == 0 {
+            return None;
+        }
+        if splits_passed > splits_total {
+            self.order_violation = true;
+            return None;
+        }
+        // Detect out-of-order marker timestamps (a later split stamped while an earlier split is missing).
+        for idx in self.recorded_ms.len()..splits_total {
+            if split_times_s.get(idx).copied().flatten().is_none()
+                && split_times_s
+                    .get(idx + 1..splits_total)
+                    .is_some_and(|tail| tail.iter().any(Option::is_some))
+            {
+                self.order_violation = true;
+                return None;
+            }
+        }
+        if splits_passed <= self.recorded_ms.len() {
+            return None;
+        }
+        let mut latest = None;
+        while self.recorded_ms.len() < splits_passed {
+            let idx = self.recorded_ms.len();
+            let secs = split_times_s
+                .get(idx)
+                .copied()
+                .flatten()
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .or_else(|| fallback_elapsed_s.filter(|v| v.is_finite() && *v > 0.0));
+            let Some(secs) = secs else {
+                break;
+            };
+            let cumulative_ms = (secs * 1000.0).round().max(1.0) as u64;
+            if let Some(&prev_ms) = self.recorded_ms.last() {
+                if cumulative_ms < prev_ms {
+                    self.order_violation = true;
+                    break;
+                }
+            }
+            self.recorded_ms.push(cumulative_ms);
+            // Strictly compare against the stored PB run's own split at the exact same index.
+            let delta_ms = pb_splits_ms
+                .and_then(|pb| pb.get(idx).copied())
+                .filter(|&pb_ms| pb_ms > 0)
+                .map(|pb_ms| (cumulative_ms as i64) - (pb_ms as i64));
+            let banner = SplitBanner {
+                split_number: idx + 1,
+                splits_total,
+                cumulative_ms,
+                delta_ms,
+            };
+            self.active_banner = Some((
+                banner.clone(),
+                now + Duration::from_secs_f64(SPLIT_BANNER_DURATION_SECS),
+            ));
+            latest = Some(banner);
+        }
+        latest
     }
 }
 
@@ -504,6 +660,16 @@ pub fn format_delta_ms(delta_ms: i64) -> String {
     }
 }
 
+/// Formats a split delta in standard rally `±MM:SS.mmm` format (e.g. `-00:02.310`, `+00:01.420`).
+pub fn format_split_delta_ms(delta_ms: i64) -> String {
+    let sign = if delta_ms < 0 { "-" } else { "+" };
+    let abs = delta_ms.unsigned_abs();
+    let mins = abs / 60_000;
+    let secs = (abs % 60_000) / 1000;
+    let millis = abs % 1000;
+    format!("{sign}{mins:02}:{secs:02}.{millis:03}")
+}
+
 fn current_platform() -> &'static str {
     if cfg!(target_os = "ios") {
         "ios"
@@ -787,5 +953,254 @@ mod tests {
         assert_eq!(format_time_ms(210_000), "03:30.000");
         assert_eq!(format_delta_ms(-1_250), "-1.250s");
         assert_eq!(format_delta_ms(65_020), "+1:05.020");
+        assert_eq!(format_split_delta_ms(-2_310), "-00:02.310");
+        assert_eq!(format_split_delta_ms(65_020), "+01:05.020");
+    }
+
+    #[test]
+    fn split_tracker_records_in_order_prevents_duplicates_and_compares_pb() {
+        let mut tracker = SplitTracker::default();
+        let t0 = Instant::now();
+        let pb_splits = [84_650u64, 171_230u64];
+
+        // Before split 1: nothing triggers.
+        assert!(tracker
+            .sync(t0, 0, 2, &[None, None], Some(40.0), Some(&pb_splits))
+            .is_none());
+        assert!(tracker.active_banner(t0).is_none());
+
+        // Cross split 1 (slower by +1.100s).
+        let b1 = tracker
+            .sync(
+                t0 + Duration::from_secs(1),
+                1,
+                2,
+                &[Some(85.750), None],
+                Some(85.750),
+                Some(&pb_splits),
+            )
+            .expect("split 1 banner");
+        assert_eq!(b1.split_number, 1);
+        assert_eq!(b1.cumulative_ms, 85_750);
+        assert_eq!(b1.delta_ms, Some(1_100));
+        assert_eq!(b1.is_faster(), Some(false));
+        assert_eq!(b1.headline(), "PARCIAL 1 — 01:25.750 — +00:01.100");
+        assert!(tracker.active_banner(t0 + Duration::from_secs(2)).is_some());
+        assert!(tracker.active_banner(t0 + Duration::from_secs(6)).is_none());
+
+        // Lingering on split 1 for multiple ticks must NEVER trigger a duplicate.
+        assert!(tracker
+            .sync(
+                t0 + Duration::from_secs(2),
+                1,
+                2,
+                &[Some(85.750), None],
+                Some(86.200),
+                Some(&pb_splits),
+            )
+            .is_none());
+        assert_eq!(tracker.recorded_ms(), &[85_750]);
+
+        // Cross split 2 (faster by -2.310s vs PB split 2).
+        let b2 = tracker
+            .sync(
+                t0 + Duration::from_secs(10),
+                2,
+                2,
+                &[Some(85.750), Some(168.920)],
+                Some(168.920),
+                Some(&pb_splits),
+            )
+            .expect("split 2 banner");
+        assert_eq!(b2.split_number, 2);
+        assert_eq!(b2.cumulative_ms, 168_920);
+        assert_eq!(b2.delta_ms, Some(-2_310));
+        assert_eq!(b2.is_faster(), Some(true));
+        assert_eq!(b2.headline(), "PARCIAL 2 — 02:48.920 — -00:02.310");
+        assert_eq!(tracker.recorded_ms(), &[85_750, 168_920]);
+        assert!(!tracker.has_order_violation());
+    }
+
+    #[test]
+    fn split_tracker_without_pb_and_variable_split_counts() {
+        let mut tracker = SplitTracker::default();
+        let t0 = Instant::now();
+
+        // 0-split stage works cleanly.
+        assert!(tracker.sync(t0, 0, 0, &[], Some(30.0), None).is_none());
+        assert!(!tracker.has_order_violation());
+
+        // 3-split stage without prior PB shows cumulative times with no delta.
+        let b1 = tracker
+            .sync(t0, 1, 3, &[Some(84.650), None, None], None, None)
+            .expect("split 1");
+        assert_eq!(b1.headline(), "PARCIAL 1 — 01:24.650");
+        assert_eq!(b1.is_faster(), None);
+
+        let b2 = tracker
+            .sync(t0, 2, 3, &[Some(84.650), Some(150.0), None], None, None)
+            .expect("split 2");
+        assert_eq!(b2.headline(), "PARCIAL 2 — 02:30.000");
+
+        let b3 = tracker
+            .sync(
+                t0,
+                3,
+                3,
+                &[Some(84.650), Some(150.0), Some(215.5)],
+                None,
+                None,
+            )
+            .expect("split 3");
+        assert_eq!(b3.headline(), "PARCIAL 3 — 03:35.500");
+        assert_eq!(tracker.recorded_ms(), &[84_650, 150_000, 215_500]);
+    }
+
+    #[test]
+    fn split_tracker_and_submission_reject_out_of_order_and_never_mix_independent_sectors() {
+        let mut tracker = SplitTracker::default();
+        let t0 = Instant::now();
+        // Out-of-order: split 2 stamped while split 1 is missing -> rejected.
+        assert!(tracker
+            .sync(t0, 1, 2, &[None, Some(120.0)], None, None)
+            .is_none());
+        assert!(tracker.has_order_violation());
+
+        // Non-monotonic splits in submission are rejected.
+        let mut bad_order = sample_submission(200_000);
+        bad_order.splits_ms = vec![90_000, 80_000];
+        assert_eq!(bad_order.validate(), Err("OUT-OF-ORDER SPLITS"));
+
+        // 0-split stage submission is valid.
+        let mut zero_splits = sample_submission(120_000);
+        zero_splits.splits_ms.clear();
+        zero_splits.splits_passed = 0;
+        zero_splits.splits_total = 0;
+        assert!(zero_splits.validate().is_ok());
+
+        // Slower overall run with a faster Split 1 MUST NOT overwrite PB's splits_ms.
+        let mut store = RecordStore::new();
+        let mut pb_run = sample_submission(210_000);
+        pb_run.splits_ms = vec![75_000, 145_000];
+        assert!(store.submit(&pb_run).is_new_best);
+
+        let mut slower_with_fast_s1 = sample_submission(215_000);
+        slower_with_fast_s1.splits_ms = vec![70_000, 150_000];
+        let out = store.submit(&slower_with_fast_s1);
+        assert!(out.valid);
+        assert!(!out.is_new_best);
+        assert_eq!(
+            store.get(&pb_run.key).unwrap().splits_ms,
+            vec![75_000, 145_000]
+        );
+    }
+
+    #[test]
+    fn backwards_compatible_reload_of_legacy_v1_record_without_splits() {
+        let run = sample_submission(218_000);
+        let legacy_json = format!(
+            r#"{{
+  "schema_version": 1,
+  "records": [
+    {{"car_id":"{}","car_name":"{}","stage_id":"{}","stage_name":"{}","stage_variant":"{}","surface":"{}","physics_version":"{}","rules_version":"{}","best_total_ms":225000,"driving_ms":225000,"penalty_ms":0,"false_start":false,"splits_ms":[],"splits_passed":2,"splits_total":2,"attempts":1,"platform":"ios","recorded_unix_s":1700000000}}
+  ]
+}}"#,
+            run.key.car_id,
+            run.car_name,
+            run.key.stage_id,
+            run.stage_name,
+            run.key.stage_variant,
+            run.key.surface,
+            run.key.physics_version,
+            run.key.rules_version
+        );
+        let mut store = RecordStore::from_json(&legacy_json).expect("legacy JSON must load");
+        assert_eq!(store.len(), 1);
+        let existing = store.get(&run.key).expect("legacy PB key match");
+        assert!(existing.splits_ms.is_empty());
+
+        // SplitTracker against empty legacy PB splits produces no fake delta.
+        let mut tracker = SplitTracker::default();
+        let b1 = tracker
+            .sync(
+                Instant::now(),
+                1,
+                2,
+                &[Some(72.5)],
+                None,
+                Some(&existing.splits_ms),
+            )
+            .unwrap();
+        assert_eq!(b1.delta_ms, None);
+
+        // Faster run upgrades stored PB cleanly with real splits.
+        let out = store.submit(&run);
+        assert!(out.is_new_best);
+        assert_eq!(store.get(&run.key).unwrap().splits_ms, run.splits_ms);
+    }
+
+    #[test]
+    fn authentic_timekeeper_fires_diamond_creek_dls_splits_in_order_if_pc_present() {
+        let dls_path = Path::new(r"C:\Richard Burns Rally\Maps\track-63_O.dls");
+        if !dls_path.is_file() {
+            return;
+        }
+        let bytes = std::fs::read(dls_path).unwrap();
+        let mk = rerbr_sim::rbr_formats::markers::parse(&bytes).unwrap();
+        let mut tk = rerbr_sim::rbr_gameplay::timing::TimeKeeper::load(&mk);
+        let dt = 1.0_f32 / 720.0;
+        let mut t = rerbr_sim::rbr_gameplay::timing::CLOCK_START;
+        let splits: Vec<f32> = tk.card.splits().iter().map(|s| s.distance).collect();
+        assert_eq!(splits.len(), 2, "Diamond Creek I has 2 authentic splits");
+        assert!(splits[0] > tk.card.start && splits[1] > splits[0] && tk.card.finish > splits[1]);
+
+        let mut tracker = SplitTracker::default();
+        let now = Instant::now();
+        let mut banner_events = Vec::new();
+        // Drive forward at 30 m/s from start through split 1, linger at split 1, then through split 2 and finish.
+        let mut dist = 0.0_f32;
+        for step in 0..200_000u32 {
+            t = rerbr_sim::rbr_gameplay::timing::advance_time(t, dt, true);
+            // Linger near split 1 for 500 steps (~0.7s) to verify zero duplicate triggers.
+            if (dist - splits[0]).abs() > 0.5 || step % 2 == 0 {
+                dist += 30.0 * dt;
+            }
+            let (next_tk, _cp) = tk.record(dist, t, dt);
+            tk = next_tk;
+            let split_times: Vec<Option<f64>> = tk
+                .card
+                .splits()
+                .iter()
+                .map(|s| {
+                    s.time
+                        .filter(|&st| tk.card.started && st >= tk.card.origin)
+                        .map(|st| st - tk.card.origin)
+                })
+                .collect();
+            if let Some(banner) = tracker.sync(
+                now,
+                tk.card.passed,
+                tk.card.splits().len(),
+                &split_times,
+                None,
+                None,
+            ) {
+                banner_events.push(banner);
+            }
+            if tk.card.finish_time.is_some() {
+                break;
+            }
+        }
+        assert!(tk.card.finish_time.is_some());
+        assert_eq!(tk.card.passed, 2);
+        assert_eq!(
+            banner_events.len(),
+            2,
+            "each split must fire exactly once even when lingering"
+        );
+        assert_eq!(banner_events[0].split_number, 1);
+        assert_eq!(banner_events[1].split_number, 2);
+        assert!(banner_events[1].cumulative_ms > banner_events[0].cumulative_ms);
+        assert!(!tracker.has_order_violation());
     }
 }

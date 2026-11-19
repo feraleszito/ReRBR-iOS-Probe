@@ -308,6 +308,8 @@ struct GpuDraw {
     bounds: super::mesh::Bounds,
     #[cfg(feature = "physics-stage")]
     cutout: bool,
+    #[cfg(feature = "physics-stage")]
+    category: super::mesh::DrawCategory,
 }
 struct Block {
     pipeline: wgpu::RenderPipeline,
@@ -477,35 +479,27 @@ impl Block {
         }
         let white = solid(device, queue, [255; 4]);
         let transparent = solid(device, queue, [0; 4]);
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("harwood wrap/trilinear"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            ..Default::default()
-        });
+        let make_sampler = |label, address| {
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some(label),
+                address_mode_u: address,
+                address_mode_v: address,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
+                ..Default::default()
+            })
+        };
+        let wrap_sampler = make_sampler("harwood wrap/trilinear", wgpu::AddressMode::Repeat);
+        let mirror_sampler =
+            make_sampler("harwood mirror/trilinear", wgpu::AddressMode::MirrorRepeat);
+        let clamp_sampler = make_sampler("harwood clamp/trilinear", wgpu::AddressMode::ClampToEdge);
         let mut draws = Vec::new();
         for draw in &data.mesh.draws {
-            let object_sampler;
-            let sampler = if draw.cutout {
-                let address = match draw.address {
-                    2 => wgpu::AddressMode::MirrorRepeat,
-                    3 => wgpu::AddressMode::ClampToEdge,
-                    _ => wgpu::AddressMode::Repeat,
-                };
-                object_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                    address_mode_u: address,
-                    address_mode_v: address,
-                    mag_filter: wgpu::FilterMode::Linear,
-                    min_filter: wgpu::FilterMode::Linear,
-                    mipmap_filter: wgpu::MipmapFilterMode::Linear,
-                    ..Default::default()
-                });
-                &object_sampler
-            } else {
-                &sampler
+            let sampler = match draw.address {
+                2 => &mirror_sampler,
+                3 => &clamp_sampler,
+                _ => &wrap_sampler,
             };
             let get = |id: Option<u32>,
                        fallback: &wgpu::TextureView|
@@ -545,6 +539,8 @@ impl Block {
                 bounds: super::stage::draw_bounds(&data.mesh, draw),
                 #[cfg(feature = "physics-stage")]
                 cutout: draw.cutout,
+                #[cfg(feature = "physics-stage")]
+                category: draw.category,
             });
         }
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -655,6 +651,26 @@ impl Block {
                 .flat_map(u32::to_ne_bytes),
         );
         queue.write_buffer(&self.uniform, 0, &bytes);
+        #[cfg(feature = "physics-stage")]
+        let stage_clear = if srgb {
+            wgpu::Color {
+                r: 0.34,
+                g: 0.51,
+                b: 0.71,
+                a: 1.0,
+            }
+        } else {
+            wgpu::Color {
+                r: 0.62,
+                g: 0.74,
+                b: 0.86,
+                a: 1.0,
+            }
+        };
+        #[cfg(not(feature = "physics-stage"))]
+        let stage_clear = background;
+        #[cfg(feature = "physics-stage")]
+        let _ = background;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("harwood real block"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -662,7 +678,7 @@ impl Block {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(background),
+                    load: wgpu::LoadOp::Clear(stage_clear),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -681,11 +697,19 @@ impl Block {
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
         #[cfg(feature = "physics-stage")]
-        let mut submitted = (0usize, 0usize);
+        let (mut submitted_draws, mut submitted_tris) = (0usize, 0usize);
+        #[cfg(feature = "physics-stage")]
+        let (mut near_draws, mut far_draws, mut horizon_draws, mut object_draws) =
+            (0usize, 0usize, 0usize, 0usize);
         for draw in &self.draws {
             #[cfg(feature = "physics-stage")]
             {
-                if !super::stage::visible(draw.bounds, vp, self.camera.eye) {
+                if !super::stage::visible_for_category(
+                    draw.bounds,
+                    vp,
+                    self.camera.eye,
+                    draw.category,
+                ) {
                     continue;
                 }
                 pass.set_pipeline(if draw.cutout {
@@ -693,15 +717,30 @@ impl Block {
                 } else {
                     &self.pipeline
                 });
-                submitted.0 += 1;
-                submitted.1 += draw.indices.len() / 3;
+                submitted_draws += 1;
+                submitted_tris += draw.indices.len() / 3;
+                match draw.category {
+                    super::mesh::DrawCategory::TerrainNear => near_draws += 1,
+                    super::mesh::DrawCategory::TerrainFar => far_draws += 1,
+                    super::mesh::DrawCategory::HorizonLandscape => horizon_draws += 1,
+                    super::mesh::DrawCategory::SceneryObject => object_draws += 1,
+                }
             }
             pass.set_bind_group(1, &draw.material, &[]);
             pass.draw_indexed(draw.indices.clone(), 0, 0..1);
         }
         #[cfg(feature = "physics-stage")]
         if self.last_stats.elapsed().as_secs() >= 5 {
-            eprintln!("physics-stage VISIBLE: draws={}/{} triangles={} distance=450m, conservative per-draw frustum; GPU time N/A",submitted.0,self.draws.len(),submitted.1);
+            eprintln!(
+                "physics-stage VISIBLE: draws={}/{} (near={} far={} horizon={} obj={}) triangles={} (category frustum near=2200m obj=900m far/horizon=10000m); GPU time N/A",
+                submitted_draws,
+                self.draws.len(),
+                near_draws,
+                far_draws,
+                horizon_draws,
+                object_draws,
+                submitted_tris
+            );
             self.last_stats = std::time::Instant::now();
         }
     }

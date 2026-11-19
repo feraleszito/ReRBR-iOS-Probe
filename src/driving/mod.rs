@@ -122,7 +122,9 @@ pub struct Runtime {
     last_session_snapshot: Option<ngp_experimental::SessionTelemetrySnapshot>,
     pub records: records::RecordStore,
     pub last_record_outcome: Option<records::RecordOutcome>,
+    split_tracker: records::SplitTracker,
     last_finish_splits_ms: Vec<u64>,
+    last_run_prev_pb_splits_ms: Option<Vec<u64>>,
     last_finish_crossed_forward: bool,
 }
 impl Default for Runtime {
@@ -233,7 +235,9 @@ impl Runtime {
             last_session_snapshot: None,
             records: records::RecordStore::load(),
             last_record_outcome: None,
+            split_tracker: records::SplitTracker::default(),
             last_finish_splits_ms: Vec::new(),
+            last_run_prev_pb_splits_ms: None,
             last_finish_crossed_forward: false,
         }
     }
@@ -350,6 +354,16 @@ impl Runtime {
     fn personal_best_for_stage(&self, stage: &rerbr_content::StageDescriptor) -> Option<u64> {
         let key = self.active_record_key(stage);
         self.records.get(&key).map(|pb| pb.best_total_ms)
+    }
+    fn personal_best_splits_for_stage(
+        &self,
+        stage: &rerbr_content::StageDescriptor,
+    ) -> Option<Vec<u64>> {
+        let key = self.active_record_key(stage);
+        self.records
+            .get(&key)
+            .filter(|pb| !pb.splits_ms.is_empty())
+            .map(|pb| pb.splits_ms.clone())
     }
     pub fn install(&mut self, geometry: &Geometry) {
         self.install_pivots(geometry.pivots);
@@ -597,6 +611,10 @@ impl Runtime {
                 self.active_school_lesson = None;
                 self.active_school_result = None;
                 self.school_incident_banner = None;
+                self.split_tracker.reset();
+                self.last_finish_splits_ms.clear();
+                self.last_run_prev_pb_splits_ms = None;
+                self.last_record_outcome = None;
                 self.pending_scene_action = Some(SceneAction::Unload);
                 self.menu.reset_to_main();
                 self.message = None;
@@ -678,7 +696,9 @@ impl Runtime {
                         self.active_school_result = None;
                         self.school_incident_banner = None;
                         self.last_record_outcome = None;
+                        self.split_tracker.reset();
                         self.last_finish_splits_ms.clear();
+                        self.last_run_prev_pb_splits_ms = None;
                         self.last_finish_crossed_forward = false;
                         if let Some(pack) = pack_path {
                             self.experimental_visual_only = false;
@@ -737,7 +757,9 @@ impl Runtime {
                     self.active_school_result = None;
                     self.school_incident_banner = None;
                     self.last_record_outcome = None;
+                    self.split_tracker.reset();
                     self.last_finish_splits_ms.clear();
+                    self.last_run_prev_pb_splits_ms = None;
                     self.last_finish_crossed_forward = false;
                     self.worker = worker::Worker::new_selected_with_aids(
                         self.selection.clone(),
@@ -780,7 +802,9 @@ impl Runtime {
                 self.active_school_result = None;
                 self.school_incident_banner = None;
                 self.last_record_outcome = None;
+                self.split_tracker.reset();
                 self.last_finish_splits_ms.clear();
+                self.last_run_prev_pb_splits_ms = None;
                 self.last_finish_crossed_forward = false;
                 if self.selection.vehicle.is_ngp_experimental_car() {
                     self.refresh_diagnostics_for_selected();
@@ -1484,6 +1508,9 @@ impl Runtime {
                         self.active_school_lesson = Some(entry.lesson.index());
                         self.active_school_result = None;
                         self.school_incident_banner = None;
+                        self.split_tracker.reset();
+                        self.last_finish_splits_ms.clear();
+                        self.last_run_prev_pb_splits_ms = None;
                         self.experimental_visual_only = false;
                         self.worker = worker::Worker::new_school_lesson(
                             self.selection.clone(),
@@ -1723,15 +1750,26 @@ impl Runtime {
                     res.false_start,
                 );
             }
+            let key = self.active_record_key(&self.selection.stage);
+            self.last_run_prev_pb_splits_ms = self
+                .records
+                .get(&key)
+                .filter(|pb| !pb.splits_ms.is_empty())
+                .map(|pb| pb.splits_ms.clone());
+            let effective_splits_passed = if self.split_tracker.has_order_violation() {
+                0
+            } else {
+                res.splits_passed
+            };
             let submission = records::RunSubmission {
-                key: self.active_record_key(&self.selection.stage),
+                key,
                 car_name: self.selection.vehicle.name.clone(),
                 stage_name: self.selection.stage.name.clone(),
                 driving_ms: res.driving_ms,
                 penalty_ms: res.penalty_ms,
                 false_start: res.false_start,
                 splits_ms: self.last_finish_splits_ms.clone(),
-                splits_passed: res.splits_passed,
+                splits_passed: effective_splits_passed,
                 splits_total: res.splits_total,
                 finished: true,
                 finish_crossed_forward: self.last_finish_crossed_forward,
@@ -1849,10 +1887,37 @@ impl Runtime {
             }
         } else {
             if self.race.phase == race::Phase::Driving
+                && !self.experimental_visual_only
+                && state.timing.splits_total > 0
+                && state.timing.splits_passed > self.split_tracker.recorded_ms().len()
+            {
+                let splits_passed = state.timing.splits_passed;
+                let splits_total = state.timing.splits_total;
+                let split_times = state.timing.split_times.clone();
+                drop(state);
+                let pb_splits = self.personal_best_splits_for_stage(&self.selection.stage);
+                if let Some(banner) = self.split_tracker.sync(
+                    now,
+                    splits_passed,
+                    splits_total,
+                    &split_times,
+                    self.race.raw_seconds(),
+                    pb_splits.as_deref(),
+                ) {
+                    eprintln!(
+                        "physics-stage SPLIT {}/{}: {}",
+                        banner.split_number,
+                        banner.splits_total,
+                        banner.headline()
+                    );
+                }
+                state = self.worker.state.lock().unwrap();
+            }
+            if self.race.phase == race::Phase::Driving
                 && state.timing.finished
                 && state.timing.finish_crossed_forward
             {
-                self.last_finish_splits_ms = state
+                let timing_splits: Vec<u64> = state
                     .timing
                     .split_times
                     .iter()
@@ -1861,6 +1926,11 @@ impl Runtime {
                             .map(|v| (v * 1000.0).round() as u64)
                     })
                     .collect();
+                self.last_finish_splits_ms = if !timing_splits.is_empty() {
+                    timing_splits
+                } else {
+                    self.split_tracker.recorded_ms().to_vec()
+                };
                 self.last_finish_crossed_forward = state.timing.finish_crossed_forward;
                 self.race.begin_finish_rollout_with_sim_time(
                     now,
@@ -2292,6 +2362,8 @@ impl Runtime {
                 .get(self.menu.inspected_stage)
                 .and_then(|e| self.personal_best_for_stage(&e.descriptor)),
             record_outcome: self.last_record_outcome.as_ref(),
+            run_splits_ms: &self.last_finish_splits_ms,
+            comparison_pb_splits_ms: self.last_run_prev_pb_splits_ms.as_deref(),
         }
     }
     fn status(&self, state: &worker::Shared) -> String {
@@ -2638,6 +2710,25 @@ impl Runtime {
                     ui::panel(canvas, pb_rect, PANEL_DEEP, pb_color);
                     ui::text_center(canvas, pb_rect, &pb_label, 0.56, pb_color);
                 }
+                if let Some(banner) = self.split_tracker.active_banner(Instant::now()) {
+                    let color = match banner.is_faster() {
+                        Some(true) => ui::GOOD,
+                        Some(false) => BAD,
+                        None => INFO,
+                    };
+                    let split_rect = Rect::new(0.24, 0.112, 0.52, 0.044);
+                    ui::panel(canvas, split_rect, PANEL_DEEP, color);
+                    let headline = banner.headline();
+                    let (_, _, width, _) = ui::px(split_rect, canvas);
+                    let needed = ui::texture_width(&headline, 0.74);
+                    let fit = (width - 14.0).max(1.0);
+                    let scale = if needed > fit {
+                        (0.74 * fit / needed).clamp(0.48, 0.74)
+                    } else {
+                        0.74
+                    };
+                    ui::text_center(canvas, split_rect, &headline, scale, color);
+                }
             }
         }
     }
@@ -2827,10 +2918,17 @@ impl Runtime {
                 banners.push((target, INFO));
             }
         }
+        let split_offset = if self.active_school_lesson.is_none()
+            && self.split_tracker.active_banner(Instant::now()).is_some()
+        {
+            0.052
+        } else {
+            0.0
+        };
         for (index, (text, color)) in banners.iter().take(3).enumerate() {
             let rect = Rect::new(
                 0.18,
-                layout.pause.bottom() + 0.018 + index as f32 * 0.040,
+                layout.pause.bottom() + 0.018 + split_offset + index as f32 * 0.040,
                 0.64,
                 0.034,
             );
@@ -3340,6 +3438,7 @@ mod reload_tests {
                 finish_distance: 7148.0,
                 splits_passed: 2,
                 splits_total: 2,
+                split_distances: vec![2444.0, 4890.0],
                 split_times: vec![Some(45.0), Some(90.0)],
                 finished: true,
                 finish_crossed_forward: false,
@@ -3476,6 +3575,7 @@ mod reload_tests {
                 finish_distance: 7148.0,
                 splits_passed: 2,
                 splits_total: 2,
+                split_distances: vec![2444.0, 4890.0],
                 split_times: vec![Some(45.0), Some(90.0)],
                 finished: true,
                 finish_crossed_forward: true,

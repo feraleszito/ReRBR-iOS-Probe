@@ -1,4 +1,4 @@
-use super::super::mesh::{Draw, Vertex};
+use super::super::mesh::{Draw, DrawCategory, Vertex};
 use super::*;
 
 fn tile(id: usize, x: f32, z: f32, texture: u32) -> Node {
@@ -25,6 +25,7 @@ fn tile(id: usize, x: f32, z: f32, texture: u32) -> Node {
             list: 1,
             cutout: false,
             address: 1,
+            category: DrawCategory::TerrainNear,
         }],
         ..Default::default()
     };

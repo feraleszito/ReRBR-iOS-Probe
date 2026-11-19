@@ -29,21 +29,25 @@ fn main() -> Result<(), String> {
     }
     let camera = stage.render.camera;
     let vp = camera.view_projection(1.55);
-    let visible = stage
-        .render
-        .mesh
-        .draws
-        .iter()
-        .filter(|d| {
-            rerbr_probe::harwood::stage::visible(
-                rerbr_probe::harwood::stage::draw_bounds(&stage.render.mesh, d),
-                vp,
-                camera.eye,
-            )
-        })
-        .count();
+    let (mut vis_near, mut vis_far, mut vis_horizon, mut vis_obj) = (0usize, 0, 0, 0);
+    for d in &stage.render.mesh.draws {
+        if rerbr_probe::harwood::stage::visible_for_category(
+            rerbr_probe::harwood::stage::draw_bounds(&stage.render.mesh, d),
+            vp,
+            camera.eye,
+            d.category,
+        ) {
+            match d.category {
+                rerbr_probe::harwood::mesh::DrawCategory::TerrainNear => vis_near += 1,
+                rerbr_probe::harwood::mesh::DrawCategory::TerrainFar => vis_far += 1,
+                rerbr_probe::harwood::mesh::DrawCategory::HorizonLandscape => vis_horizon += 1,
+                rerbr_probe::harwood::mesh::DrawCategory::SceneryObject => vis_obj += 1,
+            }
+        }
+    }
+    let visible = vis_near + vis_far + vis_horizon + vis_obj;
     println!(
-        "CPU spawn culling: {visible}/{} draws; no GPU/image/device result",
+        "CPU spawn culling: {visible}/{} draws (near={vis_near} far={vis_far} horizon={vis_horizon} obj={vis_obj}); no GPU/image/device result",
         stage.report.draws
     );
     Ok(())

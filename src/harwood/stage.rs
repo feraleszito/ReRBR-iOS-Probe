@@ -1,13 +1,16 @@
 //! Full resident Harwood geometry, with per-draw spatial culling at submission.
 //! GPL-3.0-or-later adaptations from reRBR stage/{mod,mesh}.rs; see STAGE.md.
 use super::{
-    mesh::{self, Bounds, Draw, Mesh, Vertex},
+    mesh::{self, Bounds, Draw, DrawCategory, Mesh, Vertex},
     Camera, LoadedBlock,
 };
 use crate::asset_probe;
 use rerbr_asset_formats::lbs;
 use rerbr_render_core::{coords, Mat4, Vec3};
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -24,6 +27,17 @@ pub struct Report {
     pub supported_points: usize,
     pub collision_matched_points: usize,
     pub maximum_ground_gap: f32,
+    pub terrain_near_draws: usize,
+    pub terrain_near_triangles: usize,
+    pub terrain_far_draws: usize,
+    pub terrain_far_triangles: usize,
+    pub horizon_landscape_draws: usize,
+    pub horizon_landscape_triangles: usize,
+    pub object_draws: usize,
+    pub object_triangles: usize,
+    pub interactive_draws: usize,
+    pub interactive_triangles: usize,
+    pub sky_items_loaded: usize,
     pub sky_items_withheld: usize,
     pub water_items_withheld: usize,
     pub animated_objects_withheld: usize,
@@ -92,10 +106,77 @@ fn object_mesh(
             list: 2,
             cutout: true,
             address,
+            category: DrawCategory::SceneryObject,
         });
         m.bounds()?;
     }
     Ok(m)
+}
+
+/// Converts an original `.lbs` `(1, 3)` `Sky` / `SuperBowl` landscape item (low-detail
+/// surrounding ground, canyon cliffs, mountains, and horizon ring).
+/// Verified retail layouts across all 36 stages:
+/// - `0x15` (stride 24): `pos[0..12]`, `color[12..16]`, `uv0[16..24]`, single diffuse `texture0`.
+/// - `0x35` (stride 32): `pos[0..12]`, `color[12..16]`, `uv0[16..24]`, `uv1[24..32]`, dual diffuse blend.
+fn sky_landscape_mesh(
+    item: &lbs::SkyItem<'_>,
+    names: &BTreeMap<u32, String>,
+) -> Result<Option<Mesh>, String> {
+    let dual_uv = match (item.flags, item.buffers.stride) {
+        (0x15, 24) => false,
+        (0x35, 32) => true,
+        _ => return Ok(None),
+    };
+    let t0 = item.texture0.filter(|t| names.contains_key(t));
+    let t1 = if dual_uv {
+        item.texture1.filter(|t| names.contains_key(t))
+    } else {
+        None
+    };
+    if t0.is_none() || (dual_uv && item.texture1.is_some() && t1.is_none()) {
+        return Ok(None);
+    }
+    let b = &item.buffers;
+    if !b.index_count().is_multiple_of(3) {
+        return Err("STAGE: incomplete sky/SuperBowl triangle".into());
+    }
+    let mut m = Mesh::default();
+    m.vertices.reserve(b.vertex_count);
+    for i in 0..b.vertex_count {
+        let bytes = b
+            .vertices
+            .get(i * b.stride..(i + 1) * b.stride)
+            .ok_or("truncated sky/SuperBowl vertex")?;
+        let f = |at| f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let pos = b.position(i).ok_or("sky/SuperBowl position")?;
+        m.vertices.push(Vertex {
+            position: pos,
+            color: coords::rgba_from_d3dcolor(bytes[12..16].try_into().unwrap()),
+            uv0: [f(16), f(20)],
+            uv1: if dual_uv { [f(24), f(28)] } else { [0.0; 2] },
+        });
+    }
+    m.indices.reserve(b.index_count());
+    for i in 0..b.index_count() {
+        let v = u32::from(b.index(i).ok_or("sky/SuperBowl index")?);
+        if v as usize >= m.vertices.len() {
+            return Err("STAGE: sky/SuperBowl index out of range".into());
+        }
+        m.indices.push(v);
+    }
+    if !m.indices.is_empty() {
+        let kind = lbs::KindState::decode(item.kind);
+        m.draws.push(Draw {
+            indices: 0..m.indices.len(),
+            textures: [t0, t1],
+            list: 3,
+            cutout: false,
+            address: kind.slot0,
+            category: DrawCategory::HorizonLandscape,
+        });
+        m.bounds()?;
+    }
+    Ok(Some(m))
 }
 
 pub fn load(maps: &Path) -> Result<Stage, String> {
@@ -139,21 +220,57 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
         }
     }
     terrain.bounds()?;
-    // Retain a compact CPU ground index without scenery. GPU geometry is resident once.
+    // Retain a compact CPU ground index without scenery/horizon. GPU geometry is resident once.
     scene.vertices.clone_from(&terrain.vertices);
     scene.indices.clone_from(&terrain.indices);
     scene.draws = terrain
         .draws
         .iter()
-        .map(|d| Draw {
-            indices: d.indices.clone(),
-            textures: d.textures,
-            list: d.list,
-            cutout: false,
-            address: 1,
+        .map(|d| {
+            let tris = d.indices.len() / 3;
+            match d.category {
+                DrawCategory::TerrainFar => {
+                    report.terrain_far_draws += 1;
+                    report.terrain_far_triangles += tris;
+                }
+                _ => {
+                    report.terrain_near_draws += 1;
+                    report.terrain_near_triangles += tris;
+                }
+            }
+            Draw {
+                indices: d.indices.clone(),
+                textures: d.textures,
+                list: d.list,
+                cutout: false,
+                address: d.address,
+                category: d.category,
+            }
         })
         .collect();
     let names = asset_probe::diffuse_names_stem(maps, &stage.stem)?;
+    // Load original `.lbs` `(1, 3)` SuperBowl surrounding landscape (low-detail ground,
+    // canyon cliffs, hills, mountains, and horizon ring) before cutout foliage objects.
+    for c in &lbs.chunks {
+        if let lbs::Chunk::Sky(sky) = c {
+            for item in &sky.items {
+                match sky_landscape_mesh(item, &names)? {
+                    Some(part) if !part.indices.is_empty() => {
+                        report.horizon_landscape_draws += part.draws.len();
+                        report.horizon_landscape_triangles += part.indices.len() / 3;
+                        report.sky_items_loaded += 1;
+                        append(&mut scene, part);
+                    }
+                    Some(_) => {
+                        report.sky_items_loaded += 1;
+                    }
+                    None => {
+                        report.sky_items_withheld += 1;
+                    }
+                }
+            }
+        }
+    }
     for c in &lbs.chunks {
         match c {
             lbs::Chunk::Objects(o) => {
@@ -162,17 +279,17 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
                         .vertex_layout()
                         .ok_or("STAGE: unsupported static object layout")?;
                     let kind = lbs::KindState::decode(item.kind);
-                    append(
-                        &mut scene,
-                        object_mesh(
-                            &item.buffers,
-                            layout.color,
-                            layout.texcoord0,
-                            item.texture_index(),
-                            kind.slot0,
-                            Mat4::IDENTITY,
-                        )?,
-                    );
+                    let part = object_mesh(
+                        &item.buffers,
+                        layout.color,
+                        layout.texcoord0,
+                        item.texture_index(),
+                        kind.slot0,
+                        Mat4::IDENTITY,
+                    )?;
+                    report.object_draws += part.draws.len();
+                    report.object_triangles += part.indices.len() / 3;
+                    append(&mut scene, part);
                     report.objects += 1;
                 }
             }
@@ -200,13 +317,16 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
                                 vertex_count: d.vertex_count,
                                 stride: d.vertex_size,
                             };
-                            append(&mut scene, object_mesh(&b, 12, 16, d.texture0, 1, matrix)?);
+                            let part = object_mesh(&b, 12, 16, d.texture0, 1, matrix)?;
+                            report.interactive_draws += part.draws.len();
+                            report.interactive_triangles += part.indices.len() / 3;
+                            append(&mut scene, part);
                         }
                         report.interactive_instances += 1;
                     }
                 }
             }
-            lbs::Chunk::Sky(sky) => report.sky_items_withheld += sky.items.len(),
+            lbs::Chunk::Sky(_) => {}
             lbs::Chunk::Water(water) => {
                 report.water_items_withheld +=
                     water.faces.iter().map(|f| f.items.len()).sum::<usize>()
@@ -332,7 +452,22 @@ pub fn load_selected(maps: &Path, stage: &rerbr_content::StageDescriptor) -> Res
 /// Conservative homogeneous AABB/frustum test for wgpu 0..w reverse-Z clip space.
 /// Objects crossing the near plane stay visible; no division by w or corner-only test.
 pub fn visible(bounds: Bounds, vp: Mat4, eye: Vec3) -> bool {
-    if eye.distance_squared(eye.clamp(bounds.min, bounds.max)) > 450.0f32.powi(2) {
+    visible_within(bounds, vp, eye, 450.0)
+}
+
+/// Category-aware frustum & distance culling so distant valley terrain, far-LOD blocks,
+/// and SuperBowl cliffs/horizon are never prematurely clipped at 450 m.
+pub fn visible_for_category(bounds: Bounds, vp: Mat4, eye: Vec3, category: DrawCategory) -> bool {
+    let max_distance = match category {
+        DrawCategory::TerrainNear => 2_200.0,
+        DrawCategory::TerrainFar | DrawCategory::HorizonLandscape => coords::FAR,
+        DrawCategory::SceneryObject => 900.0,
+    };
+    visible_within(bounds, vp, eye, max_distance)
+}
+
+pub fn visible_within(bounds: Bounds, vp: Mat4, eye: Vec3, max_distance: f32) -> bool {
+    if eye.distance_squared(eye.clamp(bounds.min, bounds.max)) > max_distance * max_distance {
         return false;
     }
     let corners: [_; 8] = std::array::from_fn(|i| {

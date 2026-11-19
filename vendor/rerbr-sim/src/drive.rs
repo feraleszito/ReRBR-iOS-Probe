@@ -37,6 +37,7 @@ pub struct StageTiming {
     pub finish_distance: f32,
     pub splits_passed: usize,
     pub splits_total: usize,
+    pub split_distances: Vec<f32>,
     pub split_times: Vec<Option<f64>>,
     pub finished: bool,
     pub finish_crossed_forward: bool,
@@ -574,7 +575,17 @@ impl Session {
             finish_distance: tk.card.finish,
             splits_passed: tk.card.passed,
             splits_total,
-            split_times: tk.card.splits().iter().map(|s| s.time.map(|t| t - tk.card.origin)).collect(),
+            split_distances: tk.card.splits().iter().map(|s| s.distance).collect(),
+            split_times: tk
+                .card
+                .splits()
+                .iter()
+                .map(|s| {
+                    s.time
+                        .filter(|t| tk.card.started && t.is_finite() && *t >= tk.card.origin)
+                        .map(|t| (t - tk.card.origin).max(0.0))
+                })
+                .collect(),
             finished,
             finish_crossed_forward: finished && self.finish_crossed_forward,
             sim_elapsed_seconds: f64::from(self.steps) * f64::from(self.dt),

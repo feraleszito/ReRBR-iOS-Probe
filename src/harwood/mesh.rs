@@ -14,15 +14,26 @@ pub struct Vertex {
     pub uv1: [f32; 2],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DrawCategory {
+    #[default]
+    TerrainNear,
+    TerrainFar,
+    HorizonLandscape,
+    SceneryObject,
+}
+
 #[derive(Debug)]
 pub struct Draw {
     pub indices: Range<usize>,
     pub textures: [Option<u32>; 2],
     pub list: u8,
-    /// Original object alpha-test/two-sided state (terrain remains false).
+    /// Original object alpha-test/two-sided state (terrain/horizon remain false).
     pub cutout: bool,
-    /// Original object texture addressing: 1 wrap, 2 mirror, 3 clamp.
+    /// Original texture addressing: 1 wrap, 2 mirror, 3 clamp.
     pub address: u8,
+    /// Semantic render category for frustum/distance culling and diagnostics.
+    pub category: DrawCategory,
 }
 
 #[derive(Debug, Default)]
@@ -157,6 +168,11 @@ pub fn block_mesh(block: &lbs::GeometryBlock<'_>) -> Mesh {
                 list: chunk.list,
                 cutout: false,
                 address: 1,
+                category: if chunk.list == 3 {
+                    DrawCategory::TerrainFar
+                } else {
+                    DrawCategory::TerrainNear
+                },
             });
         }
     }

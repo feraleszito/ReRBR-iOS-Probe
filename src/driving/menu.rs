@@ -262,6 +262,10 @@ pub struct Context<'a> {
     pub personal_best_ms: Option<u64>,
     pub inspected_stage_pb_ms: Option<u64>,
     pub record_outcome: Option<&'a super::records::RecordOutcome>,
+    /// Cumulative split times recorded during the finished run (ms, 720 Hz sim time).
+    pub run_splits_ms: &'a [u64],
+    /// Stored PB run's split times (snapshotted before overwrite on new PB) for exact per-split deltas.
+    pub comparison_pb_splits_ms: Option<&'a [u64]>,
 }
 
 #[derive(Debug, Default)]
@@ -1224,6 +1228,49 @@ impl Menu {
                         "CHECKPOINTS",
                         format!("{}/{}", res.splits_passed, res.splits_total),
                     ));
+                }
+                if !ctx.run_splits_ms.is_empty() {
+                    let format_entry = |idx: usize, ms: u64| -> String {
+                        let base = super::records::format_time_ms(ms);
+                        match ctx
+                            .comparison_pb_splits_ms
+                            .and_then(|pb| pb.get(idx).copied())
+                            .filter(|&pb_ms| pb_ms > 0)
+                        {
+                            Some(pb_ms) => format!(
+                                "{base} ({})",
+                                super::records::format_split_delta_ms((ms as i64) - (pb_ms as i64))
+                            ),
+                            None => base,
+                        }
+                    };
+                    if ctx.run_splits_ms.len() <= 4 {
+                        for (idx, &ms) in ctx.run_splits_ms.iter().enumerate() {
+                            rows.push(Row::info(
+                                format!("PARCIAL {}", idx + 1),
+                                format_entry(idx, ms),
+                            ));
+                        }
+                    } else {
+                        for (chunk_idx, pair) in ctx.run_splits_ms.chunks(2).enumerate() {
+                            let i0 = chunk_idx * 2;
+                            if pair.len() == 2 {
+                                rows.push(Row::info(
+                                    format!("PARCIAL {}/{}", i0 + 1, i0 + 2),
+                                    format!(
+                                        "{} | {}",
+                                        format_entry(i0, pair[0]),
+                                        format_entry(i0 + 1, pair[1])
+                                    ),
+                                ));
+                            } else {
+                                rows.push(Row::info(
+                                    format!("PARCIAL {}", i0 + 1),
+                                    format_entry(i0, pair[0]),
+                                ));
+                            }
+                        }
+                    }
                 }
                 if let Some(outcome) = ctx.record_outcome {
                     rows.push(Row::info("RÉCORD PERSONAL", outcome.summary_line()));
@@ -2234,6 +2281,8 @@ mod tests {
             personal_best_ms: None,
             inspected_stage_pb_ms: None,
             record_outcome: None,
+            run_splits_ms: &[],
+            comparison_pb_splits_ms: None,
         }
     }
 
@@ -2869,6 +2918,61 @@ mod tests {
 
         let mut canvas = Canvas::new((1024, 768));
         menu.draw(&mut canvas, &ctx, "OK");
+        let bytes = canvas.finish();
+        assert!(bytes.len() / 20 <= MAX_CANVAS_VERTICES);
+    }
+
+    #[test]
+    fn stage_complete_displays_split_summary_with_pb_deltas_and_fits_vertex_budget() {
+        use crate::harwood::benchmark::hud::{Canvas, MAX_CANVAS_VERTICES};
+
+        let selection = Selection::default();
+        let content = Catalog::descriptors(&selection);
+        let run_splits = [84_650u64, 168_920u64];
+        let prev_pb_splits = [85_750u64, 171_230u64];
+        let mut ctx = context(&selection, &content);
+        ctx.stage_result = Some(crate::driving::race::StageResult {
+            driving_seconds: 245.5,
+            penalty_seconds: 0.0,
+            total_seconds: 245.5,
+            driving_ms: 245_500,
+            penalty_ms: 0,
+            total_ms: 245_500,
+            false_start: false,
+            splits_passed: 2,
+            splits_total: 2,
+        });
+        ctx.run_splits_ms = &run_splits;
+        ctx.comparison_pb_splits_ms = Some(&prev_pb_splits);
+        ctx.has_replay = true;
+
+        let menu = Menu {
+            page: Page::StageComplete,
+            ..Menu::default()
+        };
+        let rows = menu.rows(&ctx);
+        let p1 = rows
+            .iter()
+            .find(|r| r.label == "PARCIAL 1")
+            .expect("PARCIAL 1");
+        let p2 = rows
+            .iter()
+            .find(|r| r.label == "PARCIAL 2")
+            .expect("PARCIAL 2");
+        assert_eq!(
+            p1.kind,
+            RowKind::Info {
+                value: "01:24.650 (-00:01.100)".into()
+            }
+        );
+        assert_eq!(
+            p2.kind,
+            RowKind::Info {
+                value: "02:48.920 (-00:02.310)".into()
+            }
+        );
+        let mut canvas = Canvas::new((1024, 768));
+        menu.draw(&mut canvas, &ctx, "STAGE COMPLETE");
         let bytes = canvas.finish();
         assert!(bytes.len() / 20 <= MAX_CANVAS_VERTICES);
     }
