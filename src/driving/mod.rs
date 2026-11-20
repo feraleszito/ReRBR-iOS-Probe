@@ -60,7 +60,7 @@ pub struct Runtime {
     #[cfg(feature = "physics-stage")]
     pub mounts: Option<cameras::Mounts>,
     #[cfg(feature = "physics-stage")]
-    pub camera_overrides: cameras::CameraOverrides,
+    pub camera_overrides: cameras::VehicleCameraStore,
     pub controls_layout: layout::ControlsLayoutOverrides,
     pub selected_control: layout::EditableControl,
     dragging_control: Option<(u64, layout::EditableControl, f32, f32)>,
@@ -76,6 +76,7 @@ pub struct Runtime {
     clutch_help: bool,
     diagnostics: bool,
     minimal_hud: bool,
+    hud_rpm_style: menu::HudRpmStyle,
     volume: f64,
     music_volume: f64,
     codriver_volume: f64,
@@ -90,6 +91,7 @@ pub struct Runtime {
     pub cockpit_node: Option<Mat4>,
     pub cockpit_error: Option<String>,
     pivots: Option<[Vec3; 4]>,
+    wheel_visual_offsets: [Vec3; 4],
     offset: Option<Vec3>,
     last: Instant,
     tilt: f64,
@@ -137,6 +139,7 @@ pub struct Runtime {
     showroom_active_name: Option<String>,
     showroom_loading: bool,
     showroom_error: Option<String>,
+    pub showroom_dorsal_positions: Vec<(f32, f32)>,
     coming_soon_notice: Option<(String, Instant)>,
     pub career: career::CareerStore,
     active_career_stage: bool,
@@ -144,8 +147,11 @@ pub struct Runtime {
     pilot_preset_index: usize,
     pilot_tag_index: usize,
     pilot_draft_name: String,
+    pilot_draft_number: u8,
+    pending_reset_career: bool,
     career_create_return_dealership: Option<menu::Page>,
     pending_buy_vehicle_id: Option<String>,
+    pending_sell_vehicle_id: Option<String>,
     selected_career_difficulty: career::CareerDifficulty,
 }
 impl Default for Runtime {
@@ -200,7 +206,7 @@ impl Runtime {
             #[cfg(feature = "physics-stage")]
             mounts: None,
             #[cfg(feature = "physics-stage")]
-            camera_overrides: cameras::CameraOverrides::load(),
+            camera_overrides: cameras::VehicleCameraStore::load(),
             controls_layout: layout::ControlsLayoutOverrides::load(),
             selected_control: layout::EditableControl::Brake,
             dragging_control: None,
@@ -217,6 +223,7 @@ impl Runtime {
             clutch_help: settings.clutch_help,
             diagnostics: settings.diagnostics,
             minimal_hud: settings.minimal_hud,
+            hud_rpm_style: settings.hud_rpm_style,
             volume: settings.volume,
             music_volume: settings.music_volume,
             codriver_volume: settings.codriver_volume,
@@ -230,6 +237,7 @@ impl Runtime {
             cockpit_node: None,
             cockpit_error: None,
             pivots: None,
+            wheel_visual_offsets: [Vec3::ZERO; 4],
             offset: None,
             last: Instant::now(),
             tilt: f64::NAN,
@@ -277,6 +285,7 @@ impl Runtime {
             showroom_active_name: None,
             showroom_loading: false,
             showroom_error: None,
+            showroom_dorsal_positions: Vec::new(),
             coming_soon_notice: None,
             career: career::CareerStore::load(),
             active_career_stage: false,
@@ -284,8 +293,11 @@ impl Runtime {
             pilot_preset_index: 0,
             pilot_tag_index: 0,
             pilot_draft_name: career::PILOT_NAME_PRESETS[0].to_string(),
+            pilot_draft_number: 7,
+            pending_reset_career: false,
             career_create_return_dealership: None,
             pending_buy_vehicle_id: None,
+            pending_sell_vehicle_id: None,
             selected_career_difficulty: career::CareerDifficulty::Beginner,
         }
     }
@@ -655,9 +667,13 @@ impl Runtime {
     }
     pub fn install(&mut self, geometry: &Geometry) {
         self.install_pivots(geometry.pivots);
+        self.install_wheel_visual_offsets(geometry.wheel_visual_offsets);
     }
     pub(crate) fn install_pivots(&mut self, pivots: [Vec3; 4]) {
         self.pivots = Some(pivots);
+    }
+    pub(crate) fn install_wheel_visual_offsets(&mut self, offsets: [Vec3; 4]) {
+        self.wheel_visual_offsets = offsets;
     }
     pub(crate) fn set_visual_start_pose(&mut self, cam: Camera) {
         self.visual_start_pose = Some((cam.target, cam.target - cam.eye));
@@ -782,6 +798,7 @@ impl Runtime {
     }
     fn clear_scene_pose(&mut self) {
         self.pivots = None;
+        self.wheel_visual_offsets = [Vec3::ZERO; 4];
         self.offset = None;
         self.camera = None;
         self.scene_error = None;
@@ -857,6 +874,7 @@ impl Runtime {
             fps: self.fps_visible,
             diagnostics: self.diagnostics,
             minimal_hud: self.minimal_hud,
+            hud_rpm_style: self.hud_rpm_style,
             invert_pedals: self.controls.invert_pedals,
             clutch_help: self.clutch_help,
             volume: self.volume,
@@ -905,7 +923,12 @@ impl Runtime {
                     match section {
                         menu::MainSection::Career => {
                             self.career_create_return_dealership = None;
-                            if self.career.profile.is_some() {
+                            self.pending_reset_career = false;
+                            let populated_slots =
+                                self.career.slots.iter().filter(|s| s.is_some()).count();
+                            if populated_slots > 1 || self.career.pending_legacy_profile.is_some() {
+                                self.menu.open(menu::Page::CareerSlots);
+                            } else if self.career.profile.is_some() {
                                 self.menu.open(menu::Page::CareerHub);
                             } else {
                                 self.menu.open(menu::Page::CareerCreate);
@@ -1517,6 +1540,10 @@ impl Runtime {
                     if self.minimal_hud { "ON" } else { "OFF" }
                 ));
             }
+            CycleHudRpmStyle => {
+                self.hud_rpm_style = self.hud_rpm_style.next();
+                self.message = Some(format!("ESTILO HUD RPM: {}", self.hud_rpm_style.label()));
+            }
             ToggleInvertPedals => {
                 self.controls.invert_pedals = !self.controls.invert_pedals;
                 self.message = Some(format!(
@@ -1655,7 +1682,11 @@ impl Runtime {
             | CamLookYDown | CamLookYUp | CamSave | CamReset => {
                 #[cfg(feature = "physics-stage")]
                 {
-                    let ov = self.camera_overrides.for_view_mut(self.view);
+                    let vid = self.selection.vehicle.id.clone();
+                    let ov = self
+                        .camera_overrides
+                        .for_vehicle_mut(&vid)
+                        .for_view_mut(self.view);
                     match command {
                         CamFovDown => ov.fov_degrees -= 2.0,
                         CamFovUp => ov.fov_degrees += 2.0,
@@ -1672,14 +1703,24 @@ impl Runtime {
                         CamLookYDown => ov.target_offset.y -= 0.05,
                         CamLookYUp => ov.target_offset.y += 0.05,
                         CamReset => {
-                            self.camera_overrides.reset_view(self.view);
+                            self.camera_overrides.reset_vehicle_view(&vid, self.view);
                             self.camera_overrides.save();
                         }
                         CamSave => self.camera_overrides.save(),
                         _ => {}
                     }
-                    *self.camera_overrides.for_view_mut(self.view) =
-                        self.camera_overrides.for_view(self.view).sanitized();
+                    let sanitized = self
+                        .camera_overrides
+                        .for_vehicle(&vid)
+                        .for_view(self.view)
+                        .sanitized();
+                    *self
+                        .camera_overrides
+                        .for_vehicle_mut(&vid)
+                        .for_view_mut(self.view) = sanitized;
+                    if !matches!(command, CamSave | CamReset) {
+                        self.camera_overrides.save();
+                    }
                 }
             }
             CtrlNext => {
@@ -2121,10 +2162,32 @@ impl Runtime {
                 self.pilot_tag_index = (self.pilot_tag_index + 1) % 6;
                 self.refresh_pilot_draft_name();
             }
-            CareerCreateConfirm => match self.career.create_profile(&self.pilot_draft_name) {
+            CareerPilotEditKeyboard => {
+                prompt_pilot_name_ios(&self.pilot_draft_name);
+                self.message = Some("INTRODUCE EL NOMBRE EN EL TECLADO".into());
+            }
+            CareerNumberDown => {
+                self.pilot_draft_number = if self.pilot_draft_number <= 1 {
+                    99
+                } else {
+                    self.pilot_draft_number - 1
+                };
+            }
+            CareerNumberUp => {
+                self.pilot_draft_number = if self.pilot_draft_number >= 99 {
+                    1
+                } else {
+                    self.pilot_draft_number + 1
+                };
+            }
+            CareerCreateConfirm => match self
+                .career
+                .create_profile_with_number(&self.pilot_draft_name, self.pilot_draft_number)
+            {
                 Ok(()) => {
                     self.message = Some(format!(
-                        "PERFIL {} CREADO · SALDO {}",
+                        "PERFIL #{} {} CREADO · SALDO {}",
+                        self.pilot_draft_number,
                         self.pilot_draft_name,
                         career::format_usd(career::INITIAL_CASH_USD)
                     ));
@@ -2141,6 +2204,51 @@ impl Runtime {
                     self.message = Some(err);
                 }
             },
+            CareerSlotSelect(slot_idx) => {
+                self.pending_reset_career = false;
+                self.pending_buy_vehicle_id = None;
+                self.pending_sell_vehicle_id = None;
+                self.career.select_slot(slot_idx);
+                if self.career.profile.is_some() {
+                    self.menu.open(menu::Page::CareerHub);
+                } else {
+                    self.menu.open(menu::Page::CareerCreate);
+                }
+            }
+            CareerSlotImportLegacy => match self.career.import_pending_legacy_into_active_slot() {
+                Ok(()) => {
+                    self.message = Some(format!(
+                        "GUARDADO ANTERIOR IMPORTADO AL ESPACIO {}",
+                        self.career.active_slot + 1
+                    ));
+                    self.menu.open(menu::Page::CareerHub);
+                }
+                Err(err) => {
+                    self.message = Some(err);
+                }
+            },
+            CareerResetRequest => {
+                self.pending_reset_career = true;
+                self.message = Some(format!(
+                    "PULSA CONFIRMAR PARA REINICIAR ESPACIO {}",
+                    self.career.active_slot + 1
+                ));
+            }
+            CareerResetCancel => {
+                self.pending_reset_career = false;
+                self.message = None;
+            }
+            CareerResetConfirm => {
+                let slot = self.career.active_slot + 1;
+                self.career.reset_active_slot();
+                self.pending_reset_career = false;
+                self.active_career_stage = false;
+                self.last_career_stage_outcome = None;
+                self.pending_buy_vehicle_id = None;
+                self.pending_sell_vehicle_id = None;
+                self.message = Some(format!("ESPACIO {slot} REINICIADO — CONFIGURA TU PILOTO"));
+                self.menu.open(menu::Page::CareerCreate);
+            }
             DealershipPrevCar | DealershipNextCar => {
                 self.pending_buy_vehicle_id = None;
                 let indices = {
@@ -2282,6 +2390,7 @@ impl Runtime {
                 }
             }
             CareerGarageSelectActive => {
+                self.pending_sell_vehicle_id = None;
                 let indices = {
                     let ctx = self.context();
                     self.menu.career_garage_indices(&ctx)
@@ -2307,6 +2416,64 @@ impl Runtime {
                         self.message = Some(format!(
                             "COCHE DE CARRERA ACTIVO: {}",
                             entry.descriptor.name
+                        ));
+                    }
+                    Err(err) => {
+                        self.message = Some(err);
+                    }
+                }
+            }
+            CareerGarageRequestSell => {
+                let indices = {
+                    let ctx = self.context();
+                    self.menu.career_garage_indices(&ctx)
+                };
+                let cursor = self
+                    .menu
+                    .career_garage_cursor
+                    .min(indices.len().saturating_sub(1));
+                if let Some(entry) = indices
+                    .get(cursor)
+                    .and_then(|&idx| self.content.vehicles.get(idx))
+                {
+                    let id = entry.descriptor.id.clone();
+                    let resale = self
+                        .career
+                        .profile
+                        .as_ref()
+                        .map_or(0, |p| p.resale_value_usd(entry));
+                    self.pending_sell_vehicle_id = Some(id);
+                    self.message = Some(format!(
+                        "CONFIRMA VENTA DE {} POR {}",
+                        entry.descriptor.name,
+                        career::format_usd(resale)
+                    ));
+                }
+            }
+            CareerGarageCancelSell => {
+                self.pending_sell_vehicle_id = None;
+                self.message = None;
+            }
+            CareerGarageConfirmSell => {
+                let Some(target_id) = self.pending_sell_vehicle_id.take() else {
+                    return;
+                };
+                let Some(entry) = self.content.vehicle(&target_id).cloned() else {
+                    self.message = Some("VEHÍCULO NO ENCONTRADO".into());
+                    return;
+                };
+                let res = match self.career.profile.as_mut() {
+                    Some(profile) => profile.sell_vehicle(&entry),
+                    None => Err("SIN PERFIL DE CARRERA".into()),
+                };
+                match res {
+                    Ok(resale) => {
+                        let _ = self.career.save();
+                        self.menu.career_garage_cursor = 0;
+                        self.message = Some(format!(
+                            "VENDIDO: {} (+{})",
+                            entry.descriptor.name,
+                            career::format_usd(resale)
                         ));
                     }
                     Err(err) => {
@@ -3029,7 +3196,10 @@ impl Runtime {
                         if let Some(base) = self.mounts.and_then(|m| {
                             m.camera_with_cockpit(self.view, f.models[0], self.cockpit_node)
                         }) {
-                            let ov = self.camera_overrides.for_view(self.view);
+                            let ov = self
+                                .camera_overrides
+                                .for_vehicle(&self.selection.vehicle.id)
+                                .for_view(self.view);
                             let edited = ov.apply(base, f.models[0]);
                             if path.camera_clear(edited, ov.fov_degrees, self.drawable_size) {
                                 f.camera = edited;
@@ -3054,7 +3224,10 @@ impl Runtime {
         let swap = coords::physics_to_stage();
         let offset = *self.offset.get_or_insert_with(|| {
             (0..4)
-                .map(|k| Vec3::from(rest.wheel_centre[k]) - swap.transform_point3(pivots[k]))
+                .map(|k| {
+                    Vec3::from(rest.wheel_centre[k])
+                        - swap.transform_point3(pivots[k] + self.wheel_visual_offsets[k])
+                })
                 .sum::<Vec3>()
                 * 0.25
         });
@@ -3129,7 +3302,10 @@ impl Runtime {
                 .mounts
                 .and_then(|m| m.camera_with_cockpit(self.view, models[0], self.cockpit_node))
             {
-                let ov = self.camera_overrides.for_view(self.view);
+                let ov = self
+                    .camera_overrides
+                    .for_vehicle(&self.selection.vehicle.id)
+                    .for_view(self.view);
                 let edited = ov.apply(base, models[0]);
                 let selected = if path.camera_clear(edited, ov.fov_degrees, self.drawable_size) {
                     Some((edited, ov.fov_degrees))
@@ -3168,7 +3344,10 @@ impl Runtime {
                 self.camera = Some(camera);
                 #[cfg(feature = "physics-stage")]
                 let camera = {
-                    let ov = self.camera_overrides.for_view(cameras::View::Chase);
+                    let ov = self
+                        .camera_overrides
+                        .for_vehicle(&self.selection.vehicle.id)
+                        .for_view(cameras::View::Chase);
                     let edited = ov.apply(camera, models[0]);
                     if path.camera_clear(edited, ov.fov_degrees, self.drawable_size) {
                         self.effective_fov = ov.fov_degrees;
@@ -3237,7 +3416,10 @@ impl Runtime {
     }
     fn context(&self) -> menu::Context<'_> {
         #[cfg(feature = "physics-stage")]
-        let cam_override = self.camera_overrides.for_view(self.view);
+        let cam_override = self
+            .camera_overrides
+            .for_vehicle(&self.selection.vehicle.id)
+            .for_view(self.view);
         #[cfg(not(feature = "physics-stage"))]
         let cam_override = cameras::CameraOverride::default_for(cameras::View::Chase);
         menu::Context {
@@ -3259,6 +3441,7 @@ impl Runtime {
             fps: self.fps_visible,
             diagnostics: self.diagnostics,
             minimal_hud: self.minimal_hud,
+            hud_rpm_style: self.hud_rpm_style,
             invert_pedals: self.controls.invert_pedals,
             clutch_help: self.clutch_help,
             ctrl_opacity: self.controls_layout.opacity_for(self.selected_control),
@@ -3304,7 +3487,10 @@ impl Runtime {
             active_career_stage: self.active_career_stage,
             last_career_stage_outcome: self.last_career_stage_outcome.as_ref(),
             pilot_draft_name: self.pilot_draft_name.as_str(),
+            pilot_draft_number: self.pilot_draft_number,
+            pending_reset_career: self.pending_reset_career,
             pending_buy_vehicle_id: self.pending_buy_vehicle_id.as_deref(),
+            pending_sell_vehicle_id: self.pending_sell_vehicle_id.as_deref(),
             selected_career_difficulty: self.selected_career_difficulty,
         }
     }
@@ -3368,17 +3554,52 @@ impl Runtime {
             hud.draw_bytes(queue, encoder, target, &canvas.finish());
             return;
         }
+        if self.menu.page == menu::Page::CareerCreate {
+            if let Some(typed) = poll_pilot_name_ios() {
+                let clean = career::sanitize_pilot_name(&typed);
+                if !clean.is_empty() {
+                    self.pilot_draft_name = clean;
+                    self.message = Some(format!("NOMBRE ACTUALIZADO: {}", self.pilot_draft_name));
+                }
+            }
+        }
         if self.menu.page != menu::Page::Driving {
             let status = self.status(&state);
             let mut ctx = self.context();
             ctx.loading_error = self.scene_error.as_deref().or(state.error.as_deref());
             self.menu.draw(&mut canvas, &ctx, &status);
+            if self.menu.page.is_showroom_page() {
+                if let Some(p) = self.career.profile.as_ref() {
+                    let badge = format!("#{}", p.competition_number);
+                    for &(nx, ny) in &self.showroom_dorsal_positions {
+                        let r = Rect::new(
+                            (nx - 0.024).clamp(0.02, 0.94),
+                            (ny - 0.022).clamp(0.12, 0.68),
+                            0.048,
+                            0.044,
+                        );
+                        ui::panel(&mut canvas, r, [242, 244, 248, 228], [24, 28, 36, 255]);
+                        ui::text_center(&mut canvas, r, &badge, 0.66, [18, 22, 28, 255]);
+                    }
+                }
+            }
             hud.draw_bytes(queue, encoder, target, &canvas.finish());
             return;
         }
         self.draw_top_bar(&mut canvas, &layout);
         if let Some((_, sample, _)) = &state.pair {
-            draw_cluster(&mut canvas, &layout, sample);
+            let rpm_spec = self.active_vehicle_rpm_spec();
+            draw_cluster_with_rpm_hud(
+                &mut canvas,
+                &layout,
+                sample,
+                &rpm_spec,
+                self.hud_rpm_style,
+                self.minimal_hud,
+            );
+            if self.draws_interior() && !self.minimal_hud {
+                draw_cockpit_instruments(&mut canvas, &layout, sample, &rpm_spec);
+            }
         }
         self.draw_side_controls(&mut canvas, &layout);
         self.draw_countdown_and_timer(&mut canvas);
@@ -3896,60 +4117,307 @@ impl Runtime {
         }
     }
 }
-fn draw_cluster(canvas: &mut Canvas, layout: &DrivingLayout, sample: &Sample) {
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VehicleRpmSpec {
+    pub redline_rpm: Option<f32>,
+    pub optimal_shift_rpm: Option<f32>,
+    pub scale_max_rpm: f32,
+}
+
+impl VehicleRpmSpec {
+    pub fn from_tech_sheet(sheet: Option<&ngp_proto::VehicleTechSheet>) -> Self {
+        let Some(sheet) = sheet else {
+            return Self {
+                redline_rpm: None,
+                optimal_shift_rpm: None,
+                scale_max_rpm: 8000.0,
+            };
+        };
+        let redline = sheet
+            .rpm_limit
+            .filter(|&r| (3500..=15000).contains(&r))
+            .map(|r| r as f32);
+        let power_rpm = match sheet.profile {
+            ngp_proto::PhysicsProfile::NgpDetected {
+                power_rpm: Some(p), ..
+            } if p.is_finite() && p >= 2500.0 => Some(p),
+            _ => None,
+        };
+        // Only expose a distinct optimal shift point when both peak-power RPM and
+        // real rev-limit RPM are present in the car's `.lsp` data.
+        let optimal_shift_rpm = match (power_rpm, redline) {
+            (Some(p), Some(r)) if p < r * 0.96 => Some((p + (r - p) * 0.45).clamp(p, r * 0.96)),
+            _ => None,
+        };
+        let scale_max_rpm = redline
+            .or_else(|| power_rpm.map(|p| (p * 1.18).max(7000.0)))
+            .unwrap_or(8000.0);
+        Self {
+            redline_rpm: redline,
+            optimal_shift_rpm,
+            scale_max_rpm,
+        }
+    }
+}
+
+impl Runtime {
+    pub(crate) fn active_vehicle_rpm_spec(&self) -> VehicleRpmSpec {
+        let sheet = self
+            .content
+            .vehicle(&self.selection.vehicle.id)
+            .and_then(|v| v.tech_sheet.as_ref());
+        VehicleRpmSpec::from_tech_sheet(sheet)
+    }
+}
+
+fn draw_cluster_with_rpm_hud(
+    canvas: &mut Canvas,
+    layout: &DrivingLayout,
+    sample: &Sample,
+    spec: &VehicleRpmSpec,
+    style: menu::HudRpmStyle,
+    minimal_hud: bool,
+) {
     let rect = layout.cluster;
-    ui::panel(canvas, rect, PANEL, LINE);
     let gear = match sample.gear {
         0 => "R".to_string(),
         1 => "N".to_string(),
         g => (g - 1).to_string(),
     };
-    let third = rect.w / 3.0;
-    for index in 1..3 {
-        let x = rect.x + third * index as f32;
-        let (px, py, _w, ph) = ui::px(Rect::new(x, rect.y, 0.0, rect.h), canvas);
-        canvas.rect(px, py + ph * 0.18, 1.0, ph * 0.64, LINE);
+    let speed_kmh = format!("{:.0}", sample.speed() * 3.6);
+    let rpm_val = sample.rpm.max(0.0);
+    let max_rpm = spec.scale_max_rpm.max(4000.0);
+    let frac = (rpm_val / max_rpm).clamp(0.0, 1.0);
+    let redline = spec.redline_rpm.unwrap_or(max_rpm * 0.92);
+    let shift_rpm = spec.optimal_shift_rpm.unwrap_or(redline * 0.90);
+    let near_cut = rpm_val >= redline * 0.94;
+    let at_shift = rpm_val >= shift_rpm;
+
+    let border = if near_cut {
+        BAD
+    } else if at_shift {
+        WARN
+    } else {
+        LINE
+    };
+    ui::panel(canvas, rect, PANEL, border);
+
+    let (rx, ry, rw, rh) = ui::px(rect, canvas);
+    let gear_w = rw * 0.24;
+    let speed_w = rw * 0.30;
+    let right_x = rx + gear_w + speed_w;
+    let right_w = (rw - gear_w - speed_w).max(20.0);
+
+    // Dividers between GEAR | KM/H | RPM gauge
+    canvas.rect(rx + gear_w, ry + rh * 0.16, 1.0, rh * 0.68, LINE);
+    canvas.rect(right_x, ry + rh * 0.16, 1.0, rh * 0.68, LINE);
+
+    // 1. Gear (large, clear)
+    let gear_col = if near_cut { BAD } else { ACCENT };
+    let gw = ui::texture_width(&gear, 1.55);
+    canvas.text(
+        rx + (gear_w - gw).max(0.0) * 0.5,
+        ry + 3.0,
+        &gear,
+        1.55,
+        gear_col,
+    );
+    let glw = ui::texture_width("MARCHA", 0.45);
+    canvas.text(
+        rx + (gear_w - glw).max(0.0) * 0.5,
+        ry + rh - 10.0,
+        "MARCHA",
+        0.45,
+        ui::DIM,
+    );
+
+    // 2. Speed KM/H
+    let sw = ui::texture_width(&speed_kmh, 1.30);
+    canvas.text(
+        rx + gear_w + (speed_w - sw).max(0.0) * 0.5,
+        ry + 4.0,
+        &speed_kmh,
+        1.30,
+        TEXT,
+    );
+    let kw = ui::texture_width("KM/H", 0.48);
+    canvas.text(
+        rx + gear_w + (speed_w - kw).max(0.0) * 0.5,
+        ry + rh - 10.0,
+        "KM/H",
+        0.48,
+        ui::DIM,
+    );
+
+    // 3. RPM HUD (Style A: Horizontal Bar or Style B: Shift Lights)
+    let pad = 6.0;
+    let gx = right_x + pad;
+    let gw_inner = (right_w - pad * 2.0).max(16.0);
+    match style {
+        menu::HudRpmStyle::HorizontalBar => {
+            let bar_y = ry + 8.0;
+            let bar_h = (rh * 0.34).clamp(8.0, 16.0);
+            canvas.rect(gx, bar_y, gw_inner, bar_h, [20, 24, 32, 240]);
+            let red_frac = (redline / max_rpm).clamp(0.75, 0.98);
+            // Subtle redline zone backdrop on the right end
+            let red_x = gx + gw_inner * red_frac;
+            canvas.rect(
+                red_x,
+                bar_y,
+                (gx + gw_inner) - red_x,
+                bar_h,
+                [85, 22, 26, 180],
+            );
+
+            // Optimal shift marker tick when verified from real car data
+            if let Some(opt) = spec.optimal_shift_rpm {
+                let opt_x = gx + gw_inner * (opt / max_rpm).clamp(0.4, 0.96);
+                canvas.rect(opt_x - 1.0, bar_y - 2.0, 2.0, bar_h + 4.0, WARN);
+            }
+
+            // Segmented GT-style progress fill
+            let segs = 16usize;
+            let seg_gap = 1.5;
+            let seg_w = ((gw_inner - seg_gap * (segs - 1) as f32) / segs as f32).max(1.5);
+            for i in 0..segs {
+                let thresh = (i + 1) as f32 / segs as f32;
+                if frac + 0.01 < thresh {
+                    continue;
+                }
+                let seg_col = if thresh >= red_frac {
+                    BAD
+                } else if thresh >= 0.74 {
+                    WARN
+                } else {
+                    [56, 214, 152, 255]
+                };
+                let sx = gx + i as f32 * (seg_w + seg_gap);
+                canvas.rect(sx, bar_y + 1.0, seg_w, bar_h - 2.0, seg_col);
+            }
+        }
+        menu::HudRpmStyle::ShiftLights => {
+            let leds = 12usize;
+            let gap = 2.5;
+            let led_w = ((gw_inner - gap * (leds - 1) as f32) / leds as f32).max(2.0);
+            let led_h = (rh * 0.36).clamp(8.0, 16.0);
+            let led_y = ry + 7.0;
+            let active_leds = ((frac * leds as f32).ceil() as usize).min(leds);
+            for i in 0..leds {
+                let lx = gx + i as f32 * (led_w + gap);
+                let lit = i < active_leds;
+                let base = if i < 5 {
+                    [46, 214, 118, 255]
+                } else if i < 9 {
+                    [245, 178, 52, 255]
+                } else {
+                    [242, 62, 62, 255]
+                };
+                let col = if lit {
+                    base
+                } else {
+                    [base[0] / 5, base[1] / 5, base[2] / 5, 190]
+                };
+                canvas.rect(lx, led_y, led_w, led_h, col);
+            }
+        }
     }
-    let cells = [
-        (
-            Rect::new(rect.x, rect.y, third, rect.h),
-            gear,
-            "GEAR",
-            ACCENT,
-            1.45,
-        ),
-        (
-            Rect::new(rect.x + third, rect.y, third, rect.h),
-            format!("{:.0}", sample.speed() * 3.6),
-            "KM/H",
-            TEXT,
-            1.25,
-        ),
-        (
-            Rect::new(rect.x + third * 2.0, rect.y, third, rect.h),
-            format!("{:.0}", sample.rpm),
-            "RPM",
-            INFO,
-            1.05,
-        ),
-    ];
-    for (cell, value, label, color, scale) in cells {
-        let (x, y, w, h) = ui::px(cell, canvas);
-        canvas.text(
-            x + (w - ui::texture_width(&value, scale)).max(0.0) * 0.5,
-            y + 4.0,
-            &value,
-            scale,
-            color,
-        );
-        canvas.text(
-            x + (w - ui::texture_width(label, 0.55)).max(0.0) * 0.5,
-            y + h - 12.0,
-            label,
-            0.55,
-            ui::DIM,
+
+    // Bottom RPM numeric + cut/shift indicator
+    if !minimal_hud {
+        let rpm_txt = if near_cut {
+            format!("{:.0} CORTE!", rpm_val)
+        } else if let Some(lim) = spec.redline_rpm {
+            format!("{:.0} / {:.0}", rpm_val, lim)
+        } else {
+            format!("{:.0} RPM", rpm_val)
+        };
+        let txt_col = if near_cut {
+            BAD
+        } else if at_shift {
+            WARN
+        } else {
+            INFO
+        };
+        canvas.text(gx, ry + rh - 11.0, &rpm_txt, 0.52, txt_col);
+    }
+}
+
+/// Functional cockpit analog-style tachometer & speedometer needles + digital gear/kmh readout,
+/// driven directly by 720 Hz physics telemetry when rendering inside `COCKPIT` view.
+fn draw_cockpit_instruments(
+    canvas: &mut Canvas,
+    layout: &DrivingLayout,
+    sample: &Sample,
+    spec: &VehicleRpmSpec,
+) {
+    let dial_y = (layout.cluster.y - 0.135).max(0.55);
+    let tacho_rect = Rect::new(layout.cluster.x + 0.01, dial_y, 0.088, 0.125);
+    let speed_rect = Rect::new(
+        layout.cluster.x + layout.cluster.w - 0.098,
+        dial_y,
+        0.088,
+        0.125,
+    );
+    let rpm_frac = (sample.rpm.max(0.0) / spec.scale_max_rpm.max(4000.0)).clamp(0.0, 1.0);
+    let speed_kmh = sample.speed() * 3.6;
+    let speed_frac = (speed_kmh as f32 / 220.0).clamp(0.0, 1.0);
+
+    draw_analog_dial(
+        canvas,
+        tacho_rect,
+        rpm_frac,
+        &format!("{:.0}", sample.rpm / 100.0),
+        "x100",
+        if rpm_frac >= 0.90 { BAD } else { ACCENT },
+    );
+    draw_analog_dial(
+        canvas,
+        speed_rect,
+        speed_frac,
+        &format!("{:.0}", speed_kmh),
+        "KM/H",
+        INFO,
+    );
+}
+
+fn draw_analog_dial(
+    canvas: &mut Canvas,
+    rect: Rect,
+    frac: f32,
+    value: &str,
+    unit: &str,
+    needle_color: [u8; 4],
+) {
+    ui::panel(canvas, rect, [10, 13, 19, 196], LINE);
+    let (x, y, w, h) = ui::px(rect, canvas);
+    let cx = x + w * 0.5;
+    let cy = y + h * 0.48;
+    let r = (w.min(h) * 0.36).max(10.0);
+    let start_ang = std::f32::consts::PI * 0.78;
+    let sweep = std::f32::consts::PI * 1.44;
+    for t in 0..=8 {
+        let tf = t as f32 / 8.0;
+        let a = start_ang + sweep * tf;
+        let tx = cx + a.cos() * r;
+        let ty = cy + a.sin() * r;
+        let tcol = if tf >= 0.875 { BAD } else { ui::DIM };
+        canvas.rect(tx - 1.0, ty - 1.0, 2.0, 2.0, tcol);
+    }
+    let ang = start_ang + sweep * frac.clamp(0.0, 1.0);
+    for step in 1..=6 {
+        let d = r * (step as f32 / 6.5);
+        canvas.rect(
+            cx + ang.cos() * d - 1.2,
+            cy + ang.sin() * d - 1.2,
+            2.4,
+            2.4,
+            needle_color,
         );
     }
+    let vw = ui::texture_width(value, 0.58);
+    canvas.text(cx - vw * 0.5, y + h - 18.0, value, 0.58, TEXT);
+    let uw = ui::texture_width(unit, 0.42);
+    canvas.text(cx - uw * 0.5, y + h - 9.0, unit, 0.42, ui::DIM);
 }
 fn draw_control(canvas: &mut Canvas, rect: Rect, label: &str, level: f32, opacity: f32) {
     let active = level > 0.0;
@@ -4084,6 +4552,41 @@ fn motion(enabled: bool) -> f64 {
         let _ = enabled;
         f64::NAN
     }
+}
+
+fn prompt_pilot_name_ios(initial: &str) {
+    #[cfg(target_os = "ios")]
+    {
+        unsafe extern "C" {
+            fn rerbr_prompt_pilot_name(initial: *const std::os::raw::c_char);
+        }
+        if let Ok(cstr) = std::ffi::CString::new(initial) {
+            unsafe { rerbr_prompt_pilot_name(cstr.as_ptr()) };
+        }
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = initial;
+    }
+}
+
+fn poll_pilot_name_ios() -> Option<String> {
+    #[cfg(target_os = "ios")]
+    {
+        unsafe extern "C" {
+            fn rerbr_poll_pilot_name(
+                out: *mut std::os::raw::c_char,
+                cap: std::os::raw::c_int,
+            ) -> std::os::raw::c_int;
+        }
+        let mut buf = [0i8; 64];
+        let ready = unsafe { rerbr_poll_pilot_name(buf.as_mut_ptr(), buf.len() as i32) };
+        if ready != 0 {
+            let cstr = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+            return cstr.to_str().ok().map(str::to_string);
+        }
+    }
+    None
 }
 
 fn restored_stage(catalog: &Catalog, id: &str) -> rerbr_content::StageDescriptor {
@@ -5156,5 +5659,62 @@ mod reload_tests {
         let (c, fov) = cam.camera_and_fov(0.72, 2.2, 2556.0 / 1179.0);
         assert!(c.eye.is_finite() && c.target.is_finite() && fov > 30.0 && fov < 60.0);
         assert!(c.eye.y >= 0.35);
+    }
+
+    #[test]
+    fn clio_rally5_and_rally4_load_distinct_ngp_packs_and_rpm_hud_styles() {
+        let transfer_rbr = std::path::Path::new(
+            r"C:\Users\adria\Desktop\RBR Mobile - Autos Listos para iPad\LISTOS PARA CONDUCIR\RBRRRRR",
+        );
+        if transfer_rbr.join("rsfdata/cache/cars.json").is_file() {
+            let discovered = rsf_catalog::discover(transfer_rbr);
+            let r5 = discovered
+                .iter()
+                .find(|d| d.descriptor.id == "rsf-renault-clio-rally5")
+                .expect("Clio Rally5 discovered");
+            let r4 = discovered
+                .iter()
+                .find(|d| d.descriptor.id == "rsf-renault-clio-rally4")
+                .expect("Clio Rally4 discovered");
+            assert_eq!(
+                r5.descriptor.rsf_pack.as_deref(),
+                Some("Renault_Clio_Rally5_ngp6")
+            );
+            assert_eq!(
+                r4.descriptor.rsf_pack.as_deref(),
+                Some("Renault_Clio_Rally4_ngp6")
+            );
+            assert_ne!(r5.fmod_bank, r4.fmod_bank);
+            // Both share the RSF 3D model, yet their NGP packs & tech sheets stay isolated.
+            assert_eq!(r5.descriptor.model, r4.descriptor.model);
+            let s5 = r5.tech_sheet.as_ref().expect("Rally5 tech sheet");
+            let s4 = r4.tech_sheet.as_ref().expect("Rally4 tech sheet");
+            assert_ne!(s5.profile, s4.profile);
+        }
+
+        // Verify both RPM HUD styles render cleanly within vertex budget and respect vehicle RPM spec.
+        use crate::harwood::benchmark::hud::{Canvas, MAX_CANVAS_VERTICES};
+        let layout = DrivingLayout::for_size((1024, 768));
+        let sample = rerbr_sim::diagnostics::Sample {
+            rpm: 6750.0,
+            gear: 4,
+            ..Default::default()
+        };
+        let spec = VehicleRpmSpec {
+            redline_rpm: Some(7200.0),
+            optimal_shift_rpm: Some(6500.0),
+            scale_max_rpm: 7200.0,
+        };
+        for style in [
+            menu::HudRpmStyle::HorizontalBar,
+            menu::HudRpmStyle::ShiftLights,
+        ] {
+            let mut canvas = Canvas::new((1024, 768));
+            draw_cluster_with_rpm_hud(&mut canvas, &layout, &sample, &spec, style, false);
+            draw_cockpit_instruments(&mut canvas, &layout, &sample, &spec);
+            let bytes = canvas.finish();
+            assert!(!bytes.is_empty());
+            assert!(bytes.len() / 20 <= MAX_CANVAS_VERTICES);
+        }
     }
 }

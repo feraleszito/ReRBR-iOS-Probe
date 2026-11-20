@@ -658,3 +658,83 @@ fn audit_all_installed_rsf_showroom_models_if_pc_present() {
         "expected most installed RSF SGC models to load cleanly, got {passed}/{total_with_sgc}"
     );
 }
+
+#[test]
+fn verify_audi_i20_bmw_c2_and_all_cockpits_if_pc_present() {
+    let rbr = std::path::Path::new(r"C:\Richard Burns Rally");
+    let transfer_rbr = std::path::Path::new(
+        r"C:\Users\adria\Desktop\RBR Mobile - Autos Listos para iPad\LISTOS PARA CONDUCIR\RBRRRRR",
+    );
+    if !rbr.join("Cars").is_dir() || !transfer_rbr.join("rsfdata/cache/cars.json").is_file() {
+        return;
+    }
+    // 1. Audi 200 quattro GrpA: front wheel visual offset aligns with e_wheelhang_lf/rf
+    let audi_desc = crate::driving::rsf_catalog::discover(transfer_rbr)
+        .into_iter()
+        .find(|c| c.descriptor.id == "rsf-audi-200-quattro-grpa")
+        .expect("Audi 200 quattro GrpA in catalog")
+        .descriptor;
+    let audi = load_vehicle_for_mode(rbr, &audi_desc, true).expect("Audi 200 loads");
+    assert!(
+        audi.geometry.wheel_visual_offsets[0].z < -0.10
+            && audi.geometry.wheel_visual_offsets[1].z < -0.10,
+        "Audi 200 front wheel visual Z offset must shift forward into front wheel arch: {:?}",
+        audi.geometry.wheel_visual_offsets
+    );
+
+    // 2. Hyundai i20 Coupe WRC 2020: swapped rf/lb nodes corrected to true geometric corners
+    let i20_desc = crate::driving::rsf_catalog::discover(transfer_rbr)
+        .into_iter()
+        .find(|c| c.descriptor.id == "rsf-hyundai-i20-coupe-wrc-2020")
+        .expect("Hyundai i20 WRC 2020 in catalog")
+        .descriptor;
+    let i20 = load_vehicle_for_mode(rbr, &i20_desc, true).expect("Hyundai i20 WRC 2020 loads");
+    let p = i20.geometry.pivots;
+    let mid_z = (p[0].z + p[1].z + p[2].z + p[3].z) * 0.25;
+    assert!(p[0].x > 0.1 && p[0].z < mid_z, "LF pivot wrong: {:?}", p[0]);
+    assert!(
+        p[1].x < -0.1 && p[1].z < mid_z,
+        "RF pivot wrong: {:?}",
+        p[1]
+    );
+    assert!(p[2].x > 0.1 && p[2].z > mid_z, "LB pivot wrong: {:?}", p[2]);
+    assert!(
+        p[3].x < -0.1 && p[3].z > mid_z,
+        "RB pivot wrong: {:?}",
+        p[3]
+    );
+    assert!(i20.cockpit.is_some(), "i20 WRC 2020 cockpit must load");
+
+    // 3. Audit ALL transfer-ready RSF vehicles' cockpits (including BMW M3 E30, C2 R2 Max, Polo WRC)
+    let mut ok_count = 0usize;
+    let mut total = 0usize;
+    for car in crate::driving::rsf_catalog::discover(transfer_rbr) {
+        total += 1;
+        let loaded = load_vehicle_for_mode(rbr, &car.descriptor, true)
+            .unwrap_or_else(|e| panic!("Failed to load {}: {e}", car.descriptor.id));
+        if loaded.cockpit.is_some() {
+            ok_count += 1;
+        } else {
+            eprintln!(
+                "COCKPIT AUDIT {}: MISSING ({:?})",
+                car.descriptor.id, loaded.cockpit_error
+            );
+        }
+        if matches!(
+            car.descriptor.id.as_str(),
+            "rsf-bmw-m3-e30-grpa" | "rsf-citroen-c2-r2-max" | "rsf-vw-polo-r-wrc-2016"
+        ) {
+            assert!(
+                loaded.cockpit.is_some(),
+                "{} cockpit must now load cleanly, got {:?}",
+                car.descriptor.id,
+                loaded.cockpit_error
+            );
+        }
+    }
+    eprintln!("=== COCKPIT AUDIT SUMMARY: {ok_count}/{total} RSF cars have working cockpits ===");
+    assert_eq!(
+        ok_count, total,
+        "All {total} transfer-ready RSF cars should have working cockpits"
+    );
+}

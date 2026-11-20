@@ -305,6 +305,54 @@ void rerbr_gamepad_poll(RerbrGamepadSnapshot *out) {
     }
 }
 
+static char g_pilot_name_result[64] = {0};
+static int g_pilot_name_ready = 0;
+
+void rerbr_prompt_pilot_name(const char *initial) {
+    NSString *initStr = initial ? [NSString stringWithUTF8String:initial] : @"";
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *keyWindow = rerbr_key_window();
+        UIViewController *vc = keyWindow.rootViewController;
+        while (vc.presentedViewController != nil) {
+            vc = vc.presentedViewController;
+        }
+        if (vc == nil) return;
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Nombre del piloto"
+            message:@"Introduce tu nombre de competición (máx. 18 caracteres)"
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.text = initStr;
+            tf.placeholder = @"PILOTO RBR";
+            tf.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
+            tf.autocorrectionType = UITextAutocorrectionTypeNo;
+            tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+        }];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Cancelar"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            (void)action;
+            NSString *txt = alert.textFields.firstObject.text ?: @"";
+            const char *utf8 = txt.UTF8String;
+            if (utf8 != NULL) {
+                strlcpy(g_pilot_name_result, utf8, sizeof(g_pilot_name_result));
+                g_pilot_name_ready = 1;
+            }
+        }]];
+        [vc presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+int rerbr_poll_pilot_name(char *out, int cap) {
+    if (!g_pilot_name_ready || !out || cap <= 0) return 0;
+    strlcpy(out, g_pilot_name_result, (size_t)cap);
+    g_pilot_name_ready = 0;
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;

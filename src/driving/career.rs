@@ -859,6 +859,7 @@ pub struct StandingRow {
 pub enum TransactionKind {
     InitialGrant,
     VehiclePurchase,
+    VehicleSale,
     ChampionshipPrize,
 }
 
@@ -867,6 +868,7 @@ impl TransactionKind {
         match self {
             Self::InitialGrant => "initial_grant",
             Self::VehiclePurchase => "vehicle_purchase",
+            Self::VehicleSale => "vehicle_sale",
             Self::ChampionshipPrize => "championship_prize",
         }
     }
@@ -874,6 +876,7 @@ impl TransactionKind {
     fn from_code(s: &str) -> Self {
         match s {
             "vehicle_purchase" => Self::VehiclePurchase,
+            "vehicle_sale" => Self::VehicleSale,
             "championship_prize" => Self::ChampionshipPrize,
             _ => Self::InitialGrant,
         }
@@ -1004,13 +1007,16 @@ pub struct StageRecordOutcome {
 pub struct CareerProfile {
     pub schema_version: u32,
     pub pilot_name: String,
+    pub competition_number: u8,
     pub cash_usd: u64,
     pub owned_vehicle_ids: Vec<String>,
+    pub paid_prices_usd: std::collections::BTreeMap<String, u64>,
     pub active_career_vehicle_id: Option<String>,
     pub podiums: u32,
     pub wins: u32,
     pub historics_unlocked: bool,
     pub next_championship_seq: u64,
+    pub last_saved_unix_s: u64,
     pub transactions: Vec<Transaction>,
     pub completed_championships: Vec<CompletedChampionshipRecord>,
     pub active_championship: Option<ActiveChampionship>,
@@ -1018,21 +1024,29 @@ pub struct CareerProfile {
 
 impl CareerProfile {
     pub fn create(pilot_name: &str) -> Result<Self, String> {
+        Self::create_with_number(pilot_name, 7)
+    }
+
+    pub fn create_with_number(pilot_name: &str, competition_number: u8) -> Result<Self, String> {
         let cleaned = sanitize_pilot_name(pilot_name);
         if cleaned.is_empty() {
             return Err("EL NOMBRE DEL PILOTO NO PUEDE ESTAR VACÍO".into());
         }
+        let num = competition_number.clamp(1, 99);
         let now = unix_now_s();
         Ok(Self {
             schema_version: CAREER_SCHEMA_VERSION,
             pilot_name: cleaned,
+            competition_number: num,
             cash_usd: INITIAL_CASH_USD,
             owned_vehicle_ids: Vec::new(),
+            paid_prices_usd: std::collections::BTreeMap::new(),
             active_career_vehicle_id: None,
             podiums: 0,
             wins: 0,
             historics_unlocked: false,
             next_championship_seq: 1,
+            last_saved_unix_s: now,
             transactions: vec![Transaction {
                 kind: TransactionKind::InitialGrant,
                 delta_usd: INITIAL_CASH_USD as i64,
@@ -1043,6 +1057,52 @@ impl CareerProfile {
             completed_championships: Vec::new(),
             active_championship: None,
         })
+    }
+
+    /// 70% of the actual price paid (rounded half-up to the nearest USD: `(paid * 70 + 50) / 100`).
+    /// Falls back to market price for legacy saves created before `paid_prices_usd` tracking.
+    pub fn resale_value_usd(&self, entry: &VehicleEntry) -> u64 {
+        let paid = self
+            .paid_prices_usd
+            .get(&entry.descriptor.id)
+            .copied()
+            .unwrap_or_else(|| {
+                let spec = vehicle_market_spec(entry);
+                spec.price_for(DealershipKind::UsedCars)
+                    .or_else(|| spec.price_for(DealershipKind::NewSalon))
+                    .unwrap_or(0)
+            });
+        (paid.saturating_mul(70).saturating_add(50)) / 100
+    }
+
+    pub fn sell_vehicle(&mut self, entry: &VehicleEntry) -> Result<u64, String> {
+        let id = &entry.descriptor.id;
+        if !self.owns_vehicle(id) {
+            return Err("NO POSEES ESTE VEHÍCULO EN TU GARAJE".into());
+        }
+        if self
+            .active_championship
+            .as_ref()
+            .is_some_and(|c| !c.finished && c.locked_vehicle_id == *id)
+        {
+            return Err("NO PUEDES VENDER EL COCHE BLOQUEADO DEL CAMPEONATO ACTIVO".into());
+        }
+        let resale = self.resale_value_usd(entry);
+        self.owned_vehicle_ids.retain(|v| v != id);
+        self.paid_prices_usd.remove(id);
+        self.cash_usd = self.cash_usd.saturating_add(resale);
+        if self.active_career_vehicle_id.as_deref() == Some(id.as_str()) {
+            self.active_career_vehicle_id = self.owned_vehicle_ids.first().cloned();
+        }
+        self.last_saved_unix_s = unix_now_s();
+        self.transactions.push(Transaction {
+            kind: TransactionKind::VehicleSale,
+            delta_usd: resale as i64,
+            balance_after_usd: self.cash_usd,
+            description: format!("Venta {} (70%)", entry.descriptor.name),
+            timestamp_unix_s: self.last_saved_unix_s,
+        });
+        Ok(resale)
     }
 
     pub fn owns_vehicle(&self, vehicle_id: &str) -> bool {
@@ -1100,6 +1160,8 @@ impl CareerProfile {
 
         self.cash_usd -= price;
         self.owned_vehicle_ids.push(entry.descriptor.id.clone());
+        self.paid_prices_usd
+            .insert(entry.descriptor.id.clone(), price);
         if self.active_career_vehicle_id.is_none() {
             self.active_career_vehicle_id = Some(entry.descriptor.id.clone());
         }
@@ -1367,8 +1429,15 @@ impl CareerProfile {
     }
 }
 
+pub const CAREER_SLOT_COUNT: usize = 3;
+
 #[derive(Debug, Clone, Default)]
 pub struct CareerStore {
+    pub active_slot: usize,
+    pub slots: [Option<CareerProfile>; CAREER_SLOT_COUNT],
+    pub slot_errors: [Option<String>; CAREER_SLOT_COUNT],
+    pub pending_legacy_profile: Option<CareerProfile>,
+    pub migrated_from_legacy: bool,
     pub profile: Option<CareerProfile>,
     pub load_error: Option<String>,
 }
@@ -1376,46 +1445,168 @@ pub struct CareerStore {
 impl CareerStore {
     pub fn path() -> Option<PathBuf> {
         let root = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(PathBuf::from)?;
-        Some(Self::path_in(&root))
+        Some(Self::slot_path_in(&root, 0))
     }
 
     pub fn path_in(documents_root: &Path) -> PathBuf {
         documents_root.join("RBR").join("career_profile.json")
     }
 
+    pub fn slot_path_in(documents_root: &Path, slot: usize) -> PathBuf {
+        let n = slot.min(CAREER_SLOT_COUNT - 1) + 1;
+        documents_root
+            .join("RBR")
+            .join(format!("career_slot_{n}.json"))
+    }
+
+    fn meta_path_in(documents_root: &Path) -> PathBuf {
+        documents_root.join("RBR").join("career_slots_meta.txt")
+    }
+
     pub fn load() -> Self {
-        let Some(path) = Self::path() else {
+        let Some(root) = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(PathBuf::from) else {
             return Self::default();
         };
-        Self::load_from_path(&path)
+        Self::load_from_root(&root)
     }
 
     pub fn load_from_path(path: &Path) -> Self {
         if !path.exists() {
             return Self::default();
         }
+        let mut store = Self::default();
         match std::fs::read_to_string(path) {
             Ok(text) => match parse_profile_json(&text) {
-                Ok(profile) => Self {
-                    profile: Some(profile),
-                    load_error: None,
-                },
-                Err(err) => Self {
-                    profile: None,
-                    load_error: Some(format!("PERFIL CARRERA CORRUPTO: {err}")),
-                },
+                Ok(profile) => {
+                    store.slots[0] = Some(profile.clone());
+                    store.profile = Some(profile);
+                }
+                Err(err) => {
+                    let msg = format!("PERFIL CARRERA CORRUPTO: {err}");
+                    store.slot_errors[0] = Some(msg.clone());
+                    store.load_error = Some(msg);
+                }
             },
-            Err(err) => Self {
-                profile: None,
-                load_error: Some(format!("ERROR LEYENDO CARRERA: {err}")),
-            },
+            Err(err) => {
+                let msg = format!("ERROR LEYENDO CARRERA: {err}");
+                store.slot_errors[0] = Some(msg.clone());
+                store.load_error = Some(msg);
+            }
+        }
+        store
+    }
+
+    pub fn load_from_root(documents_root: &Path) -> Self {
+        let mut store = Self::default();
+        let meta_path = Self::meta_path_in(documents_root);
+        let mut legacy_already_imported = false;
+        if let Ok(meta) = std::fs::read_to_string(&meta_path) {
+            for line in meta.lines() {
+                if let Some((k, v)) = line.split_once('=') {
+                    match k.trim() {
+                        "active_slot" => {
+                            if let Ok(idx) = v.trim().parse::<usize>() {
+                                store.active_slot = idx.min(CAREER_SLOT_COUNT - 1);
+                            }
+                        }
+                        "legacy_imported" => {
+                            legacy_already_imported = v.trim() == "true";
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for i in 0..CAREER_SLOT_COUNT {
+            let sp = Self::slot_path_in(documents_root, i);
+            if !sp.exists() {
+                continue;
+            }
+            match std::fs::read_to_string(&sp) {
+                Ok(text) => match parse_profile_json(&text) {
+                    Ok(profile) => store.slots[i] = Some(profile),
+                    Err(err) => {
+                        store.slot_errors[i] = Some(format!("ESPACIO {} CORRUPTO: {err}", i + 1));
+                    }
+                },
+                Err(err) => {
+                    store.slot_errors[i] = Some(format!("ERROR ESPACIO {}: {err}", i + 1));
+                }
+            }
+        }
+
+        // Safe non-destructive migration of legacy `career_profile.json`.
+        let legacy_path = Self::path_in(documents_root);
+        if legacy_path.exists() && !legacy_already_imported {
+            if let Ok(text) = std::fs::read_to_string(&legacy_path) {
+                if let Ok(legacy_prof) = parse_profile_json(&text) {
+                    if let Some(free_idx) = store.slots.iter().position(|s| s.is_none()) {
+                        store.slots[free_idx] = Some(legacy_prof.clone());
+                        store.active_slot = free_idx;
+                        store.migrated_from_legacy = true;
+                        let slot_file = Self::slot_path_in(documents_root, free_idx);
+                        let _ = Self::write_profile_atomic(&slot_file, &legacy_prof);
+                        let bak = legacy_path.with_file_name("career_profile.legacy.bak");
+                        if !bak.exists() {
+                            let _ = std::fs::copy(&legacy_path, &bak);
+                        }
+                        let _ = Self::write_meta(documents_root, store.active_slot, true);
+                    } else {
+                        store.pending_legacy_profile = Some(legacy_prof);
+                    }
+                }
+            }
+        }
+
+        store.sync_active_mirror();
+        store
+    }
+
+    fn sync_active_mirror(&mut self) {
+        self.profile = self.slots[self.active_slot].clone();
+        self.load_error = self.slot_errors[self.active_slot].clone();
+    }
+
+    fn write_meta(
+        documents_root: &Path,
+        active_slot: usize,
+        legacy_imported: bool,
+    ) -> Result<(), String> {
+        let p = Self::meta_path_in(documents_root);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let body = format!("active_slot={active_slot}\nlegacy_imported={legacy_imported}\n");
+        std::fs::write(p, body).map_err(|e| e.to_string())
+    }
+
+    pub fn select_slot(&mut self, slot: usize) {
+        let idx = slot.min(CAREER_SLOT_COUNT - 1);
+        self.active_slot = idx;
+        self.sync_active_mirror();
+        if let Some(root) = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(PathBuf::from) {
+            let _ = Self::write_meta(&root, self.active_slot, true);
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let Some(path) = Self::path() else {
+    pub fn save(&mut self) -> Result<(), String> {
+        if let Some(prof) = self.profile.as_mut() {
+            prof.last_saved_unix_s = unix_now_s();
+        }
+        self.slots[self.active_slot] = self.profile.clone();
+        let Some(root) = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(PathBuf::from) else {
             return Ok(());
         };
+        self.save_to_root(&root)
+    }
+
+    pub fn save_to_root(&self, documents_root: &Path) -> Result<(), String> {
+        let path = Self::slot_path_in(documents_root, self.active_slot);
+        let _ = Self::write_meta(
+            documents_root,
+            self.active_slot,
+            self.pending_legacy_profile.is_none(),
+        );
         self.save_to_path(&path)
     }
 
@@ -1423,8 +1614,16 @@ impl CareerStore {
         let Some(profile) = self.profile.as_ref() else {
             return Ok(());
         };
+        Self::write_profile_atomic(path, profile)
+    }
+
+    fn write_profile_atomic(path: &Path, profile: &CareerProfile) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        if path.exists() {
+            let bak = path.with_extension("json.bak");
+            let _ = std::fs::copy(path, bak);
         }
         let tmp_name = format!(
             ".{}.tmp.{}",
@@ -1455,14 +1654,56 @@ impl CareerStore {
         }
     }
 
-    /// Creates a brand-new profile ONLY if none exists (never resets or duplicates initial cash).
+    /// Creates a brand-new profile ONLY if the active slot is empty.
     pub fn create_profile(&mut self, pilot_name: &str) -> Result<(), String> {
+        self.create_profile_with_number(pilot_name, 7)
+    }
+
+    pub fn create_profile_with_number(
+        &mut self,
+        pilot_name: &str,
+        competition_number: u8,
+    ) -> Result<(), String> {
         if self.profile.is_some() {
-            return Err("YA EXISTE UN PERFIL DE CARRERA ACTIVO".into());
+            return Err("YA EXISTE UN PERFIL DE CARRERA EN ESTE ESPACIO".into());
         }
-        let profile = CareerProfile::create(pilot_name)?;
-        self.profile = Some(profile);
+        let profile = CareerProfile::create_with_number(pilot_name, competition_number)?;
+        self.profile = Some(profile.clone());
+        self.slots[self.active_slot] = Some(profile);
+        self.slot_errors[self.active_slot] = None;
         self.load_error = None;
+        self.save()
+    }
+
+    /// Resets ONLY the currently selected Career slot (never touches the other 2 slots).
+    pub fn reset_active_slot_in_root(&mut self, documents_root: Option<&Path>) {
+        self.slots[self.active_slot] = None;
+        self.slot_errors[self.active_slot] = None;
+        self.profile = None;
+        self.load_error = None;
+        if let Some(root) = documents_root {
+            let sp = Self::slot_path_in(root, self.active_slot);
+            if sp.exists() {
+                let _ = std::fs::remove_file(&sp);
+            }
+            let _ = Self::write_meta(root, self.active_slot, true);
+        }
+    }
+
+    pub fn reset_active_slot(&mut self) {
+        let root = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(PathBuf::from);
+        self.reset_active_slot_in_root(root.as_deref());
+    }
+
+    pub fn import_pending_legacy_into_active_slot(&mut self) -> Result<(), String> {
+        let Some(prof) = self.pending_legacy_profile.take() else {
+            return Err("NO HAY GUARDADO ANTIGUO PENDIENTE".into());
+        };
+        self.profile = Some(prof.clone());
+        self.slots[self.active_slot] = Some(prof);
+        self.slot_errors[self.active_slot] = None;
+        self.load_error = None;
+        self.migrated_from_legacy = true;
         self.save()
     }
 }
@@ -1515,7 +1756,9 @@ pub fn encode_profile_json(p: &CareerProfile) -> String {
     let _ = writeln!(out, "{{");
     let _ = writeln!(out, "  \"schema_version\": {},", p.schema_version);
     let _ = writeln!(out, "  \"pilot_name\": {},", json_escape(&p.pilot_name));
+    let _ = writeln!(out, "  \"competition_number\": {},", p.competition_number);
     let _ = writeln!(out, "  \"cash_usd\": {},", p.cash_usd);
+    let _ = writeln!(out, "  \"last_saved_unix_s\": {},", p.last_saved_unix_s);
     out.push_str("  \"owned_vehicle_ids\": [");
     for (i, id) in p.owned_vehicle_ids.iter().enumerate() {
         if i > 0 {
@@ -1524,6 +1767,14 @@ pub fn encode_profile_json(p: &CareerProfile) -> String {
         out.push_str(&json_escape(id));
     }
     out.push_str("],\n");
+    out.push_str("  \"paid_prices_usd\": {");
+    for (i, (id, price)) in p.paid_prices_usd.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{}: {}", json_escape(id), price);
+    }
+    out.push_str("},\n");
     match &p.active_career_vehicle_id {
         Some(id) => {
             let _ = writeln!(out, "  \"active_career_vehicle_id\": {},", json_escape(id));
@@ -2137,16 +2388,36 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
         _ => None,
     };
 
+    let competition_number = root
+        .field("competition_number")
+        .and_then(JsonVal::as_u64)
+        .map_or(7, |n| n.clamp(1, 99) as u8);
+    let last_saved_unix_s = root
+        .field("last_saved_unix_s")
+        .and_then(JsonVal::as_u64)
+        .unwrap_or(0);
+    let mut paid_prices_usd = std::collections::BTreeMap::new();
+    if let Some(JsonVal::Object(entries)) = root.field("paid_prices_usd") {
+        for (k, v) in entries {
+            if let Some(price) = v.as_u64() {
+                paid_prices_usd.insert(k.clone(), price);
+            }
+        }
+    }
+
     Ok(CareerProfile {
         schema_version,
         pilot_name,
+        competition_number,
         cash_usd,
         owned_vehicle_ids,
+        paid_prices_usd,
         active_career_vehicle_id,
         podiums,
         wins,
         historics_unlocked,
         next_championship_seq,
+        last_saved_unix_s,
         transactions,
         completed_championships,
         active_championship,
@@ -2312,6 +2583,7 @@ mod tests {
         let store = CareerStore {
             profile: Some(p),
             load_error: None,
+            ..CareerStore::default()
         };
         store.save_to_path(&path).unwrap();
         let mut p = CareerStore::load_from_path(&path).profile.unwrap();
@@ -2359,6 +2631,7 @@ mod tests {
         CareerStore {
             profile: Some(p.clone()),
             load_error: None,
+            ..CareerStore::default()
         }
         .save_to_path(&path)
         .unwrap();
@@ -2621,5 +2894,73 @@ mod tests {
             .buy_vehicle_in_dealership(&clio_r4, DealershipKind::NewSalon, true)
             .is_err());
         assert_eq!(profile.owned_vehicle_ids.len(), 2);
+    }
+
+    #[test]
+    fn three_career_slots_legacy_migration_sell_70_pct_and_isolated_reset() {
+        let root =
+            std::env::temp_dir().join(format!("rerbr-career-slots-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("RBR")).unwrap();
+
+        // 1. Legacy `career_profile.json` exists before upgrade -> migrates safely into Slot 1
+        //    without deleting `career_profile.json`.
+        let mut legacy = CareerProfile::create("CARLOS SAINZ").unwrap();
+        legacy.cash_usd = 24_000;
+        std::fs::write(CareerStore::path_in(&root), encode_profile_json(&legacy)).unwrap();
+
+        let mut store = CareerStore::load_from_root(&root);
+        assert!(store.migrated_from_legacy);
+        assert_eq!(store.active_slot, 0);
+        assert_eq!(store.slots[0].as_ref().unwrap().pilot_name, "CARLOS SAINZ");
+        assert!(
+            CareerStore::path_in(&root).exists(),
+            "Legacy career_profile.json must never be deleted"
+        );
+
+        // 2. Create independent profiles in Slot 2 (#24) and Slot 3 (#88).
+        store.select_slot(1);
+        assert!(store.profile.is_none());
+        let p2 = CareerProfile::create_with_number("SEBASTIEN", 24).unwrap();
+        store.slots[1] = Some(p2.clone());
+        store.profile = Some(p2);
+        store.save_to_root(&root).unwrap();
+
+        store.select_slot(2);
+        let p3 = CareerProfile::create_with_number("JUHA", 88).unwrap();
+        store.slots[2] = Some(p3.clone());
+        store.profile = Some(p3);
+        store.save_to_root(&root).unwrap();
+
+        // Reload from disk and verify all 3 slots are independent.
+        let mut reloaded = CareerStore::load_from_root(&root);
+        assert_eq!(reloaded.slots[0].as_ref().unwrap().cash_usd, 24_000);
+        assert_eq!(reloaded.slots[1].as_ref().unwrap().competition_number, 24);
+        assert_eq!(reloaded.slots[2].as_ref().unwrap().competition_number, 88);
+
+        // 3. Verify 70% resale rule on $15,000, $24,000, and $89,000 vehicles.
+        let mut p_sell = reloaded.slots[1].clone().unwrap();
+        for (paid, expected_resale) in [(15_000u64, 10_500u64), (24_000, 16_800), (89_000, 62_300)]
+        {
+            let car = make_rsf_entry("rsf-test-sell", "Test Car", "Rally 4", 2021);
+            p_sell.owned_vehicle_ids.push("rsf-test-sell".into());
+            p_sell.paid_prices_usd.insert("rsf-test-sell".into(), paid);
+            p_sell.active_career_vehicle_id = Some("rsf-test-sell".into());
+            assert_eq!(p_sell.resale_value_usd(&car), expected_resale);
+            let got = p_sell.sell_vehicle(&car).unwrap();
+            assert_eq!(got, expected_resale);
+            assert!(!p_sell.owns_vehicle("rsf-test-sell"));
+            assert!(p_sell.active_career_vehicle_id.is_none());
+        }
+
+        // 4. Reset Slot 2 only -> Slots 1 and 3 must remain completely intact!
+        reloaded.select_slot(1);
+        reloaded.reset_active_slot_in_root(Some(&root));
+        let after_reset = CareerStore::load_from_root(&root);
+        assert!(after_reset.slots[0].is_some());
+        assert!(after_reset.slots[1].is_none());
+        assert!(after_reset.slots[2].is_some());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -170,6 +170,8 @@ struct LoadedShowroomCar {
     vehicle_name: String,
     gpu: Gpu,
     model: Mat4,
+    wheel_models: [Mat4; 4],
+    door_dorsals: Option<[(Vec3, Vec3); 2]>,
     center_y: f32,
     radius: f32,
     half_x: f32,
@@ -207,6 +209,9 @@ impl LoadedShowroomCar {
         let reference = Vec3::new(avg_pivot.x, floor_y, avg_pivot.z);
         let mut model = coords::car_to_stage(Vec3::ZERO, Vec3::Z);
         model.w_axis = (-model.transform_vector3(reference)).extend(1.0);
+        let wheel_models = std::array::from_fn(|k| {
+            model * Mat4::from_translation(car.geometry.wheel_visual_offsets[k])
+        });
 
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);
@@ -226,12 +231,15 @@ impl LoadedShowroomCar {
             (0.72, 2.35, 0.95, 2.15)
         };
 
+        let door_dorsals = car.geometry.door_dorsals;
         let gpu = Gpu::new(device, queue, format, car)?;
         Ok(Self {
             vehicle_id,
             vehicle_name,
             gpu,
             model,
+            wheel_models,
+            door_dorsals,
             center_y,
             radius,
             half_x,
@@ -430,6 +438,45 @@ impl Showroom {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Projects the active showroom car's door-side dorsal anchors (`e_door_l`, `e_door_r`) into
+    /// normalized screen coordinates `[0..1]` when facing the camera, without altering original assets.
+    pub fn dorsal_screen_positions(
+        &self,
+        camera_state: &ShowroomCamera,
+        size: (u32, u32),
+    ) -> Vec<(f32, f32)> {
+        let Some(car) = &self.active else {
+            return Vec::new();
+        };
+        let Some(dorsals) = car.door_dorsals else {
+            return Vec::new();
+        };
+        let aspect = size.0.max(1) as f32 / size.1.max(1) as f32;
+        let (camera, fov) = camera_state.camera_and_fov(car.center_y, car.radius, aspect);
+        let vp = super::placement::view_projection_with_fov(camera, aspect, fov);
+        let mut out = Vec::new();
+        for (center, normal) in dorsals {
+            let wp = car.model.transform_point3(center + normal * 0.025);
+            let wn = car.model.transform_vector3(normal).normalize_or_zero();
+            let to_cam = (camera.eye - wp).normalize_or_zero();
+            if wn.dot(to_cam) <= 0.30 {
+                continue;
+            }
+            let clip = vp * wp.extend(1.0);
+            if clip.w <= 0.1 {
+                continue;
+            }
+            let ndc = clip.truncate() / clip.w;
+            let nx = ndc.x * 0.5 + 0.5;
+            let ny = 0.5 - ndc.y * 0.5;
+            if (0.06..=0.94).contains(&nx) && (0.14..=0.72).contains(&ny) {
+                out.push((nx, ny));
+            }
+        }
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         device: &wgpu::Device,
@@ -578,7 +625,13 @@ impl Showroom {
         // Pass 3: Real 3D car rendered with studio lighting onto the shared reverse-Z depth buffer.
         if let Some(car) = &self.active {
             let frame = Frame {
-                models: [car.model; 5],
+                models: [
+                    car.model,
+                    car.wheel_models[0],
+                    car.wheel_models[1],
+                    car.wheel_models[2],
+                    car.wheel_models[3],
+                ],
                 camera,
                 max_wheel_travel: 0.0,
                 min_wheel_clearance: 0.0,

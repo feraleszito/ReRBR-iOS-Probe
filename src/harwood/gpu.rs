@@ -290,6 +290,9 @@ impl Scene {
                     self.showroom.loading,
                     self.showroom.last_error.as_deref(),
                 );
+                self.benchmark.driving.showroom_dorsal_positions = self
+                    .showroom
+                    .dorsal_screen_positions(&self.benchmark.driving.showroom_camera, size);
                 true
             } else {
                 false

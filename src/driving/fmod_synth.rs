@@ -101,6 +101,7 @@ struct BankBusInfo {
     parent: Option<usize>,
     volume_db: f32,
     automations: Vec<fmod::Automation>,
+    ignore_static_mute: bool,
 }
 
 /// Real-time FMOD vehicle audio engine.
@@ -203,13 +204,14 @@ impl FmodVehicleAudio {
             ));
         }
 
-        let buses: Vec<BankBusInfo> = bank
+        let mut buses: Vec<BankBusInfo> = bank
             .buses
             .iter()
             .map(|b| BankBusInfo {
                 parent: b.parent,
                 volume_db: b.volume_db,
                 automations: b.automations.clone(),
+                ignore_static_mute: false,
             })
             .collect();
 
@@ -297,6 +299,54 @@ impl FmodVehicleAudio {
                     });
                 } else {
                     oneshot_layers.push((role, layer.clone(), 0));
+                }
+            }
+        }
+
+        for role in [EventRole::EngineInt, EventRole::EngineExt] {
+            let role_voices: Vec<Option<usize>> = loop_voices
+                .iter()
+                .filter(|v| v.role == role)
+                .map(|v| v.layer.bus)
+                .collect();
+            if role_voices.is_empty() {
+                continue;
+            }
+            let has_unmuted_layer = role_voices.iter().any(|&bus_start| {
+                let mut cur = bus_start;
+                let mut depth = 0;
+                while let Some(bi) = cur {
+                    if depth >= 16 {
+                        break;
+                    }
+                    depth += 1;
+                    let Some(bus) = buses.get(bi) else {
+                        break;
+                    };
+                    if bus.volume_db <= -79.5 && bus.automations.is_empty() {
+                        return false;
+                    }
+                    cur = bus.parent;
+                }
+                true
+            });
+            if !has_unmuted_layer {
+                for bus_start in role_voices {
+                    let mut cur = bus_start;
+                    let mut depth = 0;
+                    while let Some(bi) = cur {
+                        if depth >= 16 {
+                            break;
+                        }
+                        depth += 1;
+                        let Some(bus) = buses.get_mut(bi) else {
+                            break;
+                        };
+                        if bus.volume_db <= -79.5 && bus.automations.is_empty() {
+                            bus.ignore_static_mute = true;
+                        }
+                        cur = bus.parent;
+                    }
                 }
             }
         }
@@ -620,7 +670,9 @@ impl FmodVehicleAudio {
                 let Some(bus) = self.buses.get(bi) else {
                     break;
                 };
-                total_db += bus.volume_db;
+                if !bus.ignore_static_mute {
+                    total_db += bus.volume_db;
+                }
                 for auto in &bus.automations {
                     if let Some(&pval) = self.param_values.get(auto.param) {
                         if auto.property == Property::VolumeDb {
@@ -1112,6 +1164,38 @@ mod tests {
                 assert!(
                     rms.is_finite() && rms >= 0.010,
                     "silence dip during ramp/overrun step {step} (rpm={rpm}, thr={thr}) in {bank_name}: rms={rms:.5}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn i20_wrc_2021_fmod_engine_ext_and_gear_shifts_are_audible() {
+        let pc_rbr = Path::new(r"C:\Richard Burns Rally");
+        if !pc_rbr.join("AudioFMOD/i20_WRC_2021.bank").is_file() {
+            return;
+        }
+        let mut synth =
+            FmodVehicleAudio::load_from_documents(pc_rbr, "AudioFMOD/i20_WRC_2021.bank", 48000)
+                .expect("i20_WRC_2021.bank should load");
+        let st = synth.stats();
+        assert!(st.decoded_samples > 0 && st.engine_ext_layers > 0 && st.engine_int_layers > 0);
+        for is_cockpit in [false, true] {
+            for (rpm, thr, gear) in [(1200.0, 0.0, 1), (4000.0, 0.5, 3), (7500.0, 1.0, 4)] {
+                synth.update_telemetry(FmodTelemetryInput {
+                    rpm,
+                    throttle: thr,
+                    brake: 0.0,
+                    speed_mps: 22.0,
+                    gear,
+                    wheel_speed_mps: 22.0,
+                });
+                let mut buf = vec![0.0f32; 4800];
+                synth.mix_into(&mut buf, 2400, 1.0, is_cockpit);
+                let rms = (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt();
+                assert!(
+                    rms >= 0.05,
+                    "i20_WRC_2021.bank silent at is_cockpit={is_cockpit} rpm={rpm} thr={thr}: rms={rms:.5}"
                 );
             }
         }

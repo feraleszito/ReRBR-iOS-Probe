@@ -27,6 +27,9 @@ pub fn shown_at_start(part: &Section) -> bool {
         value("Predicate"),
     ) {
         (true, Some(b), Some(p)) => {
+            if p.eq_ignore_ascii_case("NotUsed") {
+                return true;
+            }
             ["light", "brake", "reverse"].iter().any(|n| b.contains(n)) && p == "off"
         }
         _ => true,

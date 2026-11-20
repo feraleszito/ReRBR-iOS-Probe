@@ -38,6 +38,7 @@ pub enum Page {
     RallySchool,
     SchoolBriefing,
     SchoolResult,
+    CareerSlots,
     CareerCreate,
     CareerHub,
     Dealership,
@@ -311,6 +312,7 @@ pub enum Command {
     ToggleFps,
     ToggleDiagnostics,
     ToggleMinimalHud,
+    CycleHudRpmStyle,
     ToggleInvertPedals,
     ToggleClutchHelp,
     InspectContent,
@@ -393,7 +395,15 @@ pub enum Command {
     CareerPilotPrev,
     CareerPilotNext,
     CareerPilotTagNext,
+    CareerPilotEditKeyboard,
+    CareerNumberDown,
+    CareerNumberUp,
     CareerCreateConfirm,
+    CareerSlotSelect(usize),
+    CareerSlotImportLegacy,
+    CareerResetRequest,
+    CareerResetConfirm,
+    CareerResetCancel,
     DealershipPrevCar,
     DealershipNextCar,
     DealershipFilterCycle,
@@ -403,6 +413,9 @@ pub enum Command {
     CareerGaragePrevCar,
     CareerGarageNextCar,
     CareerGarageSelectActive,
+    CareerGarageRequestSell,
+    CareerGarageConfirmSell,
+    CareerGarageCancelSell,
     CareerDiffPrev,
     CareerDiffNext,
     CareerChampStart,
@@ -483,6 +496,40 @@ impl Row {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HudRpmStyle {
+    #[default]
+    HorizontalBar,
+    ShiftLights,
+}
+
+impl HudRpmStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HorizontalBar => "BARRA HORIZONTAL",
+            Self::ShiftLights => "LUCES DE CAMBIO",
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            Self::HorizontalBar => Self::ShiftLights,
+            Self::ShiftLights => Self::HorizontalBar,
+        }
+    }
+    pub fn encode(self) -> &'static str {
+        match self {
+            Self::HorizontalBar => "bar",
+            Self::ShiftLights => "lights",
+        }
+    }
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim() {
+            "lights" | "shift_lights" => Self::ShiftLights,
+            _ => Self::HorizontalBar,
+        }
+    }
+}
+
 pub struct Context<'a> {
     pub selection: &'a rerbr_content::Selection,
     pub content: &'a Catalog,
@@ -502,6 +549,7 @@ pub struct Context<'a> {
     pub fps: bool,
     pub diagnostics: bool,
     pub minimal_hud: bool,
+    pub hud_rpm_style: HudRpmStyle,
     pub invert_pedals: bool,
     pub clutch_help: bool,
     pub ctrl_opacity: f32,
@@ -542,7 +590,10 @@ pub struct Context<'a> {
     pub active_career_stage: bool,
     pub last_career_stage_outcome: Option<&'a super::career::StageRecordOutcome>,
     pub pilot_draft_name: &'a str,
+    pub pilot_draft_number: u8,
+    pub pending_reset_career: bool,
     pub pending_buy_vehicle_id: Option<&'a str>,
+    pub pending_sell_vehicle_id: Option<&'a str>,
     pub selected_career_difficulty: super::career::CareerDifficulty,
 }
 
@@ -739,6 +790,7 @@ impl Menu {
             Page::RallySchool => "ACADEMIA DE RALLY",
             Page::SchoolBriefing => "INSTRUCCIONES DE LECCIÓN",
             Page::SchoolResult => "RESULTADO ESCUELA DE RALLY",
+            Page::CareerSlots => "ESPACIOS DE CARRERA (1-3)",
             Page::CareerCreate => "NUEVO PILOTO — CARRERA",
             Page::CareerHub => "MODO CARRERA",
             Page::Dealership => "CONCESIONARIO 2ª MANO",
@@ -1603,6 +1655,10 @@ impl Menu {
                     Command::ToggleMinimalHud,
                 ),
                 Row::action(
+                    format!("ESTILO HUD RPM: {}", ctx.hud_rpm_style.label()),
+                    Command::CycleHudRpmStyle,
+                ),
+                Row::action(
                     format!("CONTADOR DE FPS EN PANTALLA: {}", on_off(ctx.fps)),
                     Command::ToggleFps,
                 ),
@@ -1876,6 +1932,47 @@ impl Menu {
                     Row::action("VOLVER", Command::Back),
                 ]
             }
+            Page::CareerSlots => {
+                let mut rows = Vec::new();
+                if let Some(career) = ctx.career {
+                    for i in 0..super::career::CAREER_SLOT_COUNT {
+                        let active_tag = if career.active_slot == i {
+                            " [ACTIVO]"
+                        } else {
+                            ""
+                        };
+                        let label = match (&career.slots[i], &career.slot_errors[i]) {
+                            (Some(p), _) => format!(
+                                "ESPACIO {}{active_tag}: #{} {} · {} · {} COCHES",
+                                i + 1,
+                                p.competition_number,
+                                p.pilot_name,
+                                super::career::format_usd(p.cash_usd),
+                                p.owned_vehicle_ids.len()
+                            ),
+                            (None, Some(err)) => format!("ESPACIO {}{active_tag}: {err}", i + 1),
+                            (None, None) => {
+                                format!("ESPACIO {}{active_tag}: VACÍO (NUEVA CARRERA)", i + 1)
+                            }
+                        };
+                        rows.push(Row::action(label, Command::CareerSlotSelect(i)));
+                    }
+                    if let Some(legacy) = &career.pending_legacy_profile {
+                        rows.push(Row::action(
+                            format!(
+                                "IMPORTAR GUARDADO ANTERIOR (#{} {} · {}) AL ESPACIO {}",
+                                legacy.competition_number,
+                                legacy.pilot_name,
+                                super::career::format_usd(legacy.cash_usd),
+                                career.active_slot + 1
+                            ),
+                            Command::CareerSlotImportLegacy,
+                        ));
+                    }
+                }
+                rows.push(Row::action("VOLVER", Command::Back));
+                rows
+            }
             Page::CareerCreate => vec![
                 Row::stepper(
                     "NOMBRE DEL PILOTO",
@@ -1883,7 +1980,16 @@ impl Menu {
                     Command::CareerPilotNext,
                     ctx.pilot_draft_name,
                 ),
-                Row::action("PERSONALIZAR DORSAL / SUFIJO", Command::CareerPilotTagNext),
+                Row::action(
+                    "ESCRIBIR NOMBRE CON TECLADO",
+                    Command::CareerPilotEditKeyboard,
+                ),
+                Row::stepper(
+                    "DORSAL DE COMPETICIÓN",
+                    Command::CareerNumberDown,
+                    Command::CareerNumberUp,
+                    format!("#{}", ctx.pilot_draft_number),
+                ),
                 Row::info(
                     "PRESUPUESTO INICIAL",
                     super::career::format_usd(super::career::INITIAL_CASH_USD),
@@ -1896,10 +2002,12 @@ impl Menu {
                     ),
                     Command::CareerCreateConfirm,
                 ),
+                Row::action("ELEGIR ESPACIO (1-3)", Command::Open(Page::CareerSlots)),
                 Row::action("VOLVER", Command::Back),
             ],
             Page::CareerHub => {
                 let mut rows = Vec::new();
+                let slot_num = ctx.career.map_or(1, |c| c.active_slot + 1);
                 if let Some(p) = ctx.career.and_then(|c| c.profile.as_ref()) {
                     let active_car_name = p
                         .active_career_vehicle_id
@@ -1908,9 +2016,10 @@ impl Menu {
                         .map(|e| e.descriptor.name.clone())
                         .unwrap_or_else(|| "NINGUNO (COMPRA EN 2ª MANO)".into());
                     rows.push(Row::info(
-                        "PILOTO / SALDO",
+                        format!("ESPACIO {slot_num}/3 · PILOTO"),
                         format!(
-                            "{} · {}",
+                            "#{} {} · {}",
+                            p.competition_number,
                             p.pilot_name,
                             super::career::format_usd(p.cash_usd)
                         ),
@@ -1954,10 +2063,33 @@ impl Menu {
                         "CONCESIONARIO 2ª MANO (USADOS · 3D)",
                         Command::Open(Page::Dealership),
                     ));
+                    rows.push(Row::action(
+                        format!("CAMBIAR ESPACIO DE GUARDADO ({slot_num}/3)"),
+                        Command::Open(Page::CareerSlots),
+                    ));
+                    if ctx.pending_reset_career {
+                        rows.push(Row::action(
+                            format!("CONFIRMAR REINICIO ESPACIO {slot_num} (BORRAR TODO)"),
+                            Command::CareerResetConfirm,
+                        ));
+                        rows.push(Row::action(
+                            "CANCELAR REINICIO DE CARRERA",
+                            Command::CareerResetCancel,
+                        ));
+                    } else {
+                        rows.push(Row::action(
+                            format!("REINICIAR CARRERA (ESPACIO {slot_num})"),
+                            Command::CareerResetRequest,
+                        ));
+                    }
                 } else {
                     rows.push(Row::action(
-                        "CREAR PERFIL DE CARRERA",
+                        format!("CREAR PERFIL EN ESPACIO {slot_num}/3"),
                         Command::Open(Page::CareerCreate),
+                    ));
+                    rows.push(Row::action(
+                        "ELEGIR ESPACIO DE GUARDADO (1-3)",
+                        Command::Open(Page::CareerSlots),
                     ));
                 }
                 rows.push(Row::action("VOLVER", Command::Back));
@@ -2270,6 +2402,10 @@ impl Menu {
                 "GARAJE DE CARRERA · SOLO COCHES DE TU PROPIEDAD".into(),
                 "SEPARADO DEL GARAJE GENERAL DE CONTRARRELOJ".into(),
             ],
+            Page::CareerSlots => vec![
+                "TRES PARTIDAS INDEPENDIENTES DE MODO CARRERA".into(),
+                "MIGRACIÓN AUTOMÁTICA DE GUARDADOS ANTERIORES".into(),
+            ],
             Page::CareerChampionship => vec![
                 "3 ETAPAS CORTAS · INICIACIÓN FWD (SUPER 1600 / RALLY5 / RALLY4 / R2)".into(),
                 "ÉLITE MUNDIAL: PRÓXIMAMENTE (REQUIERE TIEMPOS ONLINE VERIFICADOS)".into(),
@@ -2530,7 +2666,22 @@ impl Menu {
                 if Self::garage_back_rect().contains(x, y) {
                     return Some(Command::Back);
                 }
+                let indices = self.career_garage_indices(ctx);
+                let cursor = self
+                    .career_garage_cursor
+                    .min(indices.len().saturating_sub(1));
+                let active_entry = indices
+                    .get(cursor)
+                    .and_then(|&idx| ctx.content.vehicles.get(idx));
+                let pending_sell_this = active_entry
+                    .is_some_and(|e| ctx.pending_sell_vehicle_id == Some(e.descriptor.id.as_str()));
                 if Self::garage_details_rect().contains(x, y) {
+                    if pending_sell_this {
+                        return Some(Command::CareerGarageCancelSell);
+                    }
+                    if active_entry.is_some() {
+                        return Some(Command::CareerGarageRequestSell);
+                    }
                     return Some(Command::Open(Page::Dealership));
                 }
                 if Self::garage_prev_rect().contains(x, y) {
@@ -2540,7 +2691,9 @@ impl Menu {
                     return Some(Command::CareerGarageNextCar);
                 }
                 if Self::garage_action_rect().contains(x, y) {
-                    let indices = self.career_garage_indices(ctx);
+                    if pending_sell_this {
+                        return Some(Command::CareerGarageConfirmSell);
+                    }
                     if indices.is_empty() {
                         return Some(Command::Open(Page::Dealership));
                     }
@@ -3690,12 +3843,22 @@ impl Menu {
             ui::text_center(canvas, badge_rect, cap.label(), 0.56, cap_color);
 
             let cat = entry.descriptor.category.as_deref().unwrap_or("RBR / RSF");
-            let meta = format!(
-                "{} · {} · {}",
-                entry.classification.badge(),
-                cat,
-                entry.descriptor.model
-            );
+            let meta = if let Some(pack) = entry.descriptor.rsf_pack.as_deref() {
+                format!(
+                    "{} · {} · PACK {} · {}",
+                    entry.classification.badge(),
+                    cat,
+                    pack,
+                    entry.descriptor.model
+                )
+            } else {
+                format!(
+                    "{} · {} · {}",
+                    entry.classification.badge(),
+                    cat,
+                    entry.descriptor.model
+                )
+            };
             ui::text_clipped(canvas, cx + 12.0, cy + 28.0, cw - 24.0, &meta, 0.58, DIM);
 
             let state_line = if ctx.showroom_loading {
@@ -3983,7 +4146,8 @@ impl Menu {
         ui::button(canvas, Self::garage_back_rect(), "VOLVER", false, true);
         let header_label = match profile {
             Some(p) => format!(
-                "GARAJE CARRERA: {} ({} COCHES)",
+                "GARAJE CARRERA: #{} {} ({} COCHES)",
+                p.competition_number,
                 p.pilot_name,
                 indices.len()
             ),
@@ -3996,11 +4160,20 @@ impl Menu {
             false,
             false,
         );
+        let pending_sell_this =
+            entry.is_some_and(|e| ctx.pending_sell_vehicle_id == Some(e.descriptor.id.as_str()));
+        let top_right_label = if pending_sell_this {
+            "CANCELAR VENTA"
+        } else if entry.is_some() {
+            "VENDER COCHE (70%)"
+        } else {
+            "IR A 2ª MANO"
+        };
         ui::button(
             canvas,
             Self::garage_details_rect(),
-            "IR A 2ª MANO",
-            false,
+            top_right_label,
+            pending_sell_this,
             true,
         );
 
@@ -4040,10 +4213,22 @@ impl Menu {
             ui::text_center(canvas, badge_rect, b_txt, 0.56, b_col);
 
             let cat = entry.descriptor.category.as_deref().unwrap_or("RBR / RSF");
-            let meta = format!("{} · {} · PROPIO", spec.tier.label(), cat);
+            let resale_usd = profile.map_or(0, |p| p.resale_value_usd(entry));
+            let meta = format!(
+                "{} · {} · REVENTA 70%: {}",
+                spec.tier.label(),
+                cat,
+                super::career::format_usd(resale_usd)
+            );
             ui::text_clipped(canvas, cx + 12.0, cy + 28.0, cw - 24.0, &meta, 0.58, DIM);
 
-            let info = if locked {
+            let info = if pending_sell_this {
+                format!(
+                    "CONFIRMA VENTA DE {} POR {} (70% DEL PRECIO PAGADO)",
+                    entry.descriptor.name,
+                    super::career::format_usd(resale_usd)
+                )
+            } else if locked {
                 "COCHE BLOQUEADO MIENTRAS DURA LA COPA REGIONAL".to_string()
             } else if !status.is_empty() && status != "READY - TAP A ROW" {
                 status.to_string()
@@ -4057,11 +4242,22 @@ impl Menu {
                 cw * 0.54,
                 &info,
                 0.55,
-                if locked { WARN } else { INFO },
+                if pending_sell_this || locked {
+                    WARN
+                } else {
+                    INFO
+                },
             );
 
             let action_rect = Self::garage_action_rect();
-            if is_active {
+            if pending_sell_this {
+                ui::panel(canvas, action_rect, [180, 105, 16, 245], WARN);
+                let sell_txt = format!(
+                    "CONFIRMAR VENTA (+{})",
+                    super::career::format_usd(resale_usd)
+                );
+                ui::text_center(canvas, action_rect, &sell_txt, 0.58, TEXT);
+            } else if is_active {
                 ui::panel(canvas, action_rect, [22, 68, 48, 235], GOOD);
                 ui::text_center(canvas, action_rect, "COCHE ACTIVO", 0.66, TEXT);
             } else if locked {
@@ -4258,6 +4454,7 @@ pub struct Settings {
     pub fps: bool,
     pub diagnostics: bool,
     pub minimal_hud: bool,
+    pub hud_rpm_style: HudRpmStyle,
     pub invert_pedals: bool,
     pub clutch_help: bool,
     pub volume: f64,
@@ -4277,6 +4474,7 @@ impl Default for Settings {
             fps: false,
             diagnostics: false,
             minimal_hud: false,
+            hud_rpm_style: HudRpmStyle::default(),
             invert_pedals: false,
             clutch_help: true,
             volume: 0.8,
@@ -4353,6 +4551,7 @@ impl Settings {
                     settings.stage_id = value.trim().to_string();
                 }
                 "ngp_experimental" => settings.ngp_experimental = value == "true",
+                "hud_rpm_style" => settings.hud_rpm_style = HudRpmStyle::parse(value),
                 _ => (),
             }
         }
@@ -4369,9 +4568,9 @@ impl Settings {
     }
     fn encode(&self) -> String {
         let mut out = format!(
-            "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\ninvert_pedals={}\nclutch_help={}\nvolume={}\nmusic_volume={}\ncodriver_volume={}\ncamera={}\nvehicle_id={}\nstage_id={}\nngp_experimental={}\n",
+            "sensitivity={}\ndead_zone={}\nfps={}\ndiagnostics={}\nminimal_hud={}\nhud_rpm_style={}\ninvert_pedals={}\nclutch_help={}\nvolume={}\nmusic_volume={}\ncodriver_volume={}\ncamera={}\nvehicle_id={}\nstage_id={}\nngp_experimental={}\n",
             self.sensitivity, self.dead_zone, self.fps, self.diagnostics,
-            self.minimal_hud, self.invert_pedals, self.clutch_help, self.volume, self.music_volume, self.codriver_volume, self.camera, self.vehicle_id, self.stage_id, self.ngp_experimental
+            self.minimal_hud, self.hud_rpm_style.encode(), self.invert_pedals, self.clutch_help, self.volume, self.music_volume, self.codriver_volume, self.camera, self.vehicle_id, self.stage_id, self.ngp_experimental
         );
         if let Some(id) = &self.last_driven_vehicle_id {
             if !id.trim().is_empty() {
@@ -4417,6 +4616,7 @@ mod tests {
             fps: false,
             diagnostics: false,
             minimal_hud: false,
+            hud_rpm_style: HudRpmStyle::default(),
             invert_pedals: false,
             clutch_help: false,
             ctrl_opacity: 0.5,
@@ -4449,7 +4649,10 @@ mod tests {
             active_career_stage: false,
             last_career_stage_outcome: None,
             pilot_draft_name: "PILOTO RBR",
+            pilot_draft_number: 7,
+            pending_reset_career: false,
             pending_buy_vehicle_id: None,
+            pending_sell_vehicle_id: None,
             selected_career_difficulty: crate::driving::career::CareerDifficulty::Beginner,
         }
     }
@@ -4696,10 +4899,10 @@ mod tests {
             );
         }
 
-        // 4. Page::HudCameraSettings holds camera view, minimal HUD, FPS, telemetry, pacenotes, controls editor, and 3D camera editor.
+        // 4. Page::HudCameraSettings holds camera view, minimal HUD, RPM HUD style, FPS, telemetry, pacenotes, controls editor, and 3D camera editor.
         menu.open(Page::HudCameraSettings);
         let hud_cam_rows = menu.rows(&ctx);
-        assert_eq!(hud_cam_rows.len(), 9);
+        assert_eq!(hud_cam_rows.len(), 10);
         let cam_rect = menu.row_rect_for(0, hud_cam_rows.len());
         assert_eq!(
             menu.press(
@@ -5147,6 +5350,7 @@ mod tests {
             Page::RallySchool,
             Page::SchoolBriefing,
             Page::SchoolResult,
+            Page::CareerSlots,
             Page::CareerCreate,
             Page::CareerHub,
             Page::Dealership,

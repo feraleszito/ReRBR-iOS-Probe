@@ -315,6 +315,111 @@ impl CameraOverrides {
         }
     }
 }
+
+/// Independent per-vehicle camera overrides keyed by stable `vehicle.id`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VehicleCameraStore {
+    pub global_defaults: CameraOverrides,
+    pub per_vehicle: std::collections::BTreeMap<String, CameraOverrides>,
+}
+
+impl VehicleCameraStore {
+    pub fn for_vehicle(&self, vehicle_id: &str) -> CameraOverrides {
+        self.per_vehicle
+            .get(vehicle_id)
+            .copied()
+            .unwrap_or(self.global_defaults)
+    }
+
+    pub fn for_vehicle_mut(&mut self, vehicle_id: &str) -> &mut CameraOverrides {
+        let fallback = self.global_defaults;
+        self.per_vehicle
+            .entry(vehicle_id.to_string())
+            .or_insert(fallback)
+    }
+
+    pub fn reset_vehicle_view(&mut self, vehicle_id: &str, view: View) {
+        let ov = self.for_vehicle_mut(vehicle_id);
+        ov.reset_view(view);
+    }
+
+    pub fn serialize(&self) -> String {
+        let mut out = String::from("[global]\n");
+        out.push_str(&self.global_defaults.serialize());
+        for (id, ov) in &self.per_vehicle {
+            let clean_id = id.trim();
+            if clean_id.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("[vehicle:{clean_id}]\n"));
+            out.push_str(&ov.serialize());
+        }
+        out
+    }
+
+    pub fn parse(text: &str) -> Self {
+        let mut store = Self::default();
+        let mut current_vehicle: Option<String> = None;
+        let mut buf = String::new();
+        let flush = |store: &mut Self, target: &Option<String>, chunk: &str| {
+            if chunk.trim().is_empty() {
+                return;
+            }
+            let parsed = CameraOverrides::parse(chunk);
+            if let Some(id) = target {
+                store.per_vehicle.insert(id.clone(), parsed);
+            } else {
+                store.global_defaults = parsed;
+            }
+        };
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed == "[global]" {
+                flush(&mut store, &current_vehicle, &buf);
+                buf.clear();
+                current_vehicle = None;
+            } else if let Some(rest) = trimmed
+                .strip_prefix("[vehicle:")
+                .and_then(|s| s.strip_suffix(']'))
+            {
+                flush(&mut store, &current_vehicle, &buf);
+                buf.clear();
+                let id = rest.trim();
+                if !id.is_empty() {
+                    current_vehicle = Some(id.to_string());
+                }
+            } else {
+                buf.push_str(line);
+                buf.push('\n');
+            }
+        }
+        flush(&mut store, &current_vehicle, &buf);
+        store
+    }
+
+    fn path_v2() -> Option<std::path::PathBuf> {
+        std::env::var_os("RERBR_PROBE_DOCUMENTS")
+            .map(|d| std::path::PathBuf::from(d).join("rerbr-camera-overrides-v2.txt"))
+    }
+
+    pub fn load() -> Self {
+        if let Some(v2) = Self::path_v2().and_then(|p| std::fs::read_to_string(p).ok()) {
+            return Self::parse(&v2);
+        }
+        Self {
+            global_defaults: CameraOverrides::load(),
+            per_vehicle: std::collections::BTreeMap::new(),
+        }
+    }
+
+    pub fn save(&self) {
+        if let Some(path) = Self::path_v2() {
+            if let Err(error) = std::fs::write(path, self.serialize()) {
+                eprintln!("CAMERA STORE SAVE: {error}");
+            }
+        }
+    }
+}
 /// Smooth cinematic presentation camera sweeping around the rally car at stage start.
 /// At progress = 1.0, cleanly eases into the target chase camera.
 pub fn presentation_camera(
@@ -455,5 +560,54 @@ mod tests {
         assert_eq!(View::from_index(9), View::Chase);
         assert!(m.camera(View::Chase, body).is_none());
         assert!(Mounts::parse(&[]).is_err());
+    }
+
+    #[test]
+    fn per_vehicle_camera_store_isolates_cars_and_persists_across_restarts() {
+        let mut store = VehicleCameraStore::default();
+        store
+            .for_vehicle_mut("toyota-corolla-wrc")
+            .for_view_mut(View::Chase)
+            .pos_offset
+            .y = 0.45;
+        store
+            .for_vehicle_mut("rsf-ford-fiesta-rally4")
+            .for_view_mut(View::Bonnet)
+            .fov_degrees = 74.0;
+
+        let encoded = store.serialize();
+        let restored = VehicleCameraStore::parse(&encoded);
+        assert!(
+            (restored
+                .for_vehicle("toyota-corolla-wrc")
+                .for_view(View::Chase)
+                .pos_offset
+                .y
+                - 0.45)
+                .abs()
+                < 1e-3
+        );
+        assert_eq!(
+            restored
+                .for_vehicle("rsf-ford-fiesta-rally4")
+                .for_view(View::Chase)
+                .pos_offset
+                .y,
+            0.0,
+            "Modifying Corolla camera must NEVER leak into Fiesta Rally4"
+        );
+        assert!(
+            (restored
+                .for_vehicle("rsf-ford-fiesta-rally4")
+                .for_view(View::Bonnet)
+                .fov_degrees
+                - 74.0)
+                .abs()
+                < 1e-2
+        );
+        assert_eq!(
+            restored.for_vehicle("rsf-hyundai-i20-coupe-wrc-2020"),
+            CameraOverrides::default()
+        );
     }
 }

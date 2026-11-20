@@ -38,6 +38,8 @@ pub struct Geometry {
     pub draws: Vec<Draw>,
     pub materials: Vec<Material>,
     pub pivots: [Vec3; 4],
+    pub wheel_visual_offsets: [Vec3; 4],
+    pub door_dorsals: Option<[(Vec3, Vec3); 2]>,
     pub wheel_points: [Vec<Vec3>; 4],
     pub body_points: Vec<Vec3>,
     pub drawn: Vec<String>,
@@ -136,6 +138,8 @@ fn convert_set(
         draws: Vec::new(),
         materials: Vec::new(),
         pivots: [Vec3::ZERO; 4],
+        wheel_visual_offsets: [Vec3::ZERO; 4],
+        door_dorsals: None,
         wheel_points: std::array::from_fn(|_| Vec::new()),
         body_points: Vec::new(),
         drawn: Vec::new(),
@@ -165,6 +169,58 @@ fn convert_set(
             }
         }
     }
+    let mid_z = result.pivots.iter().map(|p| p.z).sum::<f32>() * 0.25;
+    let corners_ordered = result.pivots[0].x > 0.1
+        && result.pivots[0].z < mid_z
+        && result.pivots[1].x < -0.1
+        && result.pivots[1].z < mid_z
+        && result.pivots[2].x > 0.1
+        && result.pivots[2].z > mid_z
+        && result.pivots[3].x < -0.1
+        && result.pivots[3].z > mid_z;
+    if !corners_ordered {
+        let mut reordered = [Vec3::ZERO; 4];
+        let mut assigned = [false; 4];
+        for p in result.pivots {
+            let corner = match (p.x >= 0.0, p.z < mid_z) {
+                (true, true) => 0,
+                (false, true) => 1,
+                (true, false) => 2,
+                (false, false) => 3,
+            };
+            if !assigned[corner] {
+                reordered[corner] = p;
+                assigned[corner] = true;
+            }
+        }
+        if assigned.iter().all(|&a| a) {
+            result.pivots = reordered;
+        }
+    }
+    if !interior {
+        for (k, side) in selection::SIDES.iter().enumerate() {
+            let hang_name = format!("e_wheelhang_{side}");
+            if let Some(n) = elements.iter().find_map(|e| match e {
+                sgc::Element::Mesh(m) if m.node.name == hang_name => Some(&m.node),
+                _ => None,
+            }) {
+                let w = worlds[&n.id];
+                let hang_pos = Vec3::new(w[0][3], w[1][3], w[2][3]);
+                // Some community SGC models (e.g. Audi 200 quattro GrpA) place e_wheel_gravel_lf/rf
+                // behind the actual hub/suspension arch (e_wheelhang_lf/rf) while physics uses NGP wheel_centre.
+                // Record the visual Z alignment offset so showroom & body-offset match the wheel arches.
+                if k < 2
+                    && hang_pos.z < result.pivots[k].z - 0.10
+                    && (hang_pos.z - result.pivots[k].z).abs() < 0.35
+                {
+                    result.wheel_visual_offsets[k] =
+                        Vec3::new(0.0, 0.0, hang_pos.z - result.pivots[k].z);
+                }
+            }
+        }
+    }
+    let mut door_l_acc = (Vec3::ZERO, 0usize);
+    let mut door_r_acc = (Vec3::ZERO, 0usize);
     for element in elements {
         let sgc::Element::Mesh(mesh) = element else {
             continue;
@@ -210,7 +266,19 @@ fn convert_set(
                 0
             }
         } else {
-            selection::slot(&mesh.node.name)
+            let named_slot = selection::slot(&mesh.node.name);
+            if !corners_ordered && named_slot > 0 {
+                let w = worlds[&mesh.node.id];
+                let pos = Vec3::new(w[0][3], w[1][3], w[2][3]);
+                match (pos.x >= 0.0, pos.z < mid_z) {
+                    (true, true) => 1,
+                    (false, true) => 2,
+                    (true, false) => 3,
+                    (false, false) => 4,
+                }
+            } else {
+                named_slot
+            }
         };
         for (face_idx, face) in mesh.faces.iter().enumerate() {
             let block = blocks
@@ -317,15 +385,38 @@ fn convert_set(
         }
         if !remap.is_empty() {
             result.drawn.push(mesh.node.name.clone());
+            if !interior && (mesh.node.name == "e_door_l" || mesh.node.name == "e_door_r") {
+                for &idx in remap.values() {
+                    let p = Vec3::from(result.vertices[idx as usize].position);
+                    if mesh.node.name == "e_door_l" {
+                        door_l_acc.0 += p;
+                        door_l_acc.1 += 1;
+                    } else {
+                        door_r_acc.0 += p;
+                        door_r_acc.1 += 1;
+                    }
+                }
+            }
         }
     }
     result.draws.sort_by_key(|d| d.order); // Original wheel/list/shader rank; retain later opaque draws.
-    let body = if interior { "i_body" } else { "e_body" };
-    if !result.drawn.iter().any(|n| n == body) {
-        return Err(format!("CAR: {body} missing"));
-    }
     if interior {
+        if !result.drawn.iter().any(|n| n == "i_body" || n == "i_bodyi") {
+            return Err("CAR: i_body missing".into());
+        }
         return Ok(result);
+    } else if !result.drawn.iter().any(|n| n == "e_body") {
+        return Err("CAR: e_body missing".into());
+    }
+    if door_l_acc.1 > 0 && door_r_acc.1 > 0 {
+        let lc = door_l_acc.0 / door_l_acc.1 as f32;
+        let rc = door_r_acc.0 / door_r_acc.1 as f32;
+        if lc.x.abs() > 0.35 && rc.x.abs() > 0.35 {
+            result.door_dorsals = Some([
+                (lc, Vec3::new(lc.x.signum(), 0.0, 0.0)),
+                (rc, Vec3::new(rc.x.signum(), 0.0, 0.0)),
+            ]);
+        }
     }
     let mut referenced: [BTreeSet<u32>; 5] = std::array::from_fn(|_| BTreeSet::new());
     for d in &result.draws {

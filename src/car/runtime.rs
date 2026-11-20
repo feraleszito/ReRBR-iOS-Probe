@@ -61,6 +61,8 @@ pub(crate) struct Uploaded {
     #[cfg(feature = "physics-drive")]
     pivots: [rerbr_render_core::Vec3; 4],
     #[cfg(feature = "physics-drive")]
+    wheel_visual_offsets: [rerbr_render_core::Vec3; 4],
+    #[cfg(feature = "physics-drive")]
     start_camera: Camera,
     #[cfg(feature = "physics-stage")]
     mounts: crate::driving::cameras::Mounts,
@@ -118,6 +120,8 @@ impl Runtime {
         };
         #[cfg(feature = "physics-drive")]
         let pivots = car.geometry.pivots;
+        #[cfg(feature = "physics-drive")]
+        let wheel_visual_offsets = car.geometry.wheel_visual_offsets;
         #[cfg(feature = "physics-stage")]
         let (mounts, cockpit, cockpit_error) =
             (car.cameras, car.cockpit, car.cockpit_error.clone());
@@ -130,6 +134,8 @@ impl Runtime {
                 terrain: stats,
                 #[cfg(feature = "physics-drive")]
                 pivots,
+                #[cfg(feature = "physics-drive")]
+                wheel_visual_offsets,
                 #[cfg(feature = "physics-drive")]
                 start_camera,
                 #[cfg(feature = "physics-stage")]
@@ -157,6 +163,8 @@ impl Runtime {
                 return Err("stale scene selection".into());
             }
             self.driving.install_pivots(uploaded.pivots);
+            self.driving
+                .install_wheel_visual_offsets(uploaded.wheel_visual_offsets);
             self.driving.set_visual_start_pose(uploaded.start_camera);
         }
         #[cfg(feature = "physics-stage")]
