@@ -2252,7 +2252,8 @@ impl Runtime {
                 }
             },
             CareerLoadDevMode => {
-                if career::DEV_MODE_ENABLED {
+                #[cfg(feature = "career-dev-mode")]
+                {
                     if let Some(root) =
                         std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from)
                     {
@@ -2265,6 +2266,54 @@ impl Runtime {
                         self.message = Some("MODO DESARROLLADOR QA ACTIVO (MEMORIA)".into());
                         self.menu.open(menu::Page::CareerHub);
                     }
+                }
+                #[cfg(not(feature = "career-dev-mode"))]
+                {
+                    self.message = Some("MODO DESARROLLADOR NO DISPONIBLE EN RELEASE".into());
+                }
+            }
+            CareerDevResetCash => {
+                #[cfg(feature = "career-dev-mode")]
+                {
+                    let res = match self.career.profile.as_mut() {
+                        Some(p) => p.reset_dev_cash(),
+                        None => Err("SIN PERFIL QA ACTIVO".into()),
+                    };
+                    match res {
+                        Ok(()) => {
+                            self.save_active_career();
+                            self.message = Some("SALDO QA RESTABLECIDO A US$9,999,999,999".into());
+                        }
+                        Err(err) => self.message = Some(err),
+                    }
+                }
+                #[cfg(not(feature = "career-dev-mode"))]
+                {
+                    self.message = Some("MODO DESARROLLADOR NO DISPONIBLE EN RELEASE".into());
+                }
+            }
+            CareerDevToggleUnlocks => {
+                #[cfg(feature = "career-dev-mode")]
+                {
+                    let res = match self.career.profile.as_mut() {
+                        Some(p) => p.toggle_dev_unlocks(),
+                        None => Err("SIN PERFIL QA ACTIVO".into()),
+                    };
+                    match res {
+                        Ok(unlocked) => {
+                            self.save_active_career();
+                            self.message = Some(if unlocked {
+                                "DESBLOQUEOS QA ACTIVADOS (HISTÓRICOS Y CATÁLOGO)".into()
+                            } else {
+                                "DESBLOQUEOS QA RESTABLECIDOS A PROGRESIÓN NORMAL".into()
+                            });
+                        }
+                        Err(err) => self.message = Some(err),
+                    }
+                }
+                #[cfg(not(feature = "career-dev-mode"))]
+                {
+                    self.message = Some("MODO DESARROLLADOR NO DISPONIBLE EN RELEASE".into());
                 }
             }
             CareerResetRequest => {

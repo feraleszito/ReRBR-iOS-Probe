@@ -1,65 +1,87 @@
 # Codemagic CI/CD configuration for ReRBR-iOS-Probe
-# Builds the unsigned iPadOS IPA in physics-stage mode on Apple Silicon (M2).
+# Provides two selectable workflows in Codemagic UI:
+#   1. rerbr-probe-unsigned: Public RELEASE build (career-dev-mode explicitly disabled)
+#   2. rerbr-probe-dev:      Developer QA build (career-dev-mode enabled, isolated career_dev_slot.json)
+
+definitions:
+  scripts:
+    - &check_layout
+      name: Check repository layout
+      script: |
+        for file in Cargo.toml Cargo.lock scripts/build-ios.sh scripts/verify.py xcode/ReRBRProbe.xcodeproj/project.pbxproj; do
+          if [[ ! -f "$file" ]]; then
+            echo "Expected $file at the repository root." >&2
+            exit 1
+          fi
+        done
+    - &check_xcode
+      name: Check Xcode and iPhoneOS SDK
+      script: |
+        xcodebuild -version
+        xcrun --sdk iphoneos --show-sdk-path
+    - &install_rust
+      name: Install pinned Rust toolchain and target
+      script: |
+        set -e
+        if command -v rustup &> /dev/null; then
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy --target aarch64-apple-ios
+          rustup default 1.97.1
+        else
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 --profile minimal --component rustfmt,clippy --target aarch64-apple-ios
+        fi
+        source "$HOME/.cargo/env" || true
+        rustup target add aarch64-apple-ios
+        rustup component add rustfmt clippy
+        echo "PATH=$HOME/.cargo/bin:$PATH" >> $CM_ENV
+        rustc --version
+        cargo --version
+    - &build_ipa
+      name: Compile and inspect unsigned device IPA
+      script: |
+        set -e
+        source "$HOME/.cargo/env" 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
+        rm -rf build
+        bash scripts/build-ios.sh
 
 workflows:
   rerbr-probe-unsigned:
-    name: ReRBRProbe unsigned iPadOS (physics-stage)
+    name: RBR Mobile — RELEASE (iPadOS unsigned)
     instance_type: mac_mini_m2
     max_build_duration: 35
     environment:
       xcode: 16.4
       vars:
         PROBE_MODE: physics-stage
+        CAREER_DEV_MODE: "false"
         CARGO_TERM_COLOR: always
-    # Triggers are omitted so builds are only run on demand (manual trigger from Codemagic UI).
-    # To enable automatic builds on git push, uncomment the following block:
-    # triggering:
-    #   events:
-    #     - push
-    #   branch_patterns:
-    #     - pattern: main
-    #       include: true
-    #       source: true
     scripts:
-      - name: Check repository layout
-        script: |
-          for file in Cargo.toml Cargo.lock scripts/build-ios.sh scripts/verify.py xcode/ReRBRProbe.xcodeproj/project.pbxproj; do
-            if [[ ! -f "$file" ]]; then
-              echo "Expected $file at the repository root." >&2
-              exit 1
-            fi
-          done
-
-      - name: Check Xcode and iPhoneOS SDK
-        script: |
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-path
-
-      - name: Install pinned Rust toolchain and target
-        script: |
-          set -e
-          if command -v rustup &> /dev/null; then
-            rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy --target aarch64-apple-ios
-            rustup default 1.97.1
-          else
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 --profile minimal --component rustfmt,clippy --target aarch64-apple-ios
-          fi
-          source "$HOME/.cargo/env" || true
-          rustup target add aarch64-apple-ios
-          rustup component add rustfmt clippy
-          echo "PATH=$HOME/.cargo/bin:$PATH" >> $CM_ENV
-          rustc --version
-          cargo --version
-
-      - name: Compile and inspect unsigned device IPA
-        script: |
-          set -e
-          source "$HOME/.cargo/env" 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
-          rm -rf build
-          bash scripts/build-ios.sh
-
+      - *check_layout
+      - *check_xcode
+      - *install_rust
+      - *build_ipa
     artifacts:
-      - build/ReRBRProbe-unsigned.ipa
+      - build/RBR-Mobile-Release.ipa
+      - build/SHA256SUMS
+      - build/*.log
+      - build/*.txt
+
+  rerbr-probe-dev:
+    name: RBR Mobile — DEVELOPER QA (US$9,999,999,999)
+    instance_type: mac_mini_m2
+    max_build_duration: 35
+    environment:
+      xcode: 16.4
+      vars:
+        PROBE_MODE: physics-stage
+        CAREER_DEV_MODE: "true"
+        CARGO_TERM_COLOR: always
+    scripts:
+      - *check_layout
+      - *check_xcode
+      - *install_rust
+      - *build_ipa
+    artifacts:
+      - build/RBR-Mobile-Developer.ipa
       - build/SHA256SUMS
       - build/*.log
       - build/*.txt

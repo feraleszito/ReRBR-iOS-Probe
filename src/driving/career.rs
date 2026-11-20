@@ -1639,6 +1639,7 @@ pub struct CareerProfile {
     pub completed_championships: Vec<CompletedChampionshipRecord>,
     pub active_championship: Option<ActiveChampionship>,
     pub is_dev_profile: bool,
+    pub dev_unlock_all: bool,
 }
 
 impl CareerProfile {
@@ -1677,6 +1678,7 @@ impl CareerProfile {
             completed_championships: Vec::new(),
             active_championship: None,
             is_dev_profile: false,
+            dev_unlock_all: false,
         })
     }
 
@@ -1708,7 +1710,36 @@ impl CareerProfile {
             completed_championships: Vec::new(),
             active_championship: None,
             is_dev_profile: true,
+            dev_unlock_all: true,
         }
+    }
+
+    pub fn reset_dev_cash(&mut self) -> Result<(), String> {
+        if !DEV_MODE_ENABLED || !self.is_dev_profile {
+            return Err("SOLO DISPONIBLE EN PERFIL DESARROLLADOR QA".into());
+        }
+        let now = unix_now_s();
+        self.cash_usd = DEV_MODE_CASH_USD;
+        self.last_saved_unix_s = now;
+        self.transactions.push(Transaction {
+            kind: TransactionKind::InitialGrant,
+            delta_usd: DEV_MODE_CASH_USD as i64,
+            balance_after_usd: DEV_MODE_CASH_USD,
+            description: "Restablecer saldo QA (US$9,999,999,999)".into(),
+            timestamp_unix_s: now,
+        });
+        Ok(())
+    }
+
+    pub fn toggle_dev_unlocks(&mut self) -> Result<bool, String> {
+        if !DEV_MODE_ENABLED || !self.is_dev_profile {
+            return Err("SOLO DISPONIBLE EN PERFIL DESARROLLADOR QA".into());
+        }
+        let next = !(self.dev_unlock_all && self.historics_unlocked);
+        self.dev_unlock_all = next;
+        self.historics_unlocked = next;
+        self.last_saved_unix_s = unix_now_s();
+        Ok(next)
     }
 
     /// 70% of the actual price paid (rounded half-up to the nearest USD: `(paid * 70 + 50) / 100`).
@@ -1852,12 +1883,17 @@ impl CareerProfile {
             };
         }
         let spec = vehicle_market_spec(entry);
-        if spec.concesionario == DealershipChannel::PendingCommercialRule {
+        let qa_bypass = DEV_MODE_ENABLED && self.is_dev_profile && self.dev_unlock_all;
+        if spec.concesionario == DealershipChannel::PendingCommercialRule && !qa_bypass {
             return DealershipAvailability::Locked {
                 reason: "PENDIENTE DE REGLA COMERCIAL".into(),
             };
         }
-        if !spec.offered_in(kind) {
+        if !spec.offered_in(kind)
+            && !(qa_bypass
+                && spec.concesionario == DealershipChannel::PendingCommercialRule
+                && kind == DealershipKind::UsedCars)
+        {
             return DealershipAvailability::Locked {
                 reason: format!("EXCLUSIVO DE {}", spec.concesionario.label()),
             };
@@ -1869,7 +1905,11 @@ impl CareerProfile {
                 reason: "REQUIERE PODIO EN COPA REGIONAL".into(),
             };
         }
-        let Some(price) = spec.price_for(kind).filter(|&p| p > 0) else {
+        let price = spec.price_for(kind).filter(|&p| p > 0).or_else(|| {
+            (qa_bypass && spec.concesionario == DealershipChannel::PendingCommercialRule)
+                .then_some(150_000)
+        });
+        let Some(price) = price else {
             return DealershipAvailability::Locked {
                 reason: "PRECIO NO DEFINIDO".into(),
             };
@@ -1907,9 +1947,14 @@ impl CareerProfile {
             }
         }
         let spec = vehicle_market_spec(entry);
+        let qa_bypass = DEV_MODE_ENABLED && self.is_dev_profile && self.dev_unlock_all;
         let price = spec
             .price_for(kind)
             .filter(|&p| p > 0)
+            .or_else(|| {
+                (qa_bypass && spec.concesionario == DealershipChannel::PendingCommercialRule)
+                    .then_some(150_000)
+            })
             .ok_or_else(|| format!("ESTE VEHÍCULO NO SE VENDE EN {}", kind.short_name()))?;
 
         let delivered_state = match kind {
@@ -2756,6 +2801,15 @@ impl CareerStore {
     pub fn save(&mut self) -> Result<(), String> {
         if let Some(prof) = self.profile.as_mut() {
             prof.last_saved_unix_s = unix_now_s();
+            if prof.is_dev_profile {
+                if !DEV_MODE_ENABLED {
+                    return Err("MODO DESARROLLADOR NO DISPONIBLE EN COMPILACIÓN RELEASE".into());
+                }
+                if let Some(root) = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(PathBuf::from) {
+                    return Self::save_dev_profile_in_root(&root, prof);
+                }
+                return Ok(());
+            }
         }
         self.slots[self.active_slot] = self.profile.clone();
         let Some(root) = std::env::var_os("RERBR_PROBE_DOCUMENTS").map(PathBuf::from) else {
@@ -2765,6 +2819,14 @@ impl CareerStore {
     }
 
     pub fn save_to_root(&self, documents_root: &Path) -> Result<(), String> {
+        if let Some(prof) = self.profile.as_ref() {
+            if prof.is_dev_profile {
+                if !DEV_MODE_ENABLED {
+                    return Err("MODO DESARROLLADOR NO DISPONIBLE EN COMPILACIÓN RELEASE".into());
+                }
+                return Self::save_dev_profile_in_root(documents_root, prof);
+            }
+        }
         let path = Self::slot_path_in(documents_root, self.active_slot);
         let _ = Self::write_meta(
             documents_root,
@@ -2984,6 +3046,7 @@ pub fn encode_profile_json(p: &CareerProfile) -> String {
     }
     out.push_str("  },\n");
     let _ = writeln!(out, "  \"is_dev_profile\": {},", p.is_dev_profile);
+    let _ = writeln!(out, "  \"dev_unlock_all\": {},", p.dev_unlock_all);
     match &p.active_career_vehicle_id {
         Some(id) => {
             let _ = writeln!(out, "  \"active_career_vehicle_id\": {},", json_escape(id));
@@ -3718,10 +3781,16 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
             .entry(id.clone())
             .or_insert_with(|| OwnedVehicleState::factory_new(id));
     }
-    let is_dev_profile = root
-        .field("is_dev_profile")
-        .and_then(JsonVal::as_bool)
-        .unwrap_or(false);
+    let is_dev_profile = DEV_MODE_ENABLED
+        && root
+            .field("is_dev_profile")
+            .and_then(JsonVal::as_bool)
+            .unwrap_or(false);
+    let dev_unlock_all = is_dev_profile
+        && root
+            .field("dev_unlock_all")
+            .and_then(JsonVal::as_bool)
+            .unwrap_or(false);
 
     Ok(CareerProfile {
         schema_version: CAREER_SCHEMA_VERSION,
@@ -3741,6 +3810,7 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
         completed_championships,
         active_championship,
         is_dev_profile,
+        dev_unlock_all,
     })
 }
 
@@ -4581,6 +4651,83 @@ mod tests {
         let reloaded_dev = CareerStore::load_dev_profile_from_root(&root);
         assert_eq!(reloaded_dev.cash_usd, DEV_MODE_CASH_USD - paid);
         assert!(reloaded_dev.owns_vehicle(&yaris_wrc.descriptor.id));
+
+        // Guard: CareerStore::save_to_root NEVER overwrites normal slots with a dev profile!
+        let store = CareerStore {
+            profile: Some(reloaded_dev.clone()),
+            ..Default::default()
+        };
+        let save_res = store.save_to_root(&root);
+        if DEV_MODE_ENABLED {
+            assert!(save_res.is_ok());
+            assert!(CareerStore::load_from_root(&root)
+                .slots
+                .iter()
+                .all(|s| s.is_none()));
+        } else {
+            assert!(save_res.is_err());
+        }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(feature = "career-dev-mode")]
+    #[test]
+    fn phase8_dev_build_reset_cash_and_toggle_unlocks_work_in_isolation() {
+        const { assert!(DEV_MODE_ENABLED) };
+        let mut dev = CareerProfile::create_dev_profile();
+        assert_eq!(dev.cash_usd, 9_999_999_999);
+        assert!(dev.dev_unlock_all && dev.historics_unlocked);
+
+        let yaris_wrc = make_rsf_entry(
+            "rsf-toyota-yaris-wrc-2018",
+            "Toyota Yaris WRC 2018",
+            "WRC 1.6",
+            2018,
+        );
+        let pending_wrc = make_rsf_entry(
+            "rsf-vw-polo-r-wrc-2016",
+            "VW Polo R WRC 2016",
+            "WRC 1.6",
+            2016,
+        );
+        assert_eq!(
+            dev.dealership_availability(&pending_wrc, DealershipKind::UsedCars, true),
+            DealershipAvailability::Available
+        );
+        dev.buy_vehicle_in_dealership(&yaris_wrc, DealershipKind::NewSalon, true)
+            .unwrap();
+        assert!(dev.cash_usd < DEV_MODE_CASH_USD);
+
+        // Reset dev cash restores US$9,999,999,999 while keeping owned vehicles!
+        dev.reset_dev_cash().unwrap();
+        assert_eq!(dev.cash_usd, 9_999_999_999);
+        assert!(dev.owns_vehicle(&yaris_wrc.descriptor.id));
+
+        // Toggle unlocks off -> Historic & PendingCommercialRule become Locked again.
+        assert!(!dev.toggle_dev_unlocks().unwrap());
+        assert!(!dev.historics_unlocked);
+        assert!(matches!(
+            dev.dealership_availability(&pending_wrc, DealershipKind::UsedCars, true),
+            DealershipAvailability::Locked { .. }
+        ));
+        assert!(dev.toggle_dev_unlocks().unwrap());
+        assert!(dev.historics_unlocked && dev.dev_unlock_all);
+    }
+
+    #[cfg(not(feature = "career-dev-mode"))]
+    #[test]
+    fn phase8_release_build_strips_dev_mode_and_blocks_dev_privileges() {
+        const { assert!(!DEV_MODE_ENABLED) };
+        let mut normal = CareerProfile::create("ReleasePilot").unwrap();
+        assert_eq!(normal.cash_usd, INITIAL_CASH_USD);
+        assert!(!normal.is_dev_profile);
+        assert!(normal.reset_dev_cash().is_err());
+        assert!(normal.toggle_dev_unlocks().is_err());
+
+        // Even a tampered JSON with is_dev_profile=true is stripped on load in RELEASE.
+        let tampered = encode_profile_json(&CareerProfile::create_dev_profile());
+        let loaded = parse_profile_json(&tampered).unwrap();
+        assert!(!loaded.is_dev_profile);
+        assert!(!loaded.dev_unlock_all);
     }
 }

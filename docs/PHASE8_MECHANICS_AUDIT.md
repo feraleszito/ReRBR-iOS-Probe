@@ -70,8 +70,17 @@
 
 ---
 
-## 6. Modo Desarrollador Aislado (`career-dev-mode`)
+## 6. Modo Desarrollador Aislado (`career-dev-mode`) y Selector en Codemagic
 
-- Protegido mediante feature flag de compilación `career-dev-mode` (desactivado por defecto en compilaciones públicas/IPA).
-- Carga y guarda en `Documents/RBR/career_dev_slot.json`, completamente aislado de `career_slot_1..3.json`.
-- Saldo inicial `US$9,999,999,999` (`u64`) para pruebas de compras de alto coste, reparaciones, neumáticos y campeonatos sin desbordamiento.
+- **Selector nativo de workflows en `codemagic.yaml`:**
+  1. `rerbr-probe-unsigned` (**`RBR Mobile — RELEASE (iPadOS unsigned)`**): `CAREER_DEV_MODE="false"`, excluye `career-dev-mode`, verifica mediante `cargo tree` que la feature no esté activa y genera `build/RBR-Mobile-Release.ipa`.
+  2. `rerbr-probe-dev` (**`RBR Mobile — DEVELOPER QA (US$9,999,999,999)`**): `CAREER_DEV_MODE="true"`, compila con `--features physics-stage,career-dev-mode` tras limpiar el artefacto previo de `rerbr-probe` y genera `build/RBR-Mobile-Developer.ipa`.
+- **Aislamiento total de partidas:**
+  - Carga y guarda exclusivamente en `Documents/RBR/career_dev_slot.json`.
+  - `CareerStore::save()` y `CareerStore::save_to_root()` interceptan cualquier perfil con `is_dev_profile == true` para que jamás pueda escribirse en `career_slot_1..3.json`.
+  - En compilaciones `RELEASE`, `parse_profile_json` fuerza `is_dev_profile = false` y `dev_unlock_all = false`, impidiendo privilegios DEV incluso si se manipula un JSON manualmente.
+- **Acceso directo e controles exclusivos en la app DEV (`#[cfg(feature = "career-dev-mode")]`):**
+  - Distintivo visual discreto `RBR MOBILE — DEV BUILD` en el encabezado del menú principal y pantallas de Carrera (ausente en conducción y en `RELEASE`).
+  - Acceso en 1 toque a `PERFIL DESARROLLADOR QA (US$9,999,999,999)` desde `CARRERA` (`CareerHub`, `CareerCreate` y `CareerSlots`).
+  - Botón `RESTABLECER SALDO DEV (US$9,999,999,999)` que restaura el saldo sin borrar los coches comprados en QA ni afectar partidas normales.
+  - Botón `DESBLOQUEOS QA: ACTIVADOS / DESACTIVADOS` para alternar el desbloqueo completo de campeonatos y catálogo en pruebas.

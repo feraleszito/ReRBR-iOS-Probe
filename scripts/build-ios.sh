@@ -5,6 +5,7 @@ set -euo pipefail
 PROBE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROBE_ROOT"
 PROBE_MODE="${PROBE_MODE:-triangle}"
+CAREER_DEV_MODE="${CAREER_DEV_MODE:-false}"
 # Keep arrays nonempty for macOS's system Bash 3.2 with `set -u`.
 CARGO_FEATURE_ARGS=(--no-default-features)
 HOST_TEST_ARGS=(--test shader)
@@ -47,6 +48,19 @@ case "$PROBE_MODE" in
         exit 1
         ;;
 esac
+case "$CAREER_DEV_MODE" in
+    true)
+        CARGO_FEATURE_ARGS+=(--features career-dev-mode)
+        IPA_NAME="RBR-Mobile-Developer.ipa"
+        ;;
+    false)
+        IPA_NAME="RBR-Mobile-Release.ipa"
+        ;;
+    *)
+        echo "Unknown CAREER_DEV_MODE: $CAREER_DEV_MODE (expected true or false)." >&2
+        exit 1
+        ;;
+esac
 if [[ "$PROBE_MODE" != triangle && "$PROBE_MODE" != physics-probe && "$PROBE_MODE" != physics-drive && "$PROBE_MODE" != physics-stage ]]; then
     # Preserve the previous visual modes' host-test scope.
     for package in rerbr-sim rbr-physics rbr-hybrid rbr-formats rbr-gameplay rbr-recording rbr-engine rbr-tyre rbr-school; do
@@ -71,6 +85,8 @@ mkdir -p build
 
 {
     echo "Probe build mode: $PROBE_MODE"
+    echo "Career dev mode: $CAREER_DEV_MODE"
+    echo "Output IPA: $IPA_NAME"
     printf 'Cargo feature flags:'
     printf ' %s' "${CARGO_FEATURE_ARGS[@]}"
     printf '\n'
@@ -89,8 +105,16 @@ cargo fmt --manifest-path "$MANIFEST" --all -- --check
 # SDKROOT must not point to iPhoneOS when compiling macOS test executables.
 env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET cargo test --manifest-path "$MANIFEST" --locked "${CARGO_FEATURE_ARGS[@]}" "${HOST_TEST_ARGS[@]}" 2>&1 | tee build/host-tests.log
 cargo clippy --manifest-path "$MANIFEST" --locked --lib --target "$RUST_TARGET" "${CARGO_FEATURE_ARGS[@]}" -- -D warnings
+# Prevent reusing stale Rust archives compiled with different feature flags.
+cargo clean --manifest-path "$MANIFEST" -p rerbr-probe --target "$RUST_TARGET" --release || true
 cargo rustc --manifest-path "$MANIFEST" --locked --release --lib --target "$RUST_TARGET" "${CARGO_FEATURE_ARGS[@]}" -- --print native-static-libs 2>&1 | tee build/rust-build.log
 cargo tree --manifest-path "$MANIFEST" --locked --target "$RUST_TARGET" "${CARGO_FEATURE_ARGS[@]}" --edges normal --depth 2 > build/rust-dependencies.txt
+if [[ "$CAREER_DEV_MODE" == "false" ]]; then
+    if cargo tree --manifest-path "$MANIFEST" --locked --target "$RUST_TARGET" "${CARGO_FEATURE_ARGS[@]}" --depth 0 --format "{p} {f}" | grep -q "career-dev-mode"; then
+        echo "::error::RELEASE build safety check failed: career-dev-mode feature is active!" >&2
+        exit 1
+    fi
+fi
 
 # Xcode links the archive as -lrerbr_probe. Verify Cargo produced it before asking
 # Xcode to link, and supply the same directory to its LIBRARY_SEARCH_PATHS setting.
@@ -134,7 +158,7 @@ grep -Eq 'platform[[:space:]]+IOS$' build/macho-build.txt
 
 # A directory called .ipa is not sufficient: this must be a zip with Payload/*.app.
 # Refuse a leftover package so a failed rerun cannot upload an old IPA.
-if [[ -e build/Payload || -e build/ReRBRProbe-unsigned.ipa ]]; then
+if [[ -e build/Payload || -e "build/$IPA_NAME" ]]; then
     echo "Old package exists. Use a fresh checkout or move $PROBE_ROOT/build aside before retrying." >&2
     exit 1
 fi
@@ -142,11 +166,11 @@ mkdir build/Payload
 ditto "$APP" build/Payload/ReRBRProbe.app
 (
     cd build
-    /usr/bin/zip -qry ReRBRProbe-unsigned.ipa Payload
+    /usr/bin/zip -qry "$IPA_NAME" Payload
 )
-python3 scripts/verify.py --ipa build/ReRBRProbe-unsigned.ipa
+python3 scripts/verify.py --ipa "build/$IPA_NAME"
 (
     cd build
-    shasum -a 256 ReRBRProbe-unsigned.ipa > SHA256SUMS
+    shasum -a 256 "$IPA_NAME" > SHA256SUMS
 )
-echo "Unsigned IPA packaged and inspected. Device execution has NOT been tested."
+echo "Unsigned IPA ($IPA_NAME, career-dev-mode=$CAREER_DEV_MODE) packaged and inspected. Device execution has NOT been tested."

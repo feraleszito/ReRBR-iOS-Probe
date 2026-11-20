@@ -403,6 +403,8 @@ pub enum Command {
     CareerSlotSelect(usize),
     CareerSlotImportLegacy,
     CareerLoadDevMode,
+    CareerDevResetCash,
+    CareerDevToggleUnlocks,
     CareerResetRequest,
     CareerResetConfirm,
     CareerResetCancel,
@@ -1996,12 +1998,11 @@ impl Menu {
                         ));
                     }
                 }
-                if super::career::DEV_MODE_ENABLED {
-                    rows.push(Row::action(
-                        "MODO DESARROLLADOR QA (US$9,999,999,999 · AISLADO)",
-                        Command::CareerLoadDevMode,
-                    ));
-                }
+                #[cfg(feature = "career-dev-mode")]
+                rows.push(Row::action(
+                    "PERFIL DESARROLLADOR QA (US$9,999,999,999 · AISLADO)",
+                    Command::CareerLoadDevMode,
+                ));
                 rows.push(Row::action("VOLVER", Command::Back));
                 rows
             }
@@ -2035,6 +2036,11 @@ impl Menu {
                     Command::CareerCreateConfirm,
                 ),
                 Row::action("ELEGIR ESPACIO (1-3)", Command::Open(Page::CareerSlots)),
+                #[cfg(feature = "career-dev-mode")]
+                Row::action(
+                    "PERFIL DESARROLLADOR QA (US$9,999,999,999)",
+                    Command::CareerLoadDevMode,
+                ),
                 Row::action("VOLVER", Command::Back),
             ],
             Page::CareerHub => {
@@ -2048,7 +2054,11 @@ impl Menu {
                         .map(|e| e.descriptor.name.clone())
                         .unwrap_or_else(|| "NINGUNO (COMPRA EN 2ª MANO)".into());
                     rows.push(Row::info(
-                        format!("ESPACIO {slot_num}/3 · PILOTO"),
+                        if p.is_dev_profile {
+                            "MODO DESARROLLADOR QA (AISLADO)".to_string()
+                        } else {
+                            format!("ESPACIO {slot_num}/3 · PILOTO")
+                        },
                         format!(
                             "#{} {} · {}",
                             p.competition_number,
@@ -2106,20 +2116,44 @@ impl Menu {
                         format!("CAMBIAR ESPACIO DE GUARDADO ({slot_num}/3)"),
                         Command::Open(Page::CareerSlots),
                     ));
-                    if ctx.pending_reset_career {
-                        rows.push(Row::action(
-                            format!("CONFIRMAR REINICIO ESPACIO {slot_num} (BORRAR TODO)"),
-                            Command::CareerResetConfirm,
-                        ));
-                        rows.push(Row::action(
-                            "CANCELAR REINICIO DE CARRERA",
-                            Command::CareerResetCancel,
-                        ));
-                    } else {
-                        rows.push(Row::action(
-                            format!("REINICIAR CARRERA (ESPACIO {slot_num})"),
-                            Command::CareerResetRequest,
-                        ));
+                    #[cfg(feature = "career-dev-mode")]
+                    {
+                        if p.is_dev_profile {
+                            rows.push(Row::action(
+                                "RESTABLECER SALDO DEV (US$9,999,999,999)",
+                                Command::CareerDevResetCash,
+                            ));
+                            rows.push(Row::action(
+                                if p.dev_unlock_all && p.historics_unlocked {
+                                    "DESBLOQUEOS QA: ACTIVADOS (PULSA PARA RESTABLECER)"
+                                } else {
+                                    "DESBLOQUEOS QA: DESACTIVADOS (PULSA PARA DESBLOQUEAR TODO)"
+                                },
+                                Command::CareerDevToggleUnlocks,
+                            ));
+                        } else {
+                            rows.push(Row::action(
+                                "PERFIL DESARROLLADOR QA (US$9,999,999,999)",
+                                Command::CareerLoadDevMode,
+                            ));
+                        }
+                    }
+                    if !p.is_dev_profile {
+                        if ctx.pending_reset_career {
+                            rows.push(Row::action(
+                                format!("CONFIRMAR REINICIO ESPACIO {slot_num} (BORRAR TODO)"),
+                                Command::CareerResetConfirm,
+                            ));
+                            rows.push(Row::action(
+                                "CANCELAR REINICIO DE CARRERA",
+                                Command::CareerResetCancel,
+                            ));
+                        } else {
+                            rows.push(Row::action(
+                                format!("REINICIAR CARRERA (ESPACIO {slot_num})"),
+                                Command::CareerResetRequest,
+                            ));
+                        }
                     }
                 } else {
                     rows.push(Row::action(
@@ -3047,6 +3081,13 @@ impl Menu {
                     false,
                     true,
                 );
+            } else {
+                #[cfg(feature = "career-dev-mode")]
+                {
+                    let dev_badge = Rect::new(0.66, 0.032, 0.285, 0.052);
+                    ui::panel(canvas, dev_badge, [60, 38, 10, 225], WARN);
+                    ui::text_center(canvas, dev_badge, "RBR MOBILE — DEV BUILD", 0.56, WARN);
+                }
             }
             ui::rule(canvas, 0.055, 0.110, 0.89, LINE);
 
@@ -3666,6 +3707,15 @@ impl Menu {
         // Top-left brand mark.
         ui::fill(canvas, Rect::new(0.025, 0.026, 0.006, 0.056), ACCENT);
         canvas.text(0.040 * 640.0, 0.024 * h, "RBR MOBILE", 1.15, TEXT);
+        #[cfg(feature = "career-dev-mode")]
+        canvas.text(
+            0.040 * 640.0,
+            0.068 * h,
+            "RBR MOBILE — DEV BUILD",
+            0.46,
+            WARN,
+        );
+        #[cfg(not(feature = "career-dev-mode"))]
         canvas.text(0.040 * 640.0, 0.068 * h, "SHOWROOM", 0.56, DIM);
 
         // Top-center active car & stage summary pill.
