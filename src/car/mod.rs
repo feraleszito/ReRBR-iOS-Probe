@@ -461,4 +461,6 @@ pub fn load_showroom_model(
 }
 
 #[cfg(test)]
+mod part_audit;
+#[cfg(test)]
 mod tests;

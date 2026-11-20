@@ -41,6 +41,41 @@ pub fn exterior<'a>(name: &str, parts: &'a [Section]) -> Result<&'a Section, &'s
 pub fn interior<'a>(name: &str, parts: &'a [Section]) -> Result<&'a Section, &'static str> {
     part_set(name, parts, true)
 }
+
+/// Body panels and fixtures that RBR itself treats as part of the car (damage panels, glass,
+/// mirrors, exhaust, roof intake). Community tools write `Switch = true` on them in some cars
+/// (BMW M3 E30) without meaning "disabled", so their flag never hides them.
+pub fn is_structural_panel(name: &str) -> bool {
+    name.starts_with("e_door_")
+        || name.starts_with("e_bonnet")
+        || name.starts_with("e_bumper_")
+        || name == "e_bumpervents"
+        || name == "e_wing"
+        || name.starts_with("e_mirror_")
+        || name.starts_with("e_window_")
+        || name == "e_exhaust"
+        || name == "e_intakeroof"
+        || name == "e_body"
+}
+
+/// Optional exterior variants (auxiliary lamps and their lit twins, alternative mirrors, wings,
+/// grilles, plates, mud flaps, ...) are selected by the car's own `.ini` through
+/// `Switch = true/false` with `Predicate = NotUsed`; RallySimFans' parts tool writes the preset
+/// files (`carparts/*/<car>.ini`) with exactly that flag: `Switch = false` selects the variant
+/// (`Lights_On` => `*_lit` false / unlit true, `wing_evo` => evo2a+evo2b false, evo1 true) and
+/// `Switch = true` deselects it. Drawing both members of every pair put lit lamps over unlit
+/// lamps, two mirrors, four wing pieces and two bumper strips in the same place.
+pub fn variant_deselected(name: &str, part: &Section) -> bool {
+    if name.starts_with("i_") || is_structural_panel(name) || !car_parts::is_switched(part) {
+        return false;
+    }
+    let value = |key| part.get(key).filter(|v| !v.is_empty());
+    match (value("SwitchBox"), value("Predicate")) {
+        (_, None) => false,
+        (_, Some(p)) => p.eq_ignore_ascii_case("NotUsed"),
+    }
+}
+
 fn part_set<'a>(
     name: &str,
     parts: &'a [Section],
@@ -72,6 +107,9 @@ fn part_set<'a>(
     let part = car_parts::section(parts, name).ok_or("no part section")?;
     if !shown_at_start(part) {
         return Err("hidden initial switch state (lights off)");
+    }
+    if variant_deselected(name, part) {
+        return Err("optional variant deselected by Switch=true");
     }
     if (name.contains("_wheel_") || name.contains("sparewheel")) && !name.contains("gravel") {
         return Err("unused surface variant");

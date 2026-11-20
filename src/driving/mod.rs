@@ -2,6 +2,8 @@
 pub mod audio;
 pub mod cameras;
 pub mod career;
+#[cfg(test)]
+mod catalog_audit;
 pub mod championship;
 pub mod codriver;
 pub mod content_manager;

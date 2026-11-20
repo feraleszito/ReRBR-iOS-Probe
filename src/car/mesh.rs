@@ -439,7 +439,7 @@ fn convert_set(
     Ok(result)
 }
 
-fn part_transform(
+pub(crate) fn part_transform(
     mesh: &sgc::Mesh,
     elements: &[sgc::Element],
     worlds: &HashMap<i32, [[f32; 4]; 3]>,
