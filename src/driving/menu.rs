@@ -45,6 +45,7 @@ pub enum Page {
     NewDealership,
     CareerGarage,
     CareerChampionship,
+    CareerService,
 }
 
 impl Page {
@@ -209,9 +210,9 @@ impl MainSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DealershipFilter {
     #[default]
+    All,
     Initiation,
     Drivable,
-    All,
 }
 
 impl DealershipFilter {
@@ -401,6 +402,7 @@ pub enum Command {
     CareerCreateConfirm,
     CareerSlotSelect(usize),
     CareerSlotImportLegacy,
+    CareerLoadDevMode,
     CareerResetRequest,
     CareerResetConfirm,
     CareerResetCancel,
@@ -418,10 +420,18 @@ pub enum Command {
     CareerGarageCancelSell,
     CareerDiffPrev,
     CareerDiffNext,
+    CareerChampKindPrev,
+    CareerChampKindNext,
     CareerChampStart,
     CareerChampRunNextStage,
     CareerChampAbandon,
+    CareerChampRestoreAndDismiss,
     CareerChampDismissFinished,
+    CareerServiceRepair(super::career::RepairComponent),
+    CareerServiceRepairAll,
+    CareerServiceTyrePrev,
+    CareerServiceTyreNext,
+    CareerServiceMountTyre,
     OpenCareerAfterStage,
     ScrollRowsUp,
     ScrollRowsDown,
@@ -595,6 +605,8 @@ pub struct Context<'a> {
     pub pending_buy_vehicle_id: Option<&'a str>,
     pub pending_sell_vehicle_id: Option<&'a str>,
     pub selected_career_difficulty: super::career::CareerDifficulty,
+    pub selected_championship_kind: super::career::ChampionshipKind,
+    pub selected_service_tyre: super::career::TyreCompound,
 }
 
 #[derive(Debug)]
@@ -796,7 +808,8 @@ impl Menu {
             Page::Dealership => "CONCESIONARIO 2ª MANO",
             Page::NewDealership => "SALÓN AUTOMOTOR — 0 KM",
             Page::CareerGarage => "GARAJE DE CARRERA",
-            Page::CareerChampionship => "COPA REGIONAL DE INICIACIÓN",
+            Page::CareerChampionship => "CAMPEONATOS DE CARRERA",
+            Page::CareerService => "PARQUE DE SERVICIO / TALLER",
         }
     }
     pub fn active_dealership_kind(&self) -> super::career::DealershipKind {
@@ -824,13 +837,14 @@ impl Menu {
         }
     }
     /// Filtered indices into `ctx.content.vehicles` for a specific Dealership (`2ª MANO` or `SALÓN AUTOMOTOR 0 KM`),
-    /// strictly enforcing each vehicle's commercial channel (`spec.offered_in(kind)`) and sorting affordable
-    /// drivable initiation cars first.
+    /// showing ALL catalog vehicles in `DealershipFilter::All` (including locked ones with clear badges),
+    /// and sorting `DISPONIBLE` first, then `DINERO INSUFICIENTE`, then `BLOQUEADO`.
     pub fn dealership_indices_for(
         &self,
         ctx: &Context,
         kind: super::career::DealershipKind,
     ) -> Vec<usize> {
+        let profile = ctx.career.and_then(|c| c.profile.as_ref());
         let mut indices: Vec<usize> = ctx
             .content
             .vehicles
@@ -839,14 +853,17 @@ impl Menu {
             .filter(|(_, e)| {
                 let cap = e.capability(ctx.ngp_experimental);
                 let spec = super::career::vehicle_market_spec(e);
-                if !spec.offered_in(kind) {
-                    return false;
-                }
                 match self.dealership_filter {
-                    DealershipFilter::Initiation => spec.tier.eligible_for_regional(),
-                    DealershipFilter::Drivable => cap == DriveCapability::Drivable,
+                    DealershipFilter::Initiation => {
+                        spec.offered_in(kind) && spec.tier.eligible_for_regional()
+                    }
+                    DealershipFilter::Drivable => {
+                        spec.offered_in(kind) && cap == DriveCapability::Drivable
+                    }
                     DealershipFilter::All => {
-                        e.can_showroom_view() || cap == DriveCapability::Drivable
+                        spec.offered_in(kind)
+                            || spec.concesionario
+                                == super::career::DealershipChannel::PendingCommercialRule
                     }
                 }
             })
@@ -867,6 +884,15 @@ impl Menu {
             let cap = e.capability(ctx.ngp_experimental);
             let spec = super::career::vehicle_market_spec(e);
             let price = spec.price_for(kind).unwrap_or(u64::MAX);
+            let avail_rank = match profile {
+                Some(p) => match p.dealership_availability(e, kind, ctx.ngp_experimental) {
+                    super::career::DealershipAvailability::Available => 0u8,
+                    super::career::DealershipAvailability::Owned => 1u8,
+                    super::career::DealershipAvailability::InsufficientFunds { .. } => 2u8,
+                    super::career::DealershipAvailability::Locked { .. } => 3u8,
+                },
+                None => 0u8,
+            };
             let drivable_rank = if cap == DriveCapability::Drivable {
                 0u8
             } else {
@@ -877,7 +903,7 @@ impl Menu {
             } else {
                 1u8
             };
-            (regional_rank, drivable_rank, price, i)
+            (avail_rank, regional_rank, drivable_rank, price, i)
         });
         indices
     }
@@ -1970,6 +1996,12 @@ impl Menu {
                         ));
                     }
                 }
+                if super::career::DEV_MODE_ENABLED {
+                    rows.push(Row::action(
+                        "MODO DESARROLLADOR QA (US$9,999,999,999 · AISLADO)",
+                        Command::CareerLoadDevMode,
+                    ));
+                }
                 rows.push(Row::action("VOLVER", Command::Back));
                 rows
             }
@@ -2040,17 +2072,24 @@ impl Menu {
                     ));
                     let champ_label = match &p.active_championship {
                         Some(c) if !c.finished => format!(
-                            "CONTINUAR COPA REGIONAL ({}/{})",
+                            "CONTINUAR {} ({}/{})",
+                            c.title,
                             c.completed_stages(),
                             c.total_stages()
                         ),
-                        Some(_) => "VER RESULTADOS COPA REGIONAL".into(),
-                        None => "COPA REGIONAL DE INICIACIÓN (3 ETAPAS)".into(),
+                        Some(c) => format!("VER RESULTADOS {}", c.title),
+                        None => "CAMPEONATOS (REGIONAL / HISTÓRICO)".into(),
                     };
                     rows.push(Row::action(
                         champ_label,
                         Command::Open(Page::CareerChampionship),
                     ));
+                    if p.active_career_vehicle_id.is_some() {
+                        rows.push(Row::action(
+                            "PARQUE DE SERVICIO / NEUMÁTICOS",
+                            Command::Open(Page::CareerService),
+                        ));
+                    }
                     rows.push(Row::action(
                         format!("GARAJE DE CARRERA ({} PROPIOS)", p.owned_vehicle_ids.len()),
                         Command::Open(Page::CareerGarage),
@@ -2110,15 +2149,41 @@ impl Menu {
                 if let Some(p) = ctx.career.and_then(|c| c.profile.as_ref()) {
                     if let Some(champ) = &p.active_championship {
                         if champ.finished {
-                            rows.push(Row::action(
-                                "FINALIZAR Y VOLVER A CARRERA",
-                                Command::CareerChampDismissFinished,
-                            ));
+                            if !champ.restoration_settled && champ.end_restoration_cost_usd > 0 {
+                                let can_afford = p.cash_usd >= champ.end_restoration_cost_usd;
+                                rows.push(Row {
+                                    label: format!(
+                                        "RESTAURAR COCHE ({}) Y FINALIZAR",
+                                        super::career::format_usd(champ.end_restoration_cost_usd)
+                                    ),
+                                    kind: RowKind::Action {
+                                        command: Command::CareerChampRestoreAndDismiss,
+                                        enabled: can_afford,
+                                    },
+                                });
+                                rows.push(Row::action(
+                                    "FINALIZAR SIN RESTAURAR (CONSERVAR DAÑOS)",
+                                    Command::CareerChampDismissFinished,
+                                ));
+                            } else {
+                                rows.push(Row::action(
+                                    "FINALIZAR Y VOLVER A CARRERA",
+                                    Command::CareerChampDismissFinished,
+                                ));
+                            }
                         } else {
                             let next_idx = champ.next_stage_index().unwrap_or(0);
-                            let stage_name = super::career::REGIONAL_STAGES
+                            let stage_name = champ
+                                .kind
+                                .stages()
                                 .get(next_idx)
                                 .map_or("TRAMO", |s| s.display_name);
+                            if champ.service_window_open {
+                                rows.push(Row::action(
+                                    "PARQUE DE SERVICIO (REPARAR / NEUMÁTICOS)",
+                                    Command::Open(Page::CareerService),
+                                ));
+                            }
                             rows.push(Row {
                                 label: if ctx.steering_ready {
                                     format!(
@@ -2141,7 +2206,20 @@ impl Menu {
                             ));
                         }
                     } else {
+                        let kind = ctx.selected_championship_kind;
                         let diff = ctx.selected_career_difficulty;
+                        rows.push(Row::stepper(
+                            "CAMPEONATO",
+                            Command::CareerChampKindPrev,
+                            Command::CareerChampKindNext,
+                            if kind == super::career::ChampionshipKind::Historic
+                                && !p.historics_unlocked
+                            {
+                                format!("{} [BLOQUEADO]", kind.title())
+                            } else {
+                                kind.title().to_string()
+                            },
+                        ));
                         rows.push(Row::stepper(
                             "DIFICULTAD",
                             Command::CareerDiffPrev,
@@ -2149,40 +2227,190 @@ impl Menu {
                             format!(
                                 "{} (1º {})",
                                 diff.label(),
-                                super::career::format_usd(diff.regional_prize_for_position(1))
+                                super::career::format_usd(diff.prize_for_position(kind, 1))
                             ),
                         ));
+                        let is_eligible = |e: &super::content_manager::VehicleEntry| {
+                            let tier = super::career::vehicle_market_spec(e).tier;
+                            match kind {
+                                super::career::ChampionshipKind::Regional => {
+                                    tier.eligible_for_regional()
+                                }
+                                super::career::ChampionshipKind::Historic => {
+                                    tier.eligible_for_historic()
+                                }
+                            }
+                        };
                         let eligible_owned = p
                             .active_career_vehicle_id
                             .as_deref()
                             .and_then(|id| ctx.content.vehicle(id))
                             .filter(|e| {
                                 e.capability(ctx.ngp_experimental) == DriveCapability::Drivable
-                                    && super::career::vehicle_market_spec(e)
-                                        .tier
-                                        .eligible_for_regional()
+                                    && is_eligible(e)
                             })
                             .or_else(|| {
                                 ctx.content.vehicles.iter().find(|e| {
                                     p.owns_vehicle(&e.descriptor.id)
                                         && e.capability(ctx.ngp_experimental)
                                             == DriveCapability::Drivable
-                                        && super::career::vehicle_market_spec(e)
-                                            .tier
-                                            .eligible_for_regional()
+                                        && is_eligible(e)
                                 })
                             });
-                        if let Some(car) = eligible_owned {
+                        if kind == super::career::ChampionshipKind::Historic
+                            && !p.historics_unlocked
+                        {
+                            rows.push(Row::info(
+                                "REQUISITO HISTÓRICOS",
+                                "CONSIGUE UN PODIO (TOP 3) EN COPA REGIONAL",
+                            ));
+                        } else if let Some(car) = eligible_owned {
                             rows.push(Row::action(
                                 format!("INICIAR CAMPEONATO CON {}", car.descriptor.name),
                                 Command::CareerChampStart,
                             ));
                         } else {
                             rows.push(Row::action(
-                                "COMPRAR COCHE DE INICIACIÓN EN 2ª MANO",
+                                match kind {
+                                    super::career::ChampionshipKind::Regional => {
+                                        "COMPRAR COCHE DE INICIACIÓN EN 2ª MANO"
+                                    }
+                                    super::career::ChampionshipKind::Historic => {
+                                        "COMPRAR COCHE HISTÓRICO / GRUPO A EN 2ª MANO"
+                                    }
+                                },
                                 Command::Open(Page::Dealership),
                             ));
                         }
+                    }
+                }
+                rows.push(Row::action("VOLVER", Command::Back));
+                rows
+            }
+            Page::CareerService => {
+                let mut rows = Vec::new();
+                if let Some(p) = ctx.career.and_then(|c| c.profile.as_ref()) {
+                    let target_id = p
+                        .active_championship
+                        .as_ref()
+                        .filter(|c| !c.finished)
+                        .map(|c| c.locked_vehicle_id.as_str())
+                        .or(p.active_career_vehicle_id.as_deref());
+                    if let Some(entry) = target_id.and_then(|id| ctx.content.vehicle(id)) {
+                        let st = p
+                            .vehicle_state(&entry.descriptor.id)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                super::career::OwnedVehicleState::factory_new(&entry.descriptor.id)
+                            });
+                        let quote = p.service_quote(entry, ctx.selected_service_tyre);
+                        let service_allowed = p.can_service_vehicle(&entry.descriptor.id).is_ok();
+                        let next_surface = p
+                            .active_championship
+                            .as_ref()
+                            .and_then(|c| c.next_stage_index().and_then(|i| c.kind.stages().get(i)))
+                            .map(|s| s.surface);
+
+                        rows.push(Row::info(
+                            "COCHE / SALDO",
+                            format!(
+                                "{} ({}%) · {}",
+                                entry.descriptor.name,
+                                st.condition.overall_pct(),
+                                super::career::format_usd(p.cash_usd)
+                            ),
+                        ));
+                        let compat_note = match next_surface {
+                            Some(surf)
+                                if !st.installed_tyre.is_compatible_with_stage_surface(surf) =>
+                            {
+                                format!(
+                                    "{} ({}% REST.) [INCOMPATIBLE {}]",
+                                    st.installed_tyre.label(),
+                                    st.condition.tyre_remaining_pct(),
+                                    super::career::TyreSurface::from_stage_surface(surf).label()
+                                )
+                            }
+                            _ => format!(
+                                "{} ({}% RESTANTE)",
+                                st.installed_tyre.label(),
+                                st.condition.tyre_remaining_pct()
+                            ),
+                        };
+                        rows.push(Row::info("NEUMÁTICOS ACTUALES", compat_note));
+
+                        for comp in super::career::RepairComponent::ALL {
+                            let pct = match comp {
+                                super::career::RepairComponent::Engine => st.condition.engine_pct,
+                                super::career::RepairComponent::Transmission => {
+                                    st.condition.transmission_pct
+                                }
+                                super::career::RepairComponent::Suspension => {
+                                    st.condition.suspension_pct
+                                }
+                                super::career::RepairComponent::BodyElectrics => {
+                                    st.condition.body_electrics_pct
+                                }
+                            };
+                            let cost = quote.cost_for(comp);
+                            let label = if cost == 0 {
+                                format!("{} — 100% (INTACTO)", comp.label())
+                            } else {
+                                format!(
+                                    "REPARAR {} ({}% -> 100% · {})",
+                                    comp.label(),
+                                    pct,
+                                    super::career::format_usd(cost)
+                                )
+                            };
+                            rows.push(Row {
+                                label,
+                                kind: RowKind::Action {
+                                    command: Command::CareerServiceRepair(comp),
+                                    enabled: service_allowed && cost > 0 && p.cash_usd >= cost,
+                                },
+                            });
+                        }
+
+                        rows.push(Row {
+                            label: if quote.total_repair_cost_usd > 0 {
+                                format!(
+                                    "REPARAR TODO ({})",
+                                    super::career::format_usd(quote.total_repair_cost_usd)
+                                )
+                            } else {
+                                "MECÁNICA AL 100% (SIN REPARACIONES)".into()
+                            },
+                            kind: RowKind::Action {
+                                command: Command::CareerServiceRepairAll,
+                                enabled: service_allowed
+                                    && quote.total_repair_cost_usd > 0
+                                    && p.cash_usd >= quote.total_repair_cost_usd,
+                            },
+                        });
+
+                        rows.push(Row::stepper(
+                            "COMPUESTO NEUMÁTICOS",
+                            Command::CareerServiceTyrePrev,
+                            Command::CareerServiceTyreNext,
+                            ctx.selected_service_tyre.label().to_string(),
+                        ));
+                        rows.push(Row {
+                            label: format!(
+                                "MONTAR JUEGO NUEVO ({})",
+                                super::career::format_usd(quote.tyre_replacement_cost_usd)
+                            ),
+                            kind: RowKind::Action {
+                                command: Command::CareerServiceMountTyre,
+                                enabled: service_allowed
+                                    && p.cash_usd >= quote.tyre_replacement_cost_usd,
+                            },
+                        });
+                    } else {
+                        rows.push(Row::info(
+                            "SIN COCHE ACTIVO",
+                            "COMPRA UN COCHE EN EL CONCESIONARIO",
+                        ));
                     }
                 }
                 rows.push(Row::action("VOLVER", Command::Back));
@@ -2407,8 +2635,12 @@ impl Menu {
                 "MIGRACIÓN AUTOMÁTICA DE GUARDADOS ANTERIORES".into(),
             ],
             Page::CareerChampionship => vec![
-                "3 ETAPAS CORTAS · INICIACIÓN FWD (SUPER 1600 / RALLY5 / RALLY4 / R2)".into(),
-                "ÉLITE MUNDIAL: PRÓXIMAMENTE (REQUIERE TIEMPOS ONLINE VERIFICADOS)".into(),
+                "REGIONAL (INICIACIÓN) Y CAMPEONATO HISTÓRICO (DESBLOQUEABLE CON PODIO)".into(),
+                "ASISTENCIA MECÁNICA Y NEUMÁTICOS DISPONIBLE ENTRE ETAPAS".into(),
+            ],
+            Page::CareerService => vec![
+                "REPARACIÓN DE DAÑOS NGP, DESGASTE Y ELECCIÓN DE NEUMÁTICOS".into(),
+                "LOS COSTES ESCALAN SEGÚN CATEGORÍA Y DAÑO REAL DEL VEHÍCULO".into(),
             ],
         }
     }
@@ -4037,6 +4269,8 @@ impl Menu {
             );
             ui::text_clipped(canvas, cx + 12.0, cy + 28.0, cw - 24.0, &meta, 0.58, DIM);
 
+            let avail =
+                profile.map(|p| p.dealership_availability(entry, kind, ctx.ngp_experimental));
             let info_line = if pending_this {
                 format!(
                     "CONFIRMA COMPRA {} POR {} (SALDO RESTANTE {})",
@@ -4046,34 +4280,42 @@ impl Menu {
                         .map(|p| super::career::format_usd(p.cash_usd.saturating_sub(active_price)))
                         .unwrap_or_else(|| "US$0".into())
                 )
-            } else if cap != DriveCapability::Drivable {
-                "EXHIBICIÓN 3D · NO COMPRABLE SIN FÍSICA INTEGRADA".to_string()
+            } else if let Some(super::career::DealershipAvailability::Locked { reason }) = &avail {
+                format!("BLOQUEADO: {reason}")
             } else if owned {
-                "YA LO TIENES EN TU GARAJE DE CARRERA".to_string()
+                "EN GARAJE · YA LO TIENES EN TU GARAJE DE CARRERA".to_string()
             } else if !status.is_empty() && status != "READY - TAP A ROW" {
                 status.to_string()
-            } else if kind == super::career::DealershipKind::UsedCars
-                && spec.precio_0km.is_some()
-                && spec.descuento_usado_pct > 0
-            {
-                format!(
-                    "0 KM: {} -> USADO CON -{}% DTO. ({})",
-                    super::career::format_usd(spec.precio_0km.unwrap_or(active_price)),
-                    spec.descuento_usado_pct,
-                    if spec.elegibilidad_carrera.eligible_for_regional() {
-                        "ELEGIBLE COPA REGIONAL"
-                    } else {
-                        "CATEGORÍA SUPERIOR"
-                    }
-                )
-            } else if spec.elegibilidad_carrera.eligible_for_regional() {
-                "ELEGIBLE PARA COPA REGIONAL DE INICIACIÓN".to_string()
+            } else if kind == super::career::DealershipKind::UsedCars {
+                if let Some(p) = profile {
+                    let listing = p.used_car_listing(entry);
+                    format!(
+                        "INSP: {}% GRAL (MOT {}% CAJ {}% SUSP {}% NEUM {}%) · REP.EST {}",
+                        listing.condition.overall_pct(),
+                        listing.condition.engine_pct,
+                        listing.condition.transmission_pct,
+                        listing.condition.suspension_pct,
+                        listing.condition.tyre_remaining_pct(),
+                        super::career::format_usd(listing.estimated_repair_cost_usd),
+                    )
+                } else {
+                    "2ª MANO · INSPECCIÓN MECÁNICA DISPONIBLE AL CREAR PERFIL".to_string()
+                }
             } else {
-                "CATEGORÍA SUPERIOR (NO ELEGIBLE PARA COPA REGIONAL)".to_string()
+                "0 KM · 100% ESTADO MECÁNICO · 0% DESGASTE · 0 DAÑOS".to_string()
             };
-            let info_col = if pending_this || cap != DriveCapability::Drivable {
+            let info_col = if pending_this
+                || matches!(
+                    avail,
+                    Some(super::career::DealershipAvailability::Locked { .. })
+                ) {
                 WARN
-            } else if owned {
+            } else if owned
+                || matches!(
+                    avail,
+                    Some(super::career::DealershipAvailability::Available)
+                )
+            {
                 GOOD
             } else {
                 INFO
@@ -4084,7 +4326,7 @@ impl Menu {
                 cy + 46.0,
                 cw * 0.54,
                 &info_line,
-                0.54,
+                0.52,
                 info_col,
             );
 
@@ -4095,9 +4337,12 @@ impl Menu {
             } else if owned {
                 ui::panel(canvas, action_rect, [22, 68, 48, 235], GOOD);
                 ui::text_center(canvas, action_rect, "EN PROPIEDAD", 0.66, TEXT);
-            } else if cap != DriveCapability::Drivable {
+            } else if matches!(
+                avail,
+                Some(super::career::DealershipAvailability::Locked { .. })
+            ) {
                 ui::panel(canvas, action_rect, PANEL_DEEP, LINE);
-                ui::text_center(canvas, action_rect, "EXHIBICIÓN (SIN FÍSICA)", 0.58, DIM);
+                ui::text_center(canvas, action_rect, "BLOQUEADO", 0.62, DIM);
             } else if pending_this {
                 ui::panel(canvas, action_rect, [180, 105, 16, 245], WARN);
                 ui::text_center(canvas, action_rect, "CONFIRMAR COMPRA", 0.66, TEXT);
@@ -4116,7 +4361,7 @@ impl Menu {
                 ui::text_center(canvas, action_rect, &buy_txt, 0.60, TEXT);
             } else {
                 ui::panel(canvas, action_rect, PANEL_DEEP, BAD);
-                ui::text_center(canvas, action_rect, "SALDO INSUFICIENTE", 0.62, BAD);
+                ui::text_center(canvas, action_rect, "DINERO INSUFICIENTE", 0.58, BAD);
             }
         } else {
             ui::text_center(
@@ -4360,27 +4605,29 @@ impl Menu {
                 ));
             }
         } else {
+            let kind = ctx.selected_championship_kind;
             let diff = ctx.selected_career_difficulty;
             lines.push((
                 format!(
-                    "PILOTO: {} · SALDO: {} · DIFICULTAD: {}",
+                    "{} · PILOTO: {} · SALDO: {}",
+                    kind.title(),
                     p.pilot_name,
                     super::career::format_usd(p.cash_usd),
-                    diff.label()
                 ),
                 INFO,
             ));
             lines.push((
                 format!(
-                    "PREMIOS (PROV.): 1º {} · 2º {} · 3º {} · 4º {}",
-                    super::career::format_usd(diff.regional_prize_for_position(1)),
-                    super::career::format_usd(diff.regional_prize_for_position(2)),
-                    super::career::format_usd(diff.regional_prize_for_position(3)),
-                    super::career::format_usd(diff.regional_prize_for_position(4)),
+                    "PREMIOS ({}): 1º {} · 2º {} · 3º {} · 4º {}",
+                    diff.label(),
+                    super::career::format_usd(diff.prize_for_position(kind, 1)),
+                    super::career::format_usd(diff.prize_for_position(kind, 2)),
+                    super::career::format_usd(diff.prize_for_position(kind, 3)),
+                    super::career::format_usd(diff.prize_for_position(kind, 4)),
                 ),
                 GOOD,
             ));
-            for (i, st) in super::career::REGIONAL_STAGES.iter().enumerate() {
+            for (i, st) in kind.stages().iter().enumerate() {
                 lines.push((
                     format!(
                         "ETAPA {}: {} ({} · {:.2} KM)",
@@ -4393,11 +4640,16 @@ impl Menu {
                 ));
             }
             lines.push((
-                "REGLAS: COCHE Y DIFICULTAD BLOQUEADOS HASTA TERMINAR O ABANDONAR".into(),
+                "REGLAS: DAÑOS Y NEUMÁTICOS SE ARRASTRAN ENTRE ETAPAS · SERVICIO ENTRE TRAMOS"
+                    .into(),
                 DIM,
             ));
             lines.push((
-                "PODIO EN COPA REGIONAL DESBLOQUEA FUTUROS CAMPEONATOS HISTÓRICOS".into(),
+                if p.historics_unlocked {
+                    "HISTÓRICOS DESBLOQUEADOS · ELEGIBLE CON KIT CAR / GRUPO A / GRUPO B".into()
+                } else {
+                    "PODIO EN COPA REGIONAL DESBLOQUEA EL CAMPEONATO HISTÓRICO".into()
+                },
                 WARN,
             ));
         }
@@ -4654,6 +4906,8 @@ mod tests {
             pending_buy_vehicle_id: None,
             pending_sell_vehicle_id: None,
             selected_career_difficulty: crate::driving::career::CareerDifficulty::Beginner,
+            selected_championship_kind: crate::driving::career::ChampionshipKind::Regional,
+            selected_service_tyre: crate::driving::career::TyreCompound::GravelHard,
         }
     }
 
@@ -5357,6 +5611,7 @@ mod tests {
             Page::NewDealership,
             Page::CareerGarage,
             Page::CareerChampionship,
+            Page::CareerService,
         ];
 
         // Verify both iPad mini A17 Pro (1024x768) and iPhone 15 wide landscape (2556x1179).

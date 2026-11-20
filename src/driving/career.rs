@@ -10,8 +10,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const CAREER_SCHEMA_VERSION: u32 = 1;
+pub const CAREER_SCHEMA_VERSION: u32 = 2;
 pub const INITIAL_CASH_USD: u64 = 15_000;
+pub const DEV_MODE_ENABLED: bool = cfg!(feature = "career-dev-mode");
+pub const DEV_MODE_CASH_USD: u64 = 9_999_999_999;
 
 /// Future progression economic targets (documented for Phase 3+ seasons; not active yet).
 pub const WRC_SEASON_WIN_BASE_USD: u64 = 1_000_000;
@@ -21,6 +23,9 @@ pub const WRC_RALLY_WIN_MAX_USD: u64 = 165_000;
 /// Configurable provisional base prizes for the Regional Initiation Championship (USD).
 /// Multiplied by `CareerDifficulty::prize_multiplier_pct()`.
 pub const REGIONAL_BASE_PRIZES_USD: [u64; 6] = [4_500, 3_000, 2_000, 1_200, 750, 400];
+
+/// Configurable base prizes for the Historic Championship (USD).
+pub const HISTORIC_BASE_PRIZES_USD: [u64; 6] = [12_000, 8_000, 5_500, 3_500, 2_200, 1_200];
 
 /// Touch-friendly preset pilot names for quick profile creation (customizable via tag/letters).
 pub const PILOT_NAME_PRESETS: [&str; 8] = [
@@ -59,6 +64,59 @@ impl CareerTier {
 
     pub fn eligible_for_regional(self) -> bool {
         self == Self::Regional
+    }
+
+    pub fn eligible_for_historic(self) -> bool {
+        matches!(self, Self::Historic | Self::KitCarGroupA)
+    }
+
+    /// Centralized maintenance/repair/tyre cost multiplier in percent (`100` = 1.00x).
+    pub fn maintenance_multiplier_pct(self) -> u64 {
+        match self {
+            Self::Regional => 100,
+            Self::Rally3 => 145,
+            Self::KitCarGroupA => 160,
+            Self::Rally2 => 220,
+            Self::Historic => 250,
+            Self::Wrc => 320,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChampionshipKind {
+    #[default]
+    Regional,
+    Historic,
+}
+
+impl ChampionshipKind {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Regional => "regional",
+            Self::Historic => "historic",
+        }
+    }
+
+    pub fn from_code(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "historic" => Self::Historic,
+            _ => Self::Regional,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Regional => "COPA REGIONAL DE INICIACIÓN",
+            Self::Historic => "CAMPEONATO HISTÓRICO DE RALLY",
+        }
+    }
+
+    pub fn stages(self) -> &'static [RegionalStageSpec] {
+        match self {
+            Self::Regional => &REGIONAL_STAGES,
+            Self::Historic => &HISTORIC_STAGES,
+        }
     }
 }
 
@@ -727,6 +785,21 @@ impl CareerDifficulty {
             .unwrap_or(*REGIONAL_BASE_PRIZES_USD.last().unwrap());
         (base * self.prize_multiplier_pct()) / 100
     }
+
+    pub fn historic_prize_for_position(self, position_1_based: usize) -> u64 {
+        let base = HISTORIC_BASE_PRIZES_USD
+            .get(position_1_based.saturating_sub(1))
+            .copied()
+            .unwrap_or(*HISTORIC_BASE_PRIZES_USD.last().unwrap());
+        (base * self.prize_multiplier_pct()) / 100
+    }
+
+    pub fn prize_for_position(self, kind: ChampionshipKind, position_1_based: usize) -> u64 {
+        match kind {
+            ChampionshipKind::Regional => self.regional_prize_for_position(position_1_based),
+            ChampionshipKind::Historic => self.historic_prize_for_position(position_1_based),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -767,6 +840,40 @@ pub const REGIONAL_STAGES: [RegionalStageSpec; 3] = [
 
 pub fn regional_stage_descriptor(stage_index: usize) -> Option<StageDescriptor> {
     let spec = REGIONAL_STAGES.get(stage_index)?;
+    StageDescriptor::presets()
+        .into_iter()
+        .find(|s| s.id == spec.stage_id)
+}
+
+pub const HISTORIC_STAGES: [RegionalStageSpec; 3] = [
+    RegionalStageSpec {
+        stage_id: "joux-verte",
+        display_name: "Joux Verte",
+        surface: "Tarmac",
+        length_km: 7.90,
+        reference_ms: 260_000,
+    },
+    RegionalStageSpec {
+        stage_id: "harwood-forest",
+        display_name: "Harwood Forest",
+        surface: "Gravel",
+        length_km: 6.00,
+        reference_ms: 225_000,
+    },
+    RegionalStageSpec {
+        stage_id: "kaihuavaara",
+        display_name: "Kaihuavaara",
+        surface: "Snow",
+        length_km: 6.20,
+        reference_ms: 245_000,
+    },
+];
+
+pub fn championship_stage_descriptor(
+    kind: ChampionshipKind,
+    stage_index: usize,
+) -> Option<StageDescriptor> {
+    let spec = kind.stages().get(stage_index)?;
     StageDescriptor::presets()
         .into_iter()
         .find(|s| s.id == spec.stage_id)
@@ -813,6 +920,39 @@ const REGIONAL_RIVALS: [RivalBlueprint; 6] = [
     },
 ];
 
+const HISTORIC_RIVALS: [RivalBlueprint; 6] = [
+    RivalBlueprint {
+        name: "G. PANIZZI",
+        car_label: "306 Maxi Kit Car",
+        skill_ratio: 0.975,
+    },
+    RivalBlueprint {
+        name: "S. BLOMQVIST",
+        car_label: "Audi 200 Quattro GrpA",
+        skill_ratio: 0.995,
+    },
+    RivalBlueprint {
+        name: "B. BEGUIN",
+        car_label: "BMW M3 E30 GrpA",
+        skill_ratio: 1.015,
+    },
+    RivalBlueprint {
+        name: "J. RAGNOTTI",
+        car_label: "Clio Maxi / GrpA",
+        skill_ratio: 1.035,
+    },
+    RivalBlueprint {
+        name: "A. VOVOS",
+        car_label: "Lancia Delta GrpA",
+        skill_ratio: 1.058,
+    },
+    RivalBlueprint {
+        name: "H. DEMUTH",
+        car_label: "Audi 200 Quattro GrpA",
+        skill_ratio: 1.082,
+    },
+];
+
 fn deterministic_jitter(seed: u64, rival_idx: usize, stage_idx: usize) -> f64 {
     let mut x = seed
         .wrapping_mul(6364136223846793005)
@@ -855,12 +995,474 @@ pub struct StandingRow {
     pub is_player: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TyreSurface {
+    Tarmac,
+    Gravel,
+    Snow,
+}
+
+impl TyreSurface {
+    pub fn from_stage_surface(surface: &str) -> Self {
+        let lower = surface.to_ascii_lowercase();
+        if lower.contains("tarmac") || lower.contains("asphalt") || lower.contains("asfalto") {
+            Self::Tarmac
+        } else if lower.contains("snow") || lower.contains("ice") || lower.contains("nieve") {
+            Self::Snow
+        } else {
+            Self::Gravel
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tarmac => "ASFALTO",
+            Self::Gravel => "GRAVA",
+            Self::Snow => "NIEVE",
+        }
+    }
+}
+
+/// Supported RBR/NGP tyre compounds mapped directly to `Race.tyre` (`0..=6`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TyreCompound {
+    TarmacHard,         // 0
+    TarmacIntermediate, // 1
+    TarmacWet,          // 2
+    #[default]
+    GravelHard, // 3
+    GravelIntermediate, // 4
+    GravelWet,          // 5
+    Snow,               // 6
+}
+
+impl TyreCompound {
+    pub const ALL: [Self; 7] = [
+        Self::TarmacHard,
+        Self::TarmacIntermediate,
+        Self::TarmacWet,
+        Self::GravelHard,
+        Self::GravelIntermediate,
+        Self::GravelWet,
+        Self::Snow,
+    ];
+
+    pub fn rbr_tyre_id(self) -> u32 {
+        match self {
+            Self::TarmacHard => 0,
+            Self::TarmacIntermediate => 1,
+            Self::TarmacWet => 2,
+            Self::GravelHard => 3,
+            Self::GravelIntermediate => 4,
+            Self::GravelWet => 5,
+            Self::Snow => 6,
+        }
+    }
+
+    pub fn from_rbr_tyre_id(id: u32) -> Self {
+        match id {
+            0 => Self::TarmacHard,
+            1 => Self::TarmacIntermediate,
+            2 => Self::TarmacWet,
+            3 => Self::GravelHard,
+            4 => Self::GravelIntermediate,
+            5 => Self::GravelWet,
+            _ => Self::Snow,
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::TarmacHard => "tarmac_hard",
+            Self::TarmacIntermediate => "tarmac_inter",
+            Self::TarmacWet => "tarmac_wet",
+            Self::GravelHard => "gravel_hard",
+            Self::GravelIntermediate => "gravel_inter",
+            Self::GravelWet => "gravel_wet",
+            Self::Snow => "snow",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Self {
+        match code.trim().to_ascii_lowercase().as_str() {
+            "tarmac_hard" => Self::TarmacHard,
+            "tarmac_inter" => Self::TarmacIntermediate,
+            "tarmac_wet" => Self::TarmacWet,
+            "gravel_inter" => Self::GravelIntermediate,
+            "gravel_wet" => Self::GravelWet,
+            "snow" => Self::Snow,
+            _ => Self::GravelHard,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TarmacHard => "ASFALTO SECO (DURO)",
+            Self::TarmacIntermediate => "ASFALTO INTERMEDIO",
+            Self::TarmacWet => "ASFALTO LLUVIA",
+            Self::GravelHard => "GRAVA SECA (DURA)",
+            Self::GravelIntermediate => "GRAVA INTERMEDIA",
+            Self::GravelWet => "GRAVA BARRO / LLUVIA",
+            Self::Snow => "NIEVE / CLAVOS",
+        }
+    }
+
+    pub fn surface_family(self) -> TyreSurface {
+        match self {
+            Self::TarmacHard | Self::TarmacIntermediate | Self::TarmacWet => TyreSurface::Tarmac,
+            Self::GravelHard | Self::GravelIntermediate | Self::GravelWet => TyreSurface::Gravel,
+            Self::Snow => TyreSurface::Snow,
+        }
+    }
+
+    pub fn is_compatible_with_stage_surface(self, stage_surface: &str) -> bool {
+        self.surface_family() == TyreSurface::from_stage_surface(stage_surface)
+    }
+
+    pub fn default_for_stage_surface(stage_surface: &str) -> Self {
+        match TyreSurface::from_stage_surface(stage_surface) {
+            TyreSurface::Tarmac => Self::TarmacHard,
+            TyreSurface::Gravel => Self::GravelHard,
+            TyreSurface::Snow => Self::Snow,
+        }
+    }
+
+    /// Base price in USD for a 4-tyre set on a Regional (`1.0x`) vehicle.
+    pub fn base_set_price_usd(self) -> u64 {
+        match self {
+            Self::TarmacHard | Self::GravelHard => 650,
+            Self::TarmacIntermediate | Self::GravelIntermediate => 720,
+            Self::TarmacWet | Self::GravelWet => 780,
+            Self::Snow => 920,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VehicleOrigin {
+    #[default]
+    NewZeroKm,
+    UsedMarket,
+}
+
+impl VehicleOrigin {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::NewZeroKm => "new_0km",
+            Self::UsedMarket => "used",
+        }
+    }
+
+    pub fn from_code(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "used" => Self::UsedMarket,
+            _ => Self::NewZeroKm,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NewZeroKm => "0 KM (NUEVO)",
+            Self::UsedMarket => "2ª MANO (USADO)",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VehicleCondition {
+    pub engine_pct: u8,
+    pub transmission_pct: u8,
+    pub suspension_pct: u8,
+    pub body_electrics_pct: u8,
+    /// `0` = brand new tread (100% remaining), `100` = completely worn out.
+    pub tyre_wear_pct: u8,
+    /// Optional hex-encoded `rbr_gameplay::car_damage::CarriedDamage` buffer from NGP.
+    pub carried_damage_hex: Option<String>,
+    pub odometer_km_tenths: u32,
+}
+
+impl Default for VehicleCondition {
+    fn default() -> Self {
+        Self::factory_new()
+    }
+}
+
+impl VehicleCondition {
+    pub fn factory_new() -> Self {
+        Self {
+            engine_pct: 100,
+            transmission_pct: 100,
+            suspension_pct: 100,
+            body_electrics_pct: 100,
+            tyre_wear_pct: 0,
+            carried_damage_hex: None,
+            odometer_km_tenths: 0,
+        }
+    }
+
+    pub fn overall_pct(&self) -> u8 {
+        let sum = u16::from(self.engine_pct)
+            + u16::from(self.transmission_pct)
+            + u16::from(self.suspension_pct)
+            + u16::from(self.body_electrics_pct);
+        (sum / 4) as u8
+    }
+
+    pub fn tyre_remaining_pct(&self) -> u8 {
+        100u8.saturating_sub(self.tyre_wear_pct.min(100))
+    }
+
+    pub fn needs_mechanical_repair(&self) -> bool {
+        self.engine_pct < 100
+            || self.transmission_pct < 100
+            || self.suspension_pct < 100
+            || self.body_electrics_pct < 100
+    }
+
+    pub fn warnings(
+        &self,
+        installed_tyre: TyreCompound,
+        next_stage_surface: Option<&str>,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.engine_pct < 75 {
+            out.push(format!("MOTOR / REFRIGERACIÓN AL {}%", self.engine_pct));
+        }
+        if self.transmission_pct < 75 {
+            out.push(format!("TRANSMISIÓN / CAJA AL {}%", self.transmission_pct));
+        }
+        if self.suspension_pct < 75 {
+            out.push(format!(
+                "SUSPENSIÓN / DIRECCIÓN AL {}%",
+                self.suspension_pct
+            ));
+        }
+        if self.body_electrics_pct < 75 {
+            out.push(format!(
+                "CARROCERÍA / ELÉCTRICO AL {}%",
+                self.body_electrics_pct
+            ));
+        }
+        if self.tyre_wear_pct >= 70 {
+            out.push(format!(
+                "DESGASTE CRÍTICO DE NEUMÁTICOS ({}% RESTANTE)",
+                self.tyre_remaining_pct()
+            ));
+        } else if self.tyre_wear_pct >= 45 {
+            out.push(format!(
+                "NEUMÁTICOS A MEDIO USO ({}% RESTANTE)",
+                self.tyre_remaining_pct()
+            ));
+        }
+        if let Some(surface) = next_stage_surface {
+            if !installed_tyre.is_compatible_with_stage_surface(surface) {
+                out.push(format!(
+                    "NEUMÁTICO {} INCOMPATIBLE CON {}",
+                    installed_tyre.surface_family().label(),
+                    TyreSurface::from_stage_surface(surface).label()
+                ));
+            }
+        }
+        out
+    }
+
+    pub fn carried_damage_bytes(&self) -> Option<Vec<u8>> {
+        let hex = self.carried_damage_hex.as_deref()?;
+        decode_hex(hex)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedVehicleState {
+    pub vehicle_id: String,
+    pub origin: VehicleOrigin,
+    pub installed_tyre: TyreCompound,
+    pub condition: VehicleCondition,
+    /// Reserved cleanly for future community setup sharing without coupling to car economy.
+    pub setup_profile_id: Option<String>,
+    /// Reserved cleanly for future custom livery assignment.
+    pub livery_id: Option<String>,
+}
+
+impl OwnedVehicleState {
+    pub fn factory_new(vehicle_id: impl Into<String>) -> Self {
+        Self {
+            vehicle_id: vehicle_id.into(),
+            origin: VehicleOrigin::NewZeroKm,
+            installed_tyre: TyreCompound::GravelHard,
+            condition: VehicleCondition::factory_new(),
+            setup_profile_id: None,
+            livery_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairComponent {
+    Engine,
+    Transmission,
+    Suspension,
+    BodyElectrics,
+}
+
+impl RepairComponent {
+    pub const ALL: [Self; 4] = [
+        Self::Engine,
+        Self::Transmission,
+        Self::Suspension,
+        Self::BodyElectrics,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Engine => "MOTOR / TURBO / REFRIG.",
+            Self::Transmission => "CAJA / EMBRAGUE / DIF.",
+            Self::Suspension => "SUSPENSIÓN / FRENOS / DIR.",
+            Self::BodyElectrics => "CARROCERÍA / ELÉCTRICO",
+        }
+    }
+
+    /// Base USD cost per 1% of missing health on a Regional (`1.0x`) vehicle.
+    fn base_usd_per_missing_pct(self) -> u64 {
+        match self {
+            Self::Engine => 28,
+            Self::Transmission => 24,
+            Self::Suspension => 22,
+            Self::BodyElectrics => 14,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceQuote {
+    pub tier: CareerTier,
+    pub engine_cost_usd: u64,
+    pub transmission_cost_usd: u64,
+    pub suspension_cost_usd: u64,
+    pub body_electrics_cost_usd: u64,
+    pub total_repair_cost_usd: u64,
+    pub tyre_replacement_cost_usd: u64,
+}
+
+impl ServiceQuote {
+    pub fn for_condition(
+        condition: &VehicleCondition,
+        tier: CareerTier,
+        selected_tyre: TyreCompound,
+    ) -> Self {
+        let mult = tier.maintenance_multiplier_pct();
+        let calc = |health: u8, comp: RepairComponent| -> u64 {
+            let missing = u64::from(100u8.saturating_sub(health.min(100)));
+            if missing == 0 {
+                return 0;
+            }
+            let raw = missing * comp.base_usd_per_missing_pct() * mult;
+            (raw + 50) / 100
+        };
+        let engine_cost_usd = calc(condition.engine_pct, RepairComponent::Engine);
+        let transmission_cost_usd = calc(condition.transmission_pct, RepairComponent::Transmission);
+        let suspension_cost_usd = calc(condition.suspension_pct, RepairComponent::Suspension);
+        let body_electrics_cost_usd =
+            calc(condition.body_electrics_pct, RepairComponent::BodyElectrics);
+        let total_repair_cost_usd = engine_cost_usd
+            .saturating_add(transmission_cost_usd)
+            .saturating_add(suspension_cost_usd)
+            .saturating_add(body_electrics_cost_usd);
+        let tyre_replacement_cost_usd = (selected_tyre.base_set_price_usd() * mult + 50) / 100;
+        Self {
+            tier,
+            engine_cost_usd,
+            transmission_cost_usd,
+            suspension_cost_usd,
+            body_electrics_cost_usd,
+            total_repair_cost_usd,
+            tyre_replacement_cost_usd,
+        }
+    }
+
+    pub fn cost_for(&self, comp: RepairComponent) -> u64 {
+        match comp {
+            RepairComponent::Engine => self.engine_cost_usd,
+            RepairComponent::Transmission => self.transmission_cost_usd,
+            RepairComponent::Suspension => self.suspension_cost_usd,
+            RepairComponent::BodyElectrics => self.body_electrics_cost_usd,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsedCarListing {
+    pub vehicle_id: String,
+    pub condition: VehicleCondition,
+    pub installed_tyre: TyreCompound,
+    pub estimated_repair_cost_usd: u64,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DealershipAvailability {
+    Available,
+    Owned,
+    InsufficientFunds { missing_usd: u64 },
+    Locked { reason: String },
+}
+
+impl DealershipAvailability {
+    pub fn badge(&self) -> &'static str {
+        match self {
+            Self::Available => "DISPONIBLE",
+            Self::Owned => "EN GARAJE",
+            Self::InsufficientFunds { .. } => "DINERO INSUFICIENTE",
+            Self::Locked { .. } => "BLOQUEADO",
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available)
+    }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    let bytes = hex.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let s = std::str::from_utf8(pair).ok()?;
+        let val = u8::from_str_radix(s, 16).ok()?;
+        out.push(val);
+    }
+    Some(out)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionKind {
     InitialGrant,
     VehiclePurchase,
     VehicleSale,
     ChampionshipPrize,
+    MechanicalRepair,
+    TyrePurchase,
+    ChampionshipRestoration,
 }
 
 impl TransactionKind {
@@ -870,6 +1472,9 @@ impl TransactionKind {
             Self::VehiclePurchase => "vehicle_purchase",
             Self::VehicleSale => "vehicle_sale",
             Self::ChampionshipPrize => "championship_prize",
+            Self::MechanicalRepair => "mechanical_repair",
+            Self::TyrePurchase => "tyre_purchase",
+            Self::ChampionshipRestoration => "championship_restoration",
         }
     }
 
@@ -878,6 +1483,9 @@ impl TransactionKind {
             "vehicle_purchase" => Self::VehiclePurchase,
             "vehicle_sale" => Self::VehicleSale,
             "championship_prize" => Self::ChampionshipPrize,
+            "mechanical_repair" => Self::MechanicalRepair,
+            "tyre_purchase" => Self::TyrePurchase,
+            "championship_restoration" => Self::ChampionshipRestoration,
             _ => Self::InitialGrant,
         }
     }
@@ -910,6 +1518,7 @@ pub struct CompletedChampionshipRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveChampionship {
     pub id: String,
+    pub kind: ChampionshipKind,
     pub title: String,
     pub seed: u64,
     pub difficulty: CareerDifficulty,
@@ -922,6 +1531,12 @@ pub struct ActiveChampionship {
     pub reward_claimed: bool,
     pub final_position: Option<usize>,
     pub prize_awarded_usd: u64,
+    /// True after finishing an intermediate stage (`1..total_stages-1`), allowing service park repairs/tyres.
+    pub service_window_open: bool,
+    /// Calculated once when the final stage finishes: cost to restore remaining damage/wear.
+    pub end_restoration_cost_usd: u64,
+    /// True once the player explicitly confirms or skips end-of-championship restoration.
+    pub restoration_settled: bool,
 }
 
 impl ActiveChampionship {
@@ -1001,6 +1616,8 @@ pub struct StageRecordOutcome {
     pub current_position: usize,
     pub prize_awarded_usd: u64,
     pub newly_unlocked_historics: bool,
+    pub service_window_opened: bool,
+    pub post_stage_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1011,6 +1628,7 @@ pub struct CareerProfile {
     pub cash_usd: u64,
     pub owned_vehicle_ids: Vec<String>,
     pub paid_prices_usd: std::collections::BTreeMap<String, u64>,
+    pub vehicle_states: std::collections::BTreeMap<String, OwnedVehicleState>,
     pub active_career_vehicle_id: Option<String>,
     pub podiums: u32,
     pub wins: u32,
@@ -1020,6 +1638,7 @@ pub struct CareerProfile {
     pub transactions: Vec<Transaction>,
     pub completed_championships: Vec<CompletedChampionshipRecord>,
     pub active_championship: Option<ActiveChampionship>,
+    pub is_dev_profile: bool,
 }
 
 impl CareerProfile {
@@ -1041,6 +1660,7 @@ impl CareerProfile {
             cash_usd: INITIAL_CASH_USD,
             owned_vehicle_ids: Vec::new(),
             paid_prices_usd: std::collections::BTreeMap::new(),
+            vehicle_states: std::collections::BTreeMap::new(),
             active_career_vehicle_id: None,
             podiums: 0,
             wins: 0,
@@ -1056,7 +1676,39 @@ impl CareerProfile {
             }],
             completed_championships: Vec::new(),
             active_championship: None,
+            is_dev_profile: false,
         })
+    }
+
+    /// Isolated developer-mode profile with `US$9,999,999,999` (`u64`) for internal QA.
+    /// Never saved into normal `career_slot_1..3.json`.
+    pub fn create_dev_profile() -> Self {
+        let now = unix_now_s();
+        Self {
+            schema_version: CAREER_SCHEMA_VERSION,
+            pilot_name: "DEV QA".into(),
+            competition_number: 99,
+            cash_usd: DEV_MODE_CASH_USD,
+            owned_vehicle_ids: Vec::new(),
+            paid_prices_usd: std::collections::BTreeMap::new(),
+            vehicle_states: std::collections::BTreeMap::new(),
+            active_career_vehicle_id: None,
+            podiums: 0,
+            wins: 0,
+            historics_unlocked: true,
+            next_championship_seq: 1,
+            last_saved_unix_s: now,
+            transactions: vec![Transaction {
+                kind: TransactionKind::InitialGrant,
+                delta_usd: DEV_MODE_CASH_USD as i64,
+                balance_after_usd: DEV_MODE_CASH_USD,
+                description: "Developer QA Profile".into(),
+                timestamp_unix_s: now,
+            }],
+            completed_championships: Vec::new(),
+            active_championship: None,
+            is_dev_profile: true,
+        }
     }
 
     /// 70% of the actual price paid (rounded half-up to the nearest USD: `(paid * 70 + 50) / 100`).
@@ -1090,6 +1742,7 @@ impl CareerProfile {
         let resale = self.resale_value_usd(entry);
         self.owned_vehicle_ids.retain(|v| v != id);
         self.paid_prices_usd.remove(id);
+        self.vehicle_states.remove(id);
         self.cash_usd = self.cash_usd.saturating_add(resale);
         if self.active_career_vehicle_id.as_deref() == Some(id.as_str()) {
             self.active_career_vehicle_id = self.owned_vehicle_ids.first().cloned();
@@ -1119,49 +1772,174 @@ impl CareerProfile {
             .is_some_and(|c| !c.finished)
     }
 
-    /// Strict dealership purchase validation for a specific dealership (`2ª MANO` or `SALÓN AUTOMOTOR 0 KM`):
-    /// - Vehicle must be genuinely `Drivable` (never visual-only or unavailable).
-    /// - Vehicle must be commercially offered in `kind` (`spec.offered_in(kind)`).
-    /// - Uses the exact dealership price (`spec.price_for(kind)`).
-    /// - Prevents duplicate ownership across both dealerships and overdrafts.
+    pub fn vehicle_state(&self, vehicle_id: &str) -> Option<&OwnedVehicleState> {
+        self.vehicle_states.get(vehicle_id)
+    }
+
+    pub fn ensure_vehicle_state(&mut self, vehicle_id: &str) -> &mut OwnedVehicleState {
+        self.vehicle_states
+            .entry(vehicle_id.to_string())
+            .or_insert_with(|| OwnedVehicleState::factory_new(vehicle_id))
+    }
+
+    /// Deterministic, reproducible used-car inspection sheet for `2ª MANO`.
+    /// Every used unit has coherent mechanical wear/damage and an itemized repair estimate.
+    pub fn used_car_listing(&self, entry: &VehicleEntry) -> UsedCarListing {
+        let spec = vehicle_market_spec(entry);
+        let mut h: u64 = 0x9E37_79B9_7F4A_7C15;
+        for &b in entry.descriptor.id.as_bytes() {
+            h = h
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(u64::from(b) + 1);
+        }
+        h ^= h >> 30;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 27;
+
+        let byte = |shift: u32| -> u8 { ((h >> shift) & 0xFF) as u8 };
+        let engine_pct = 70 + (byte(0) % 21); // 70..=90
+        let transmission_pct = 68 + (byte(8) % 23); // 68..=90
+        let suspension_pct = 64 + (byte(16) % 25); // 64..=88
+        let body_electrics_pct = 72 + (byte(24) % 22); // 72..=93
+        let tyre_wear_pct = 24 + (byte(32) % 34); // 24..=57
+        let odometer_km_tenths = 180 + u32::from(byte(40)) * 7; // 18.0 .. 196.5 km
+        let installed_tyre = if byte(48).is_multiple_of(3) {
+            TyreCompound::TarmacHard
+        } else {
+            TyreCompound::GravelHard
+        };
+
+        let condition = VehicleCondition {
+            engine_pct,
+            transmission_pct,
+            suspension_pct,
+            body_electrics_pct,
+            tyre_wear_pct,
+            carried_damage_hex: None,
+            odometer_km_tenths,
+        };
+        let quote = ServiceQuote::for_condition(&condition, spec.tier, installed_tyre);
+        let warnings = condition.warnings(installed_tyre, None);
+
+        UsedCarListing {
+            vehicle_id: entry.descriptor.id.clone(),
+            condition,
+            installed_tyre,
+            estimated_repair_cost_usd: quote.total_repair_cost_usd,
+            warnings,
+        }
+    }
+
+    /// Evaluates whether a vehicle is purchasable in `kind` (`DISPONIBLE`, `DINERO INSUFICIENTE`,
+    /// `EN GARAJE`, or `BLOQUEADO: <exact requirement>`).
+    pub fn dealership_availability(
+        &self,
+        entry: &VehicleEntry,
+        kind: DealershipKind,
+        ngp_experimental: bool,
+    ) -> DealershipAvailability {
+        if self.owns_vehicle(&entry.descriptor.id) {
+            return DealershipAvailability::Owned;
+        }
+        let cap = entry.capability(ngp_experimental);
+        if cap != DriveCapability::Drivable {
+            return DealershipAvailability::Locked {
+                reason: match cap {
+                    DriveCapability::VisualOnly => "SOLO VISUALIZACIÓN 3D (SIN FÍSICA NGP)".into(),
+                    DriveCapability::Unavailable => "ARCHIVOS FALTANTES EN DISPOSITIVO".into(),
+                    DriveCapability::Drivable => unreachable!(),
+                },
+            };
+        }
+        let spec = vehicle_market_spec(entry);
+        if spec.concesionario == DealershipChannel::PendingCommercialRule {
+            return DealershipAvailability::Locked {
+                reason: "PENDIENTE DE REGLA COMERCIAL".into(),
+            };
+        }
+        if !spec.offered_in(kind) {
+            return DealershipAvailability::Locked {
+                reason: format!("EXCLUSIVO DE {}", spec.concesionario.label()),
+            };
+        }
+        if matches!(spec.tier, CareerTier::Historic | CareerTier::KitCarGroupA)
+            && !self.historics_unlocked
+        {
+            return DealershipAvailability::Locked {
+                reason: "REQUIERE PODIO EN COPA REGIONAL".into(),
+            };
+        }
+        let Some(price) = spec.price_for(kind).filter(|&p| p > 0) else {
+            return DealershipAvailability::Locked {
+                reason: "PRECIO NO DEFINIDO".into(),
+            };
+        };
+        if self.cash_usd < price {
+            return DealershipAvailability::InsufficientFunds {
+                missing_usd: price - self.cash_usd,
+            };
+        }
+        DealershipAvailability::Available
+    }
+
+    /// Strict dealership purchase validation for a specific dealership (`2ª MANO` or `SALÓN AUTOMOTOR 0 KM`).
     pub fn buy_vehicle_in_dealership(
         &mut self,
         entry: &VehicleEntry,
         kind: DealershipKind,
         ngp_experimental: bool,
     ) -> Result<u64, String> {
-        let cap = entry.capability(ngp_experimental);
-        if cap != DriveCapability::Drivable {
-            return Err(match cap {
-                DriveCapability::VisualOnly => {
-                    "SOLO VISUALIZACIÓN 3D — NO SE PUEDE COMPRAR SIN FÍSICA".into()
-                }
-                DriveCapability::Unavailable => "ARCHIVOS FALTANTES — VEHÍCULO NO COMPRABLE".into(),
-                DriveCapability::Drivable => unreachable!(),
-            });
+        match self.dealership_availability(entry, kind, ngp_experimental) {
+            DealershipAvailability::Available => {}
+            DealershipAvailability::Owned => {
+                return Err("YA TIENES ESTE VEHÍCULO EN TU GARAJE DE CARRERA".into());
+            }
+            DealershipAvailability::InsufficientFunds { .. } => {
+                let price = vehicle_market_spec(entry).price_for(kind).unwrap_or(0);
+                return Err(format!(
+                    "SALDO INSUFICIENTE (NECESITAS {}, TIENES {})",
+                    format_usd(price),
+                    format_usd(self.cash_usd)
+                ));
+            }
+            DealershipAvailability::Locked { reason } => {
+                return Err(format!("VEHÍCULO BLOQUEADO: {reason}"));
+            }
         }
         let spec = vehicle_market_spec(entry);
-        let Some(price) = spec.price_for(kind).filter(|&p| p > 0) else {
-            return Err(format!(
-                "ESTE VEHÍCULO NO SE VENDE EN {}",
-                kind.short_name()
-            ));
+        let price = spec
+            .price_for(kind)
+            .filter(|&p| p > 0)
+            .ok_or_else(|| format!("ESTE VEHÍCULO NO SE VENDE EN {}", kind.short_name()))?;
+
+        let delivered_state = match kind {
+            DealershipKind::NewSalon => OwnedVehicleState {
+                vehicle_id: entry.descriptor.id.clone(),
+                origin: VehicleOrigin::NewZeroKm,
+                installed_tyre: TyreCompound::GravelHard,
+                condition: VehicleCondition::factory_new(),
+                setup_profile_id: None,
+                livery_id: None,
+            },
+            DealershipKind::UsedCars => {
+                let listing = self.used_car_listing(entry);
+                OwnedVehicleState {
+                    vehicle_id: entry.descriptor.id.clone(),
+                    origin: VehicleOrigin::UsedMarket,
+                    installed_tyre: listing.installed_tyre,
+                    condition: listing.condition,
+                    setup_profile_id: None,
+                    livery_id: None,
+                }
+            }
         };
-        if self.owns_vehicle(&entry.descriptor.id) {
-            return Err("YA TIENES ESTE VEHÍCULO EN TU GARAJE DE CARRERA".into());
-        }
-        if self.cash_usd < price {
-            return Err(format!(
-                "SALDO INSUFICIENTE (NECESITAS {}, TIENES {})",
-                format_usd(price),
-                format_usd(self.cash_usd)
-            ));
-        }
 
         self.cash_usd -= price;
         self.owned_vehicle_ids.push(entry.descriptor.id.clone());
         self.paid_prices_usd
             .insert(entry.descriptor.id.clone(), price);
+        self.vehicle_states
+            .insert(entry.descriptor.id.clone(), delivered_state);
         if self.active_career_vehicle_id.is_none() {
             self.active_career_vehicle_id = Some(entry.descriptor.id.clone());
         }
@@ -1205,6 +1983,154 @@ impl CareerProfile {
         Ok(())
     }
 
+    /// True when the player is legally allowed to repair or change tyres for `vehicle_id`:
+    /// - Outside any active championship (Career Garage / Workshop), OR
+    /// - During an active championship ONLY when `service_window_open == true` (between stages)
+    ///   and for `locked_vehicle_id`.
+    pub fn can_service_vehicle(&self, vehicle_id: &str) -> Result<(), String> {
+        if !self.owns_vehicle(vehicle_id) {
+            return Err("ESTE VEHÍCULO NO PERTENECE A TU GARAJE DE CARRERA".into());
+        }
+        if let Some(champ) = &self.active_championship {
+            if champ.finished {
+                return Err("CAMPEONATO FINALIZADO — USA LA PANTALLA DE RESTAURACIÓN FINAL".into());
+            }
+            if champ.locked_vehicle_id != vehicle_id {
+                return Err("SOLO PUEDES ASISTIR AL COCHE INSCRITO EN EL CAMPEONATO".into());
+            }
+            if !champ.service_window_open {
+                return Err("ASISTENCIA CERRADA — SOLO DISPONIBLE ENTRE ETAPAS".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn service_quote(&self, entry: &VehicleEntry, selected_tyre: TyreCompound) -> ServiceQuote {
+        let spec = vehicle_market_spec(entry);
+        let state = self
+            .vehicle_states
+            .get(&entry.descriptor.id)
+            .cloned()
+            .unwrap_or_else(|| OwnedVehicleState::factory_new(&entry.descriptor.id));
+        ServiceQuote::for_condition(&state.condition, spec.tier, selected_tyre)
+    }
+
+    pub fn repair_component(
+        &mut self,
+        entry: &VehicleEntry,
+        component: RepairComponent,
+    ) -> Result<u64, String> {
+        let id = entry.descriptor.id.clone();
+        self.can_service_vehicle(&id)?;
+        let quote = self.service_quote(entry, TyreCompound::GravelHard);
+        let cost = quote.cost_for(component);
+        if cost == 0 {
+            return Err(format!("{} YA ESTÁ AL 100%", component.label()));
+        }
+        if self.cash_usd < cost {
+            return Err(format!(
+                "SALDO INSUFICIENTE (NECESITAS {}, TIENES {})",
+                format_usd(cost),
+                format_usd(self.cash_usd)
+            ));
+        }
+        self.cash_usd -= cost;
+        let state = self.ensure_vehicle_state(&id);
+        match component {
+            RepairComponent::Engine => state.condition.engine_pct = 100,
+            RepairComponent::Transmission => state.condition.transmission_pct = 100,
+            RepairComponent::Suspension => state.condition.suspension_pct = 100,
+            RepairComponent::BodyElectrics => state.condition.body_electrics_pct = 100,
+        }
+        if !state.condition.needs_mechanical_repair() {
+            state.condition.carried_damage_hex = None;
+        }
+        let now = unix_now_s();
+        self.last_saved_unix_s = now;
+        self.transactions.push(Transaction {
+            kind: TransactionKind::MechanicalRepair,
+            delta_usd: -(cost as i64),
+            balance_after_usd: self.cash_usd,
+            description: format!(
+                "Reparación {} ({})",
+                component.label(),
+                entry.descriptor.name
+            ),
+            timestamp_unix_s: now,
+        });
+        Ok(cost)
+    }
+
+    pub fn repair_all_components(&mut self, entry: &VehicleEntry) -> Result<u64, String> {
+        let id = entry.descriptor.id.clone();
+        self.can_service_vehicle(&id)?;
+        let quote = self.service_quote(entry, TyreCompound::GravelHard);
+        let cost = quote.total_repair_cost_usd;
+        if cost == 0 {
+            return Err("EL VEHÍCULO YA ESTÁ AL 100% MECÁNICO".into());
+        }
+        if self.cash_usd < cost {
+            return Err(format!(
+                "SALDO INSUFICIENTE (NECESITAS {}, TIENES {})",
+                format_usd(cost),
+                format_usd(self.cash_usd)
+            ));
+        }
+        self.cash_usd -= cost;
+        let state = self.ensure_vehicle_state(&id);
+        state.condition.engine_pct = 100;
+        state.condition.transmission_pct = 100;
+        state.condition.suspension_pct = 100;
+        state.condition.body_electrics_pct = 100;
+        state.condition.carried_damage_hex = None;
+        let now = unix_now_s();
+        self.last_saved_unix_s = now;
+        self.transactions.push(Transaction {
+            kind: TransactionKind::MechanicalRepair,
+            delta_usd: -(cost as i64),
+            balance_after_usd: self.cash_usd,
+            description: format!("Asistencia completa ({})", entry.descriptor.name),
+            timestamp_unix_s: now,
+        });
+        Ok(cost)
+    }
+
+    pub fn buy_and_mount_tyres(
+        &mut self,
+        entry: &VehicleEntry,
+        compound: TyreCompound,
+    ) -> Result<u64, String> {
+        let id = entry.descriptor.id.clone();
+        self.can_service_vehicle(&id)?;
+        let quote = self.service_quote(entry, compound);
+        let cost = quote.tyre_replacement_cost_usd;
+        if self.cash_usd < cost {
+            return Err(format!(
+                "SALDO INSUFICIENTE PARA NEUMÁTICOS (NECESITAS {}, TIENES {})",
+                format_usd(cost),
+                format_usd(self.cash_usd)
+            ));
+        }
+        self.cash_usd -= cost;
+        let state = self.ensure_vehicle_state(&id);
+        state.installed_tyre = compound;
+        state.condition.tyre_wear_pct = 0;
+        let now = unix_now_s();
+        self.last_saved_unix_s = now;
+        self.transactions.push(Transaction {
+            kind: TransactionKind::TyrePurchase,
+            delta_usd: -(cost as i64),
+            balance_after_usd: self.cash_usd,
+            description: format!(
+                "Neumáticos {} ({})",
+                compound.label(),
+                entry.descriptor.name
+            ),
+            timestamp_unix_s: now,
+        });
+        Ok(cost)
+    }
+
     /// Starts a new 3-stage Regional Initiation Championship, locking car and difficulty.
     pub fn start_regional_championship(
         &mut self,
@@ -1212,34 +2138,90 @@ impl CareerProfile {
         ngp_experimental: bool,
         difficulty: CareerDifficulty,
     ) -> Result<(), String> {
+        self.start_championship(
+            ChampionshipKind::Regional,
+            vehicle_entry,
+            ngp_experimental,
+            difficulty,
+        )
+    }
+
+    pub fn start_historic_championship(
+        &mut self,
+        vehicle_entry: &VehicleEntry,
+        ngp_experimental: bool,
+        difficulty: CareerDifficulty,
+    ) -> Result<(), String> {
+        self.start_championship(
+            ChampionshipKind::Historic,
+            vehicle_entry,
+            ngp_experimental,
+            difficulty,
+        )
+    }
+
+    pub fn start_championship(
+        &mut self,
+        kind: ChampionshipKind,
+        vehicle_entry: &VehicleEntry,
+        ngp_experimental: bool,
+        difficulty: CareerDifficulty,
+    ) -> Result<(), String> {
         if self.has_locked_championship() {
-            return Err("YA TIENES UN CAMPEONATO REGIONAL EN CURSO".into());
+            return Err("YA TIENES UN CAMPEONATO EN CURSO".into());
+        }
+        if kind == ChampionshipKind::Historic && !self.historics_unlocked {
+            return Err(
+                "CAMPEONATO HISTÓRICO BLOQUEADO (CONSIGUE UN PODIO EN COPA REGIONAL)".into(),
+            );
         }
         if !self.owns_vehicle(&vehicle_entry.descriptor.id) {
-            return Err("DEBES COMPRAR UN COCHE DE INICIACIÓN EN 2ª MANO PRIMERO".into());
+            return Err(match kind {
+                ChampionshipKind::Regional => {
+                    "DEBES COMPRAR UN COCHE DE INICIACIÓN EN 2ª MANO PRIMERO".into()
+                }
+                ChampionshipKind::Historic => {
+                    "DEBES COMPRAR UN COCHE HISTÓRICO / GRUPO A / KIT CAR EN 2ª MANO".into()
+                }
+            });
         }
         if vehicle_entry.capability(ngp_experimental) != DriveCapability::Drivable {
             return Err("EL COCHE SELECCIONADO NO ES CONDUCIBLE CON FÍSICA".into());
         }
         let spec = vehicle_market_spec(vehicle_entry);
-        if !spec.tier.eligible_for_regional() {
-            return Err(format!(
-                "CATEGORÍA {} NO ELEGIBLE PARA COPA REGIONAL (REQUIERE INICIACIÓN)",
-                spec.tier.label()
-            ));
+        let eligible = match kind {
+            ChampionshipKind::Regional => spec.tier.eligible_for_regional(),
+            ChampionshipKind::Historic => spec.tier.eligible_for_historic(),
+        };
+        if !eligible {
+            return Err(match kind {
+                ChampionshipKind::Regional => format!(
+                    "CATEGORÍA {} NO ELEGIBLE PARA COPA REGIONAL (REQUIERE INICIACIÓN)",
+                    spec.tier.label()
+                ),
+                ChampionshipKind::Historic => format!(
+                    "CATEGORÍA {} NO ELEGIBLE PARA HISTÓRICOS (REQUIERE HISTÓRICO / KIT CAR / GRUPO A)",
+                    spec.tier.label()
+                ),
+            });
         }
 
         let seq = self.next_championship_seq;
         self.next_championship_seq = self.next_championship_seq.saturating_add(1);
         let seed = seq
             .wrapping_mul(0x517C_C1B7_2722_0A95)
-            .wrapping_add(difficulty as u64 + 17);
+            .wrapping_add(difficulty as u64 + 17 + (kind as u64) * 101);
 
-        let rivals: Vec<RivalEntry> = REGIONAL_RIVALS
+        let stages = kind.stages();
+        let rival_blueprints = match kind {
+            ChampionshipKind::Regional => &REGIONAL_RIVALS[..],
+            ChampionshipKind::Historic => &HISTORIC_RIVALS[..],
+        };
+        let rivals: Vec<RivalEntry> = rival_blueprints
             .iter()
             .enumerate()
             .map(|(r_idx, bp)| {
-                let stage_times_ms = REGIONAL_STAGES
+                let stage_times_ms = stages
                     .iter()
                     .enumerate()
                     .map(|(s_idx, st)| {
@@ -1257,37 +2239,58 @@ impl CareerProfile {
             })
             .collect();
 
+        self.ensure_vehicle_state(&vehicle_entry.descriptor.id);
         self.active_career_vehicle_id = Some(vehicle_entry.descriptor.id.clone());
         self.active_championship = Some(ActiveChampionship {
-            id: format!("regional-{seq}"),
-            title: "COPA REGIONAL DE INICIACIÓN".into(),
+            id: format!("{}-{seq}", kind.code()),
+            kind,
+            title: kind.title().into(),
             seed,
             difficulty,
             locked_vehicle_id: vehicle_entry.descriptor.id.clone(),
             locked_vehicle_name: vehicle_entry.descriptor.name.clone(),
-            stage_ids: REGIONAL_STAGES
-                .iter()
-                .map(|s| s.stage_id.to_string())
-                .collect(),
+            stage_ids: stages.iter().map(|s| s.stage_id.to_string()).collect(),
             player_stage_times_ms: Vec::new(),
             rivals,
             finished: false,
             reward_claimed: false,
             final_position: None,
             prize_awarded_usd: 0,
+            service_window_open: false,
+            end_restoration_cost_usd: 0,
+            restoration_settled: false,
         });
         Ok(())
     }
 
-    /// Records a validated stage finish strictly in order.
-    /// Rejects out-of-order stages, wrong vehicle, invalid runs, or already-finished championships.
-    /// Pays the championship prize ONCE when Stage 3 completes.
+    /// Records a validated stage finish strictly in order without external damage telemetry.
     pub fn record_championship_stage_result(
         &mut self,
         stage_id: &str,
         vehicle_id: &str,
         total_ms: u64,
         valid_run: bool,
+    ) -> Result<StageRecordOutcome, String> {
+        self.record_championship_stage_result_with_telemetry(
+            stage_id,
+            vehicle_id,
+            total_ms,
+            valid_run,
+            None,
+            CareerTier::Regional,
+        )
+    }
+
+    /// Records a validated stage finish strictly in order, applying real NGP damage summary
+    /// (when available) and deterministic tyre wear from stage distance, surface, and NGP tyre damage.
+    pub fn record_championship_stage_result_with_telemetry(
+        &mut self,
+        stage_id: &str,
+        vehicle_id: &str,
+        total_ms: u64,
+        valid_run: bool,
+        damage: Option<&rerbr_sim::drive::DamageSummary>,
+        vehicle_tier: CareerTier,
     ) -> Result<StageRecordOutcome, String> {
         if !valid_run || total_ms == 0 {
             return Err("CARRERA NO VÁLIDA — NO SE REGISTRA EN EL CAMPEONATO".into());
@@ -1317,21 +2320,100 @@ impl CareerProfile {
             ));
         }
 
+        let stage_spec = champ.kind.stages().get(stage_index).copied();
+        let stage_surface = stage_spec.map_or("Gravel", |s| s.surface);
+        let stage_length_km = stage_spec.map_or(5.0, |s| s.length_km);
+        let champ_kind = champ.kind;
+
         champ.player_stage_times_ms.push(total_ms);
         let current_position = champ.player_position(&pilot_name);
         let all_done = champ.player_stage_times_ms.len() >= champ.stage_ids.len();
+        champ.service_window_open = !all_done;
+
+        let post_stage_warnings;
+        {
+            let state = self
+                .vehicle_states
+                .entry(vehicle_id.to_string())
+                .or_insert_with(|| OwnedVehicleState::factory_new(vehicle_id));
+            state.condition.odometer_km_tenths = state
+                .condition
+                .odometer_km_tenths
+                .saturating_add((stage_length_km * 10.0).round() as u32);
+
+            let base_wear = (stage_length_km * 2.6).round() as u8;
+            let surface_mult = if state
+                .installed_tyre
+                .is_compatible_with_stage_surface(stage_surface)
+            {
+                1
+            } else {
+                2
+            };
+            let ngp_tyre_extra = damage
+                .map(|d| {
+                    d.ngp_tyre_damage_levels
+                        .iter()
+                        .copied()
+                        .max()
+                        .unwrap_or(0)
+                        .saturating_mul(4)
+                })
+                .unwrap_or(0);
+            let added_wear = base_wear
+                .saturating_mul(surface_mult)
+                .saturating_add(ngp_tyre_extra)
+                .max(4);
+            state.condition.tyre_wear_pct = state
+                .condition
+                .tyre_wear_pct
+                .saturating_add(added_wear)
+                .min(100);
+
+            if let Some(dmg) = damage {
+                state.condition.engine_pct = state.condition.engine_pct.min(dmg.engine_pct);
+                state.condition.transmission_pct =
+                    state.condition.transmission_pct.min(dmg.transmission_pct);
+                state.condition.suspension_pct =
+                    state.condition.suspension_pct.min(dmg.suspension_pct);
+                state.condition.body_electrics_pct = state
+                    .condition
+                    .body_electrics_pct
+                    .min(dmg.body_electrics_pct);
+                if !dmg.raw_bytes.is_empty() {
+                    state.condition.carried_damage_hex = Some(encode_hex(&dmg.raw_bytes));
+                }
+            }
+            let next_surface = champ_kind.stages().get(stage_index + 1).map(|s| s.surface);
+            post_stage_warnings = state.condition.warnings(state.installed_tyre, next_surface);
+        }
+
+        let restoration_cost_if_done = if all_done {
+            let state = self
+                .vehicle_states
+                .get(vehicle_id)
+                .cloned()
+                .unwrap_or_else(|| OwnedVehicleState::factory_new(vehicle_id));
+            ServiceQuote::for_condition(&state.condition, vehicle_tier, state.installed_tyre)
+                .total_repair_cost_usd
+        } else {
+            0
+        };
 
         let mut prize_awarded_usd = 0;
         let mut newly_unlocked_historics = false;
+        let champ = self.active_championship.as_mut().unwrap();
 
         if all_done {
             champ.finished = true;
             champ.final_position = Some(current_position);
+            champ.end_restoration_cost_usd = restoration_cost_if_done;
+            champ.restoration_settled = restoration_cost_if_done == 0;
             if !champ.reward_claimed {
                 champ.reward_claimed = true;
                 prize_awarded_usd = champ
                     .difficulty
-                    .regional_prize_for_position(current_position);
+                    .prize_for_position(champ_kind, current_position);
                 champ.prize_awarded_usd = prize_awarded_usd;
 
                 let champ_id = champ.id.clone();
@@ -1347,7 +2429,7 @@ impl CareerProfile {
                 }
                 if current_position <= 3 {
                     self.podiums = self.podiums.saturating_add(1);
-                    if !self.historics_unlocked {
+                    if champ_kind == ChampionshipKind::Regional && !self.historics_unlocked {
                         self.historics_unlocked = true;
                         newly_unlocked_historics = true;
                     }
@@ -1378,6 +2460,7 @@ impl CareerProfile {
                         abandoned: false,
                         completed_unix_s: now,
                     });
+                self.last_saved_unix_s = now;
             }
         }
 
@@ -1388,7 +2471,60 @@ impl CareerProfile {
             current_position,
             prize_awarded_usd,
             newly_unlocked_historics,
+            service_window_opened: !all_done,
+            post_stage_warnings,
         })
+    }
+
+    /// Settles end-of-championship mechanical restoration explicitly without double-charging.
+    /// If `restore_now` is `true` and `end_restoration_cost_usd > 0`, charges once and restores
+    /// mechanical condition to 100%; if `false`, leaves current damage on the car as-is.
+    pub fn settle_championship_restoration(&mut self, restore_now: bool) -> Result<u64, String> {
+        let Some(champ) = self.active_championship.as_mut() else {
+            return Ok(0);
+        };
+        if !champ.finished {
+            return Err("EL CAMPEONATO TODAVÍA ESTÁ EN CURSO".into());
+        }
+        if champ.restoration_settled {
+            return Ok(0);
+        }
+        let cost = champ.end_restoration_cost_usd;
+        let v_id = champ.locked_vehicle_id.clone();
+        let v_name = champ.locked_vehicle_name.clone();
+        if restore_now && cost > 0 {
+            if self.cash_usd < cost {
+                return Err(format!(
+                    "SALDO INSUFICIENTE PARA RESTAURACIÓN (NECESITAS {}, TIENES {})",
+                    format_usd(cost),
+                    format_usd(self.cash_usd)
+                ));
+            }
+            self.cash_usd -= cost;
+            let state = self.ensure_vehicle_state(&v_id);
+            state.condition.engine_pct = 100;
+            state.condition.transmission_pct = 100;
+            state.condition.suspension_pct = 100;
+            state.condition.body_electrics_pct = 100;
+            state.condition.carried_damage_hex = None;
+            let now = unix_now_s();
+            self.last_saved_unix_s = now;
+            self.transactions.push(Transaction {
+                kind: TransactionKind::ChampionshipRestoration,
+                delta_usd: -(cost as i64),
+                balance_after_usd: self.cash_usd,
+                description: format!("Restauración fin de campeonato ({v_name})"),
+                timestamp_unix_s: now,
+            });
+            self.active_championship
+                .as_mut()
+                .unwrap()
+                .restoration_settled = true;
+            Ok(cost)
+        } else {
+            champ.restoration_settled = true;
+            Ok(0)
+        }
     }
 
     /// Retires/abandons the active championship with zero prize and unlocks car/difficulty.
@@ -1457,6 +2593,34 @@ impl CareerStore {
         documents_root
             .join("RBR")
             .join(format!("career_slot_{n}.json"))
+    }
+
+    /// Completely isolated path for Developer QA mode (never touches `career_slot_1..3.json`).
+    pub fn dev_slot_path_in(documents_root: &Path) -> PathBuf {
+        documents_root.join("RBR").join("career_dev_slot.json")
+    }
+
+    pub fn load_dev_profile_from_root(documents_root: &Path) -> CareerProfile {
+        let path = Self::dev_slot_path_in(documents_root);
+        if path.exists() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(mut p) = parse_profile_json(&text) {
+                    p.is_dev_profile = true;
+                    return p;
+                }
+            }
+        }
+        CareerProfile::create_dev_profile()
+    }
+
+    pub fn save_dev_profile_in_root(
+        documents_root: &Path,
+        profile: &CareerProfile,
+    ) -> Result<(), String> {
+        let mut dev = profile.clone();
+        dev.is_dev_profile = true;
+        dev.last_saved_unix_s = unix_now_s();
+        Self::write_profile_atomic(&Self::dev_slot_path_in(documents_root), &dev)
     }
 
     fn meta_path_in(documents_root: &Path) -> PathBuf {
@@ -1775,6 +2939,51 @@ pub fn encode_profile_json(p: &CareerProfile) -> String {
         let _ = write!(out, "{}: {}", json_escape(id), price);
     }
     out.push_str("},\n");
+    out.push_str("  \"vehicle_states\": {\n");
+    for (i, (id, st)) in p.vehicle_states.iter().enumerate() {
+        let comma = if i + 1 < p.vehicle_states.len() {
+            ","
+        } else {
+            ""
+        };
+        out.push_str("    ");
+        out.push_str(&json_escape(id));
+        out.push_str(": {\"origin\": ");
+        out.push_str(&json_escape(st.origin.code()));
+        out.push_str(", \"installed_tyre\": ");
+        out.push_str(&json_escape(st.installed_tyre.code()));
+        let _ = write!(
+            out,
+            ", \"engine_pct\": {}, \"transmission_pct\": {}, \"suspension_pct\": {}, \"body_electrics_pct\": {}, \"tyre_wear_pct\": {}, \"odometer_km_tenths\": {}",
+            st.condition.engine_pct,
+            st.condition.transmission_pct,
+            st.condition.suspension_pct,
+            st.condition.body_electrics_pct,
+            st.condition.tyre_wear_pct,
+            st.condition.odometer_km_tenths,
+        );
+        match &st.condition.carried_damage_hex {
+            Some(hex) => {
+                let _ = write!(out, ", \"carried_damage_hex\": {}", json_escape(hex));
+            }
+            None => out.push_str(", \"carried_damage_hex\": null"),
+        }
+        match &st.setup_profile_id {
+            Some(s) => {
+                let _ = write!(out, ", \"setup_profile_id\": {}", json_escape(s));
+            }
+            None => out.push_str(", \"setup_profile_id\": null"),
+        }
+        match &st.livery_id {
+            Some(s) => {
+                let _ = write!(out, ", \"livery_id\": {}", json_escape(s));
+            }
+            None => out.push_str(", \"livery_id\": null"),
+        }
+        let _ = writeln!(out, "}}{comma}");
+    }
+    out.push_str("  },\n");
+    let _ = writeln!(out, "  \"is_dev_profile\": {},", p.is_dev_profile);
     match &p.active_career_vehicle_id {
         Some(id) => {
             let _ = writeln!(out, "  \"active_career_vehicle_id\": {},", json_escape(id));
@@ -1842,6 +3051,7 @@ pub fn encode_profile_json(p: &CareerProfile) -> String {
         Some(c) => {
             out.push_str("  \"active_championship\": {\n");
             let _ = writeln!(out, "    \"id\": {},", json_escape(&c.id));
+            let _ = writeln!(out, "    \"kind\": {},", json_escape(c.kind.code()));
             let _ = writeln!(out, "    \"title\": {},", json_escape(&c.title));
             let _ = writeln!(out, "    \"seed\": {},", c.seed);
             let _ = writeln!(
@@ -1894,6 +3104,21 @@ pub fn encode_profile_json(p: &CareerProfile) -> String {
             out.push_str("    ],\n");
             let _ = writeln!(out, "    \"finished\": {},", c.finished);
             let _ = writeln!(out, "    \"reward_claimed\": {},", c.reward_claimed);
+            let _ = writeln!(
+                out,
+                "    \"service_window_open\": {},",
+                c.service_window_open
+            );
+            let _ = writeln!(
+                out,
+                "    \"end_restoration_cost_usd\": {},",
+                c.end_restoration_cost_usd
+            );
+            let _ = writeln!(
+                out,
+                "    \"restoration_settled\": {},",
+                c.restoration_settled
+            );
             match c.final_position {
                 Some(pos) => {
                     let _ = writeln!(out, "    \"final_position\": {pos},");
@@ -2157,7 +3382,7 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
         .field("schema_version")
         .and_then(JsonVal::as_u64)
         .ok_or("missing schema_version")? as u32;
-    if schema_version != CAREER_SCHEMA_VERSION {
+    if schema_version == 0 || schema_version > CAREER_SCHEMA_VERSION {
         return Err(format!("unsupported schema_version {schema_version}"));
     }
     let pilot_name = root
@@ -2170,7 +3395,7 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
         .field("cash_usd")
         .and_then(JsonVal::as_u64)
         .ok_or("missing cash_usd")?;
-    let owned_vehicle_ids = root
+    let owned_vehicle_ids: Vec<String> = root
         .field("owned_vehicle_ids")
         .and_then(JsonVal::as_array)
         .ok_or("missing owned_vehicle_ids")?
@@ -2291,6 +3516,17 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
                 .and_then(JsonVal::as_str)
                 .ok_or("active_championship missing id")?
                 .to_string();
+            let kind = obj
+                .field("kind")
+                .and_then(JsonVal::as_str)
+                .map(ChampionshipKind::from_code)
+                .unwrap_or_else(|| {
+                    if id.starts_with("historic-") {
+                        ChampionshipKind::Historic
+                    } else {
+                        ChampionshipKind::Regional
+                    }
+                });
             let title = obj
                 .field("title")
                 .and_then(JsonVal::as_str)
@@ -2369,8 +3605,21 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
                 .field("prize_awarded_usd")
                 .and_then(JsonVal::as_u64)
                 .unwrap_or(0);
+            let service_window_open = obj
+                .field("service_window_open")
+                .and_then(JsonVal::as_bool)
+                .unwrap_or(false);
+            let end_restoration_cost_usd = obj
+                .field("end_restoration_cost_usd")
+                .and_then(JsonVal::as_u64)
+                .unwrap_or(0);
+            let restoration_settled = obj
+                .field("restoration_settled")
+                .and_then(JsonVal::as_bool)
+                .unwrap_or(end_restoration_cost_usd == 0);
             Some(ActiveChampionship {
                 id,
+                kind,
                 title,
                 seed,
                 difficulty,
@@ -2383,6 +3632,9 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
                 reward_claimed,
                 final_position,
                 prize_awarded_usd,
+                service_window_open,
+                end_restoration_cost_usd,
+                restoration_settled,
             })
         }
         _ => None,
@@ -2404,14 +3656,81 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
             }
         }
     }
+    let mut vehicle_states = std::collections::BTreeMap::new();
+    if let Some(JsonVal::Object(entries)) = root.field("vehicle_states") {
+        for (id, v) in entries {
+            let origin = v
+                .field("origin")
+                .and_then(JsonVal::as_str)
+                .map(VehicleOrigin::from_code)
+                .unwrap_or_default();
+            let installed_tyre = v
+                .field("installed_tyre")
+                .and_then(JsonVal::as_str)
+                .map(TyreCompound::from_code)
+                .unwrap_or_default();
+            let pct = |key: &str, default: u8| -> u8 {
+                v.field(key)
+                    .and_then(JsonVal::as_u64)
+                    .map_or(default, |n| n.min(100) as u8)
+            };
+            let carried_damage_hex = match v.field("carried_damage_hex") {
+                Some(JsonVal::Str(s)) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            };
+            let setup_profile_id = match v.field("setup_profile_id") {
+                Some(JsonVal::Str(s)) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            };
+            let livery_id = match v.field("livery_id") {
+                Some(JsonVal::Str(s)) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            };
+            let odometer_km_tenths = v
+                .field("odometer_km_tenths")
+                .and_then(JsonVal::as_u64)
+                .unwrap_or(0) as u32;
+            vehicle_states.insert(
+                id.clone(),
+                OwnedVehicleState {
+                    vehicle_id: id.clone(),
+                    origin,
+                    installed_tyre,
+                    condition: VehicleCondition {
+                        engine_pct: pct("engine_pct", 100),
+                        transmission_pct: pct("transmission_pct", 100),
+                        suspension_pct: pct("suspension_pct", 100),
+                        body_electrics_pct: pct("body_electrics_pct", 100),
+                        tyre_wear_pct: pct("tyre_wear_pct", 0),
+                        carried_damage_hex,
+                        odometer_km_tenths,
+                    },
+                    setup_profile_id,
+                    livery_id,
+                },
+            );
+        }
+    }
+    // Safe non-destructive migration for v1 saves: initialize owned vehicles without
+    // mechanical state at 100% clean condition without retroactive penalties.
+    for id in &owned_vehicle_ids {
+        vehicle_states
+            .entry(id.clone())
+            .or_insert_with(|| OwnedVehicleState::factory_new(id));
+    }
+    let is_dev_profile = root
+        .field("is_dev_profile")
+        .and_then(JsonVal::as_bool)
+        .unwrap_or(false);
 
     Ok(CareerProfile {
-        schema_version,
+        schema_version: CAREER_SCHEMA_VERSION,
         pilot_name,
         competition_number,
         cash_usd,
         owned_vehicle_ids,
         paid_prices_usd,
+        vehicle_states,
         active_career_vehicle_id,
         podiums,
         wins,
@@ -2421,6 +3740,7 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
         transactions,
         completed_championships,
         active_championship,
+        is_dev_profile,
     })
 }
 
@@ -2961,6 +4281,306 @@ mod tests {
         assert!(after_reset.slots[1].is_none());
         assert!(after_reset.slots[2].is_some());
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn phase8_v1_migration_preserves_owned_cars_at_100_percent() {
+        let v1_json = r#"{
+  "schema_version": 1,
+  "pilot_name": "MIGRATED",
+  "competition_number": 12,
+  "cash_usd": 4200,
+  "last_saved_unix_s": 100,
+  "owned_vehicle_ids": ["mg-zr-s1600"],
+  "paid_prices_usd": {"mg-zr-s1600": 10800},
+  "active_career_vehicle_id": "mg-zr-s1600",
+  "podiums": 1,
+  "wins": 0,
+  "historics_unlocked": true,
+  "next_championship_seq": 2,
+  "transactions": [],
+  "completed_championships": [],
+  "active_championship": null
+}"#;
+        let parsed = parse_profile_json(v1_json).expect("v1 save must migrate cleanly");
+        assert_eq!(parsed.schema_version, CAREER_SCHEMA_VERSION);
+        assert_eq!(parsed.cash_usd, 4_200);
+        assert!(parsed.historics_unlocked);
+        let st = parsed
+            .vehicle_state("mg-zr-s1600")
+            .expect("owned car must initialize mechanical state");
+        assert_eq!(st.condition.overall_pct(), 100);
+        assert_eq!(st.condition.tyre_wear_pct, 0);
+        assert!(!st.condition.needs_mechanical_repair());
+    }
+
+    #[test]
+    fn phase8_new_vs_used_dealership_and_availability_states() {
+        let mut profile = CareerProfile::create("Inspector").unwrap();
+        let clio_r5 = make_rsf_entry(
+            "rsf-renault-clio-rally5",
+            "Renault Clio Rally5",
+            "Rally 5",
+            2021,
+        );
+        let clio_r4 = make_rsf_entry(
+            "rsf-renault-clio-rally4",
+            "Renault Clio Rally4",
+            "Rally 4",
+            2021,
+        );
+        let maxi = make_rsf_entry(
+            "rsf-peugeot-306-maxi-kit-car",
+            "Peugeot 306 Maxi Kit Car",
+            "Group A7",
+            1998,
+        );
+        let yaris_wrc = make_rsf_entry(
+            "rsf-toyota-yaris-wrc-2018",
+            "Toyota Yaris WRC 2018",
+            "WRC 1.6",
+            2018,
+        );
+
+        // With $15,000: Clio R5 0KM ($13,800) is Available, Clio R4 2a Mano ($18,500) is InsufficientFunds,
+        // 306 Maxi ($45,000) is Locked (requires Regional podium), Yaris WRC ($245,000) in UsedCars is Locked (NewSalonOnly).
+        assert_eq!(
+            profile.dealership_availability(&clio_r5, DealershipKind::NewSalon, true),
+            DealershipAvailability::Available
+        );
+        assert_eq!(
+            profile.dealership_availability(&clio_r4, DealershipKind::UsedCars, true),
+            DealershipAvailability::InsufficientFunds { missing_usd: 3_500 }
+        );
+        assert!(matches!(
+            profile.dealership_availability(&maxi, DealershipKind::UsedCars, true),
+            DealershipAvailability::Locked { .. }
+        ));
+        assert!(matches!(
+            profile.dealership_availability(&yaris_wrc, DealershipKind::UsedCars, true),
+            DealershipAvailability::Locked { .. }
+        ));
+
+        // Buy 0 KM Clio R5 -> 100% condition, 0% tyre wear.
+        profile
+            .buy_vehicle_in_dealership(&clio_r5, DealershipKind::NewSalon, true)
+            .unwrap();
+        let new_st = profile.vehicle_state(&clio_r5.descriptor.id).unwrap();
+        assert_eq!(new_st.origin, VehicleOrigin::NewZeroKm);
+        assert_eq!(new_st.condition.overall_pct(), 100);
+        assert_eq!(new_st.condition.tyre_wear_pct, 0);
+
+        // Used car listing is deterministic and delivers worn/used state when purchased.
+        profile.cash_usd = 100_000;
+        let listing = profile.used_car_listing(&clio_r4);
+        assert!(listing.condition.overall_pct() < 100);
+        assert!(listing.condition.tyre_wear_pct > 0);
+        assert!(listing.estimated_repair_cost_usd > 0);
+        profile
+            .buy_vehicle_in_dealership(&clio_r4, DealershipKind::UsedCars, true)
+            .unwrap();
+        let used_st = profile.vehicle_state(&clio_r4.descriptor.id).unwrap();
+        assert_eq!(used_st.origin, VehicleOrigin::UsedMarket);
+        assert_eq!(used_st.condition, listing.condition);
+    }
+
+    #[test]
+    fn phase8_service_window_tyres_damage_and_restoration_no_double_charge() {
+        let mut profile = CareerProfile::create("Mechanic").unwrap();
+        let zr = make_entry(
+            VehicleDescriptor::presets()
+                .into_iter()
+                .find(|d| d.id == "mg-zr-s1600")
+                .unwrap(),
+            false,
+        );
+        profile
+            .buy_vehicle_in_dealership(&zr, DealershipKind::UsedCars, false)
+            .unwrap();
+        profile
+            .start_regional_championship(&zr, false, CareerDifficulty::Beginner)
+            .unwrap();
+
+        // Out-of-window repair before Stage 1 must be blocked.
+        assert!(profile.can_service_vehicle(&zr.descriptor.id).is_err());
+        assert!(profile.repair_all_components(&zr).is_err());
+
+        // Stage 1 finishes with real NGP damage summary.
+        let dmg = rerbr_sim::drive::DamageSummary {
+            engine_pct: 60,
+            transmission_pct: 80,
+            suspension_pct: 60,
+            body_electrics_pct: 80,
+            ngp_tyre_damage_levels: [1, 0, 2, 0],
+            ngp_wheel_damage_levels: [0; 4],
+            raw_bytes: vec![0xAA, 0xBB, 0xCC, 0xDD],
+        };
+        let out1 = profile
+            .record_championship_stage_result_with_telemetry(
+                "diamond-creek",
+                &zr.descriptor.id,
+                160_000,
+                true,
+                Some(&dmg),
+                CareerTier::Regional,
+            )
+            .unwrap();
+        assert!(out1.service_window_opened);
+        assert!(profile.can_service_vehicle(&zr.descriptor.id).is_ok());
+
+        // Repair suspension only + mount Tarmac tyres for Stage 2 (Cote d'Arbroz).
+        profile.cash_usd = 50_000;
+        let cash_before = profile.cash_usd;
+        let susp_cost = profile
+            .repair_component(&zr, RepairComponent::Suspension)
+            .unwrap();
+        let tyre_cost = profile
+            .buy_and_mount_tyres(&zr, TyreCompound::TarmacHard)
+            .unwrap();
+        assert_eq!(profile.cash_usd, cash_before - susp_cost - tyre_cost);
+        assert_eq!(
+            profile
+                .vehicle_state(&zr.descriptor.id)
+                .unwrap()
+                .condition
+                .suspension_pct,
+            100
+        );
+        assert_eq!(
+            profile
+                .vehicle_state(&zr.descriptor.id)
+                .unwrap()
+                .condition
+                .tyre_wear_pct,
+            0
+        );
+
+        // Complete Stage 2 & Stage 3.
+        profile
+            .record_championship_stage_result_with_telemetry(
+                "cote-darbroz",
+                &zr.descriptor.id,
+                155_000,
+                true,
+                None,
+                CareerTier::Regional,
+            )
+            .unwrap();
+        let out3 = profile
+            .record_championship_stage_result_with_telemetry(
+                "shepherds-shield",
+                &zr.descriptor.id,
+                165_000,
+                true,
+                None,
+                CareerTier::Regional,
+            )
+            .unwrap();
+        assert!(out3.championship_finished);
+        assert!(out3.newly_unlocked_historics);
+
+        // End restoration only charges remaining damage (engine/trans/body), never double-charges.
+        let rest_cost = profile
+            .active_championship
+            .as_ref()
+            .unwrap()
+            .end_restoration_cost_usd;
+        assert!(rest_cost > 0);
+        let settled = profile.settle_championship_restoration(true).unwrap();
+        assert_eq!(settled, rest_cost);
+        assert_eq!(profile.settle_championship_restoration(true).unwrap(), 0);
+        assert_eq!(
+            profile
+                .vehicle_state(&zr.descriptor.id)
+                .unwrap()
+                .condition
+                .overall_pct(),
+            100
+        );
+    }
+
+    #[test]
+    fn phase8_historic_championship_unlocks_and_plays_cleanly() {
+        let mut profile = CareerProfile::create("HistoricPilot").unwrap();
+        let maxi = make_rsf_entry(
+            "rsf-peugeot-306-maxi-kit-car",
+            "Peugeot 306 Maxi Kit Car",
+            "Group A7",
+            1998,
+        );
+        profile.cash_usd = 100_000;
+
+        // Locked before regional podium.
+        assert!(profile
+            .buy_vehicle_in_dealership(&maxi, DealershipKind::UsedCars, true)
+            .is_err());
+
+        profile.historics_unlocked = true;
+        assert_eq!(
+            profile.dealership_availability(&maxi, DealershipKind::UsedCars, true),
+            DealershipAvailability::Available
+        );
+        profile
+            .buy_vehicle_in_dealership(&maxi, DealershipKind::UsedCars, true)
+            .unwrap();
+        profile
+            .start_historic_championship(&maxi, true, CareerDifficulty::Intermediate)
+            .unwrap();
+        assert_eq!(
+            profile.active_championship.as_ref().unwrap().kind,
+            ChampionshipKind::Historic
+        );
+        for (idx, st) in HISTORIC_STAGES.iter().enumerate() {
+            let out = profile
+                .record_championship_stage_result_with_telemetry(
+                    st.stage_id,
+                    &maxi.descriptor.id,
+                    180_000,
+                    true,
+                    None,
+                    CareerTier::KitCarGroupA,
+                )
+                .unwrap();
+            assert_eq!(out.stage_index, idx);
+        }
+        assert!(profile.active_championship.as_ref().unwrap().finished);
+        assert!(
+            profile
+                .active_championship
+                .as_ref()
+                .unwrap()
+                .prize_awarded_usd
+                > 0
+        );
+    }
+
+    #[test]
+    fn phase8_dev_mode_isolated_with_9_999_999_999_usd() {
+        let root = std::env::temp_dir().join(format!("rerbr_phase8_dev_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut dev = CareerProfile::create_dev_profile();
+        assert_eq!(dev.cash_usd, DEV_MODE_CASH_USD);
+        assert!(dev.is_dev_profile);
+        let yaris_wrc = make_rsf_entry(
+            "rsf-toyota-yaris-wrc-2018",
+            "Toyota Yaris WRC 2018",
+            "WRC 1.6",
+            2018,
+        );
+        let paid = dev
+            .buy_vehicle_in_dealership(&yaris_wrc, DealershipKind::NewSalon, true)
+            .unwrap();
+        assert_eq!(dev.cash_usd, DEV_MODE_CASH_USD - paid);
+
+        CareerStore::save_dev_profile_in_root(&root, &dev).unwrap();
+        assert!(CareerStore::dev_slot_path_in(&root).exists());
+        // Normal 3 slots remain untouched!
+        let normal = CareerStore::load_from_root(&root);
+        assert!(normal.slots.iter().all(|s| s.is_none()));
+        let reloaded_dev = CareerStore::load_dev_profile_from_root(&root);
+        assert_eq!(reloaded_dev.cash_usd, DEV_MODE_CASH_USD - paid);
+        assert!(reloaded_dev.owns_vehicle(&yaris_wrc.descriptor.id));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

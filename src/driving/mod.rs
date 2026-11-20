@@ -153,6 +153,8 @@ pub struct Runtime {
     pending_buy_vehicle_id: Option<String>,
     pending_sell_vehicle_id: Option<String>,
     selected_career_difficulty: career::CareerDifficulty,
+    selected_championship_kind: career::ChampionshipKind,
+    selected_service_tyre: career::TyreCompound,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -299,6 +301,24 @@ impl Runtime {
             pending_buy_vehicle_id: None,
             pending_sell_vehicle_id: None,
             selected_career_difficulty: career::CareerDifficulty::Beginner,
+            selected_championship_kind: career::ChampionshipKind::Regional,
+            selected_service_tyre: career::TyreCompound::GravelHard,
+        }
+    }
+
+    fn career_boot_overrides(&self) -> rerbr_sim::drive::BootOverrides {
+        if !self.active_career_stage {
+            return rerbr_sim::drive::BootOverrides::default();
+        }
+        let Some(p) = self.career.profile.as_ref() else {
+            return rerbr_sim::drive::BootOverrides::default();
+        };
+        let Some(st) = p.vehicle_state(&self.selection.vehicle.id) else {
+            return rerbr_sim::drive::BootOverrides::default();
+        };
+        rerbr_sim::drive::BootOverrides {
+            tyre: Some(st.installed_tyre.rbr_tyre_id()),
+            carried_damage_bytes: st.condition.carried_damage_bytes(),
         }
     }
 
@@ -1196,11 +1216,12 @@ impl Runtime {
                                 self.selection.vehicle.id,
                                 pack.display()
                             );
-                            self.worker = worker::Worker::new_experimental_pack_with_aids(
+                            self.worker = worker::Worker::new_experimental_pack_with_overrides(
                                 self.selection.clone(),
                                 pack,
                                 false,
                                 self.clutch_help,
+                                self.career_boot_overrides(),
                             );
                         } else {
                             let reason = blocker_reason
@@ -1250,10 +1271,11 @@ impl Runtime {
                     self.last_run_prev_pb_splits_ms = None;
                     self.last_finish_crossed_forward = false;
                     self.last_driven_vehicle_id = Some(self.selection.vehicle.id.clone());
-                    self.worker = worker::Worker::new_selected_with_aids(
+                    self.worker = worker::Worker::new_selected_with_overrides(
                         self.selection.clone(),
                         false,
                         self.clutch_help,
+                        self.career_boot_overrides(),
                     );
                     self.pending_scene_action = Some(SceneAction::Load {
                         selection: Box::new(self.selection.clone()),
@@ -1302,11 +1324,12 @@ impl Runtime {
                     {
                         self.experimental_visual_only = false;
                         self.experimental_physics_reason = None;
-                        self.worker = worker::Worker::new_experimental_pack_with_aids(
+                        self.worker = worker::Worker::new_experimental_pack_with_overrides(
                             self.selection.clone(),
                             pack,
                             false,
                             self.clutch_help,
+                            self.career_boot_overrides(),
                         );
                     } else {
                         let reason = self
@@ -1328,10 +1351,11 @@ impl Runtime {
                     );
                 } else {
                     self.experimental_visual_only = false;
-                    self.worker = worker::Worker::new_selected_with_aids(
+                    self.worker = worker::Worker::new_selected_with_overrides(
                         self.selection.clone(),
                         false,
                         self.clutch_help,
+                        self.career_boot_overrides(),
                     );
                 }
                 self.offset = None;
@@ -2227,6 +2251,22 @@ impl Runtime {
                     self.message = Some(err);
                 }
             },
+            CareerLoadDevMode => {
+                if career::DEV_MODE_ENABLED {
+                    if let Some(root) =
+                        std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from)
+                    {
+                        let dev = career::CareerStore::load_dev_profile_from_root(&root);
+                        self.career.profile = Some(dev);
+                        self.message = Some("MODO DESARROLLADOR QA ACTIVO (AISLADO)".into());
+                        self.menu.open(menu::Page::CareerHub);
+                    } else {
+                        self.career.profile = Some(career::CareerProfile::create_dev_profile());
+                        self.message = Some("MODO DESARROLLADOR QA ACTIVO (MEMORIA)".into());
+                        self.menu.open(menu::Page::CareerHub);
+                    }
+                }
+            }
             CareerResetRequest => {
                 self.pending_reset_career = true;
                 self.message = Some(format!(
@@ -2487,9 +2527,23 @@ impl Runtime {
             CareerDiffNext => {
                 self.selected_career_difficulty = self.selected_career_difficulty.next();
             }
+            CareerChampKindPrev | CareerChampKindNext => {
+                self.selected_championship_kind = match self.selected_championship_kind {
+                    career::ChampionshipKind::Regional => career::ChampionshipKind::Historic,
+                    career::ChampionshipKind::Historic => career::ChampionshipKind::Regional,
+                };
+            }
             CareerChampStart => {
                 let ngp_exp = self.ngp_experimental;
                 let diff = self.selected_career_difficulty;
+                let kind = self.selected_championship_kind;
+                let is_eligible = |e: &content_manager::VehicleEntry| {
+                    let tier = career::vehicle_market_spec(e).tier;
+                    match kind {
+                        career::ChampionshipKind::Regional => tier.eligible_for_regional(),
+                        career::ChampionshipKind::Historic => tier.eligible_for_historic(),
+                    }
+                };
                 let candidate = self
                     .career
                     .profile
@@ -2500,34 +2554,39 @@ impl Runtime {
                             .and_then(|id| self.content.vehicle(id))
                             .filter(|e| {
                                 e.capability(ngp_exp) == content_manager::DriveCapability::Drivable
-                                    && career::vehicle_market_spec(e).tier.eligible_for_regional()
+                                    && is_eligible(e)
                             })
                             .or_else(|| {
                                 self.content.vehicles.iter().find(|e| {
                                     p.owns_vehicle(&e.descriptor.id)
                                         && e.capability(ngp_exp)
                                             == content_manager::DriveCapability::Drivable
-                                        && career::vehicle_market_spec(e)
-                                            .tier
-                                            .eligible_for_regional()
+                                        && is_eligible(e)
                                 })
                             })
                     })
                     .cloned();
                 let Some(car_entry) = candidate else {
-                    self.message =
-                        Some("COMPRA UN COCHE DE INICIACIÓN (EJ. MG ZR S1600) EN 2ª MANO".into());
+                    self.message = Some(match kind {
+                        career::ChampionshipKind::Regional => {
+                            "COMPRA UN COCHE DE INICIACIÓN (EJ. MG ZR S1600) EN 2ª MANO".into()
+                        }
+                        career::ChampionshipKind::Historic => {
+                            "COMPRA UN COCHE HISTÓRICO / GRUPO A / KIT CAR EN 2ª MANO".into()
+                        }
+                    });
                     return;
                 };
                 let res = match self.career.profile.as_mut() {
-                    Some(p) => p.start_regional_championship(&car_entry, ngp_exp, diff),
+                    Some(p) => p.start_championship(kind, &car_entry, ngp_exp, diff),
                     None => Err("CREA UN PERFIL DE CARRERA PRIMERO".into()),
                 };
                 match res {
                     Ok(()) => {
-                        let _ = self.career.save();
+                        self.save_active_career();
                         self.message = Some(format!(
-                            "COPA REGIONAL INICIADA ({} · {})",
+                            "{} INICIADO ({} · {})",
+                            kind.title(),
                             car_entry.descriptor.name,
                             diff.label()
                         ));
@@ -2551,8 +2610,9 @@ impl Runtime {
                     self.message = Some("EL CAMPEONATO YA HA FINALIZADO".into());
                     return;
                 };
-                let Some(stage_desc) = career::regional_stage_descriptor(stage_idx) else {
-                    self.message = Some("ETAPA REGIONAL NO ENCONTRADA".into());
+                let Some(stage_desc) = career::championship_stage_descriptor(champ.kind, stage_idx)
+                else {
+                    self.message = Some("ETAPA DEL CAMPEONATO NO ENCONTRADA".into());
                     return;
                 };
                 let Some(car_entry) = self.content.vehicle(&champ.locked_vehicle_id).cloned()
@@ -2606,23 +2666,142 @@ impl Runtime {
                     }
                 }
             }
+            CareerChampRestoreAndDismiss => {
+                let res = match self.career.profile.as_mut() {
+                    Some(p) => p
+                        .settle_championship_restoration(true)
+                        .and_then(|cost| p.dismiss_finished_championship().map(|()| cost)),
+                    None => Ok(0),
+                };
+                match res {
+                    Ok(cost) => {
+                        self.active_career_stage = false;
+                        self.last_career_stage_outcome = None;
+                        self.save_active_career();
+                        self.menu.reset_to_main();
+                        self.menu.open(menu::Page::CareerHub);
+                        self.message = Some(format!(
+                            "CAMPEONATO COMPLETADO · COCHE RESTAURADO ({})",
+                            career::format_usd(cost)
+                        ));
+                    }
+                    Err(err) => {
+                        self.message = Some(err);
+                    }
+                }
+            }
             CareerChampDismissFinished => {
                 let res = match self.career.profile.as_mut() {
-                    Some(p) => p.dismiss_finished_championship(),
+                    Some(p) => p
+                        .settle_championship_restoration(false)
+                        .and_then(|_| p.dismiss_finished_championship()),
                     None => Ok(()),
                 };
                 match res {
                     Ok(()) => {
                         self.active_career_stage = false;
                         self.last_career_stage_outcome = None;
-                        let _ = self.career.save();
+                        self.save_active_career();
                         self.menu.reset_to_main();
                         self.menu.open(menu::Page::CareerHub);
-                        self.message = Some("COPA REGIONAL COMPLETADA Y GUARDADA".into());
+                        self.message = Some("CAMPEONATO COMPLETADO Y GUARDADO".into());
                     }
                     Err(err) => {
                         self.message = Some(err);
                     }
+                }
+            }
+            CareerServiceRepair(comp) => {
+                let target_id = self.career.profile.as_ref().and_then(|p| {
+                    p.active_championship
+                        .as_ref()
+                        .filter(|c| !c.finished)
+                        .map(|c| c.locked_vehicle_id.clone())
+                        .or_else(|| p.active_career_vehicle_id.clone())
+                });
+                let Some(entry) = target_id.and_then(|id| self.content.vehicle(&id)).cloned()
+                else {
+                    self.message = Some("SIN COCHE ACTIVO PARA ASISTENCIA".into());
+                    return;
+                };
+                let res = match self.career.profile.as_mut() {
+                    Some(p) => p.repair_component(&entry, comp),
+                    None => Err("SIN PERFIL DE CARRERA".into()),
+                };
+                match res {
+                    Ok(cost) => {
+                        self.save_active_career();
+                        self.message = Some(format!(
+                            "REPARADO: {} (-{})",
+                            comp.label(),
+                            career::format_usd(cost)
+                        ));
+                    }
+                    Err(err) => self.message = Some(err),
+                }
+            }
+            CareerServiceRepairAll => {
+                let target_id = self.career.profile.as_ref().and_then(|p| {
+                    p.active_championship
+                        .as_ref()
+                        .filter(|c| !c.finished)
+                        .map(|c| c.locked_vehicle_id.clone())
+                        .or_else(|| p.active_career_vehicle_id.clone())
+                });
+                let Some(entry) = target_id.and_then(|id| self.content.vehicle(&id)).cloned()
+                else {
+                    self.message = Some("SIN COCHE ACTIVO PARA ASISTENCIA".into());
+                    return;
+                };
+                let res = match self.career.profile.as_mut() {
+                    Some(p) => p.repair_all_components(&entry),
+                    None => Err("SIN PERFIL DE CARRERA".into()),
+                };
+                match res {
+                    Ok(cost) => {
+                        self.save_active_career();
+                        self.message = Some(format!(
+                            "ASISTENCIA COMPLETA (-{})",
+                            career::format_usd(cost)
+                        ));
+                    }
+                    Err(err) => self.message = Some(err),
+                }
+            }
+            CareerServiceTyrePrev => {
+                self.selected_service_tyre = self.selected_service_tyre.prev();
+            }
+            CareerServiceTyreNext => {
+                self.selected_service_tyre = self.selected_service_tyre.next();
+            }
+            CareerServiceMountTyre => {
+                let target_id = self.career.profile.as_ref().and_then(|p| {
+                    p.active_championship
+                        .as_ref()
+                        .filter(|c| !c.finished)
+                        .map(|c| c.locked_vehicle_id.clone())
+                        .or_else(|| p.active_career_vehicle_id.clone())
+                });
+                let Some(entry) = target_id.and_then(|id| self.content.vehicle(&id)).cloned()
+                else {
+                    self.message = Some("SIN COCHE ACTIVO PARA CAMBIAR NEUMÁTICOS".into());
+                    return;
+                };
+                let tyre = self.selected_service_tyre;
+                let res = match self.career.profile.as_mut() {
+                    Some(p) => p.buy_and_mount_tyres(&entry, tyre),
+                    None => Err("SIN PERFIL DE CARRERA".into()),
+                };
+                match res {
+                    Ok(cost) => {
+                        self.save_active_career();
+                        self.message = Some(format!(
+                            "MONTADOS {} (-{})",
+                            tyre.label(),
+                            career::format_usd(cost)
+                        ));
+                    }
+                    Err(err) => self.message = Some(err),
                 }
             }
             OpenCareerAfterStage => {
@@ -2852,17 +3031,23 @@ impl Runtime {
             if self.active_career_stage {
                 let stage_id = self.selection.stage.id.clone();
                 let vehicle_id = self.selection.vehicle.id.clone();
+                let vehicle_tier = self
+                    .content
+                    .vehicle(&vehicle_id)
+                    .map(|e| career::vehicle_market_spec(e).tier)
+                    .unwrap_or(career::CareerTier::Regional);
+                let latest_damage = self.worker.state.lock().unwrap().latest_damage.clone();
                 if let Some(profile) = self.career.profile.as_mut() {
-                    match profile.record_championship_stage_result(
+                    match profile.record_championship_stage_result_with_telemetry(
                         &stage_id,
                         &vehicle_id,
                         res.total_ms,
                         outcome.valid,
+                        latest_damage.as_ref(),
+                        vehicle_tier,
                     ) {
                         Ok(career_out) => {
-                            if let Err(err) = self.career.save() {
-                                eprintln!("career SAVE ERROR: {err}");
-                            }
+                            self.save_active_career();
                             self.last_career_stage_outcome = Some(career_out);
                         }
                         Err(err) => {
@@ -3492,6 +3677,25 @@ impl Runtime {
             pending_buy_vehicle_id: self.pending_buy_vehicle_id.as_deref(),
             pending_sell_vehicle_id: self.pending_sell_vehicle_id.as_deref(),
             selected_career_difficulty: self.selected_career_difficulty,
+            selected_championship_kind: self.selected_championship_kind,
+            selected_service_tyre: self.selected_service_tyre,
+        }
+    }
+    fn save_active_career(&mut self) {
+        if let Some(p) = self.career.profile.as_ref() {
+            if p.is_dev_profile {
+                if let Some(root) =
+                    std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from)
+                {
+                    if let Err(err) = career::CareerStore::save_dev_profile_in_root(&root, p) {
+                        eprintln!("dev career SAVE ERROR: {err}");
+                    }
+                }
+                return;
+            }
+        }
+        if let Err(err) = self.career.save() {
+            eprintln!("career SAVE ERROR: {err}");
         }
     }
     fn status(&self, state: &worker::Shared) -> String {

@@ -1,6 +1,9 @@
 use rerbr_sim::{
     diagnostics::Sample,
-    drive::{Control, SchoolEventNotice, SchoolSessionSnapshot, Session, StageTiming},
+    drive::{
+        BootOverrides, Control, DamageSummary, SchoolEventNotice, SchoolSessionSnapshot, Session,
+        StageTiming,
+    },
     inputs::Paths,
     STACK_BYTES,
 };
@@ -26,6 +29,7 @@ pub struct Shared {
     pub school_start_requested: bool,
     pub school_state: Option<SchoolSessionSnapshot>,
     pub school_events: Vec<SchoolEventNotice>,
+    pub latest_damage: Option<DamageSummary>,
 }
 pub struct Worker {
     pub state: Arc<Mutex<Shared>>,
@@ -52,17 +56,34 @@ impl Worker {
                 school_start_requested: false,
                 school_state: None,
                 school_events: Vec::new(),
+                latest_damage: None,
             })),
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
         }
     }
+    #[allow(dead_code)]
     pub fn new_selected_with_aids(
         selection: rerbr_content::Selection,
         automatic: bool,
         clutch_help: bool,
     ) -> Self {
-        Self::spawn_inner(selection, automatic, clutch_help, None, None)
+        Self::spawn_inner(
+            selection,
+            automatic,
+            clutch_help,
+            None,
+            None,
+            BootOverrides::default(),
+        )
+    }
+    pub fn new_selected_with_overrides(
+        selection: rerbr_content::Selection,
+        automatic: bool,
+        clutch_help: bool,
+        overrides: BootOverrides,
+    ) -> Self {
+        Self::spawn_inner(selection, automatic, clutch_help, None, None, overrides)
     }
     pub fn new_school_lesson(
         selection: rerbr_content::Selection,
@@ -70,15 +91,46 @@ impl Worker {
         automatic: bool,
         clutch_help: bool,
     ) -> Self {
-        Self::spawn_inner(selection, automatic, clutch_help, None, Some(lesson_index))
+        Self::spawn_inner(
+            selection,
+            automatic,
+            clutch_help,
+            None,
+            Some(lesson_index),
+            BootOverrides::default(),
+        )
     }
+    #[allow(dead_code)]
     pub fn new_experimental_pack_with_aids(
         selection: rerbr_content::Selection,
         pack_path: std::path::PathBuf,
         automatic: bool,
         clutch_help: bool,
     ) -> Self {
-        Self::spawn_inner(selection, automatic, clutch_help, Some(pack_path), None)
+        Self::spawn_inner(
+            selection,
+            automatic,
+            clutch_help,
+            Some(pack_path),
+            None,
+            BootOverrides::default(),
+        )
+    }
+    pub fn new_experimental_pack_with_overrides(
+        selection: rerbr_content::Selection,
+        pack_path: std::path::PathBuf,
+        automatic: bool,
+        clutch_help: bool,
+        overrides: BootOverrides,
+    ) -> Self {
+        Self::spawn_inner(
+            selection,
+            automatic,
+            clutch_help,
+            Some(pack_path),
+            None,
+            overrides,
+        )
     }
     fn spawn_inner(
         selection: rerbr_content::Selection,
@@ -86,6 +138,7 @@ impl Worker {
         clutch_help: bool,
         experimental_pack: Option<std::path::PathBuf>,
         school_lesson: Option<u32>,
+        overrides: BootOverrides,
     ) -> Self {
         let state = Arc::new(Mutex::new(Shared {
             input: Control::default(),
@@ -100,6 +153,7 @@ impl Worker {
             school_start_requested: false,
             school_state: None,
             school_events: Vec::new(),
+            latest_damage: None,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let s = state.clone();
@@ -117,6 +171,7 @@ impl Worker {
                         &selection,
                         experimental_pack.as_deref(),
                         school_lesson,
+                        overrides,
                     )
                 }));
                 let error = match result {
@@ -158,6 +213,7 @@ impl Drop for Worker {
         self.shutdown();
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn run(
     shared: &Mutex<Shared>,
     stop: &AtomicBool,
@@ -166,6 +222,7 @@ fn run(
     selection: &rerbr_content::Selection,
     experimental_pack: Option<&std::path::Path>,
     school_lesson: Option<u32>,
+    overrides: BootOverrides,
 ) -> Result<(), String> {
     static OWNER: Mutex<()> = Mutex::new(());
     let _owner = loop {
@@ -184,17 +241,24 @@ fn run(
     let doc_path = std::path::Path::new(&documents);
     let paths = Paths::for_mode(doc_path, selection, experimental_pack.is_some())?;
     let mut session = match (experimental_pack, school_lesson) {
-        (Some(pack_path), _) => Session::boot_experimental_pack_with_aids(
+        (Some(pack_path), _) => Session::boot_experimental_pack_with_overrides(
             &paths,
             selection,
             pack_path,
             automatic,
             clutch_help,
+            overrides,
         )?,
         (None, Some(lesson_index)) => {
             Session::boot_lesson(&paths, selection, lesson_index, automatic, clutch_help)?
         }
-        (None, None) => Session::boot_with_aids(&paths, selection, automatic, clutch_help)?,
+        (None, None) => Session::boot_with_aids_and_overrides(
+            &paths,
+            selection,
+            automatic,
+            clutch_help,
+            overrides,
+        )?,
     };
     if stop.load(Ordering::Relaxed) {
         return Ok(());
@@ -288,10 +352,16 @@ fn run(
             if cfg!(debug_assertions) && sample.step % 720 == 0 {
                 eprintln!("physics-drive STEP {}: pos={:?} velocity={:?} rpm={:.0} gear={} input=({:.2},{:.2},{:.2}) ground={:?} strut={:?}",sample.step,sample.position,sample.velocity,sample.rpm,sample.gear,input.throttle,input.brake,input.steering,sample.wheel_ground,sample.wheel_travel);
             }
+            let timing = session.timing();
+            let refresh_damage = sample.step % 180 == 0 || timing.finished;
+            let damage_snap = refresh_damage.then(|| session.damage_summary());
             let mut s = shared.lock().unwrap();
             s.last_step_ms = began.elapsed().as_secs_f64() * 1000.0;
             s.payload_bytes = session.payload_bytes();
-            s.timing = session.timing();
+            s.timing = timing;
+            if let Some(dmg) = damage_snap {
+                s.latest_damage = Some(dmg);
+            }
             s.school_state = session.school_state();
             let new_events = session.take_school_events();
             if !new_events.is_empty() {

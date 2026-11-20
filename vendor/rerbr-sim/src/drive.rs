@@ -20,7 +20,7 @@ pub fn collision_triangles_for(
         .collect())
 }
 use rbr_gameplay::{
-    car_damage::CarriedDamage,
+    car_damage::{level as damage_level, CarriedDamage, Rules as DamageRules},
     mode::{ModeEnd, ModeRules, StepView},
     stage::{Stage, State, NGP_LOAD_SUBSTEPS},
     weather::{self, Draws, Preset, Season},
@@ -94,11 +94,86 @@ pub struct Session {
     school_driveline: Vec<rbr_formats::trk::DriveLineRecord>,
     school_driveline_values: Vec<f32>,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Debug, Default)]
+pub struct BootOverrides {
+    /// Optional RBR/RSF tyre compound (`0..=2` tarmac, `3..=5` gravel, `6` snow).
+    pub tyre: Option<u32>,
+    /// Optional serialized `CarriedDamage` bytes carried into the stage.
+    pub carried_damage_bytes: Option<Vec<u8>>,
+}
+
+/// Mechanical damage snapshot extracted directly from RBR/NGP `CarriedDamage` (`Rules::Ngp`).
+/// Values `*_pct` represent remaining health (`100` = intact, `0` = destroyed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DamageSummary {
+    pub engine_pct: u8,
+    pub transmission_pct: u8,
+    pub suspension_pct: u8,
+    pub body_electrics_pct: u8,
+    pub ngp_tyre_damage_levels: [u8; 4],
+    pub ngp_wheel_damage_levels: [u8; 4],
+    pub raw_bytes: Vec<u8>,
+}
+
+impl Default for DamageSummary {
+    fn default() -> Self {
+        Self {
+            engine_pct: 100,
+            transmission_pct: 100,
+            suspension_pct: 100,
+            body_electrics_pct: 100,
+            ngp_tyre_damage_levels: [0; 4],
+            ngp_wheel_damage_levels: [0; 4],
+            raw_bytes: Vec::new(),
+        }
+    }
+}
+
+fn health_from_max_severity(max_sev: u8) -> u8 {
+    // RBR/NGP severity is 0 (sound) .. 5 (destroyed).
+    100u8.saturating_sub(max_sev.min(5).saturating_mul(20))
+}
+
+/// Summarizes a `CarriedDamage` buffer using NGP damage rules (`rbr_gameplay::car_damage`).
+pub fn summarize_carried_damage(d: &CarriedDamage) -> DamageSummary {
+    let sev = |id: u32| damage_level(d, id, DamageRules::Ngp);
+    let max_of = |ids: &[u32]| ids.iter().copied().map(sev).max().unwrap_or(0);
+
+    let engine_max = max_of(&[10, 11, 12, 13, 20, 21, 22, 23]);
+    let trans_max = max_of(&[30, 31, 32, 33, 35, 36, 90, 91, 92]);
+
+    let mut susp_max = sev(37);
+    let mut ngp_tyre_damage_levels = [0u8; 4];
+    let mut ngp_wheel_damage_levels = [0u8; 4];
+    for w in 0..4u32 {
+        let base = 101 + 20 * w;
+        for part in [0u32, 1, 2, 3, 7, 9, 10] {
+            susp_max = susp_max.max(sev(base + part));
+        }
+        ngp_wheel_damage_levels[w as usize] = sev(base + 4);
+        ngp_tyre_damage_levels[w as usize] = sev(base + 5);
+        susp_max = susp_max.max(ngp_wheel_damage_levels[w as usize]);
+    }
+
+    let body_max = max_of(&[28, 29, 34, 40, 41, 42, 43, 44, 45, 46, 47, 50, 51, 52]);
+
+    DamageSummary {
+        engine_pct: health_from_max_severity(engine_max),
+        transmission_pct: health_from_max_severity(trans_max),
+        suspension_pct: health_from_max_severity(susp_max),
+        body_electrics_pct: health_from_max_severity(body_max),
+        ngp_tyre_damage_levels,
+        ngp_wheel_damage_levels,
+        raw_bytes: d.to_bytes(),
+    }
+}
+
+#[derive(Clone)]
 struct BootAids {
     automatic: bool,
     clutch_help: bool,
     lesson: Option<rbr_school::lesson::Lesson>,
+    overrides: BootOverrides,
 }
 impl Session {
     /// Call on the dedicated STACK_BYTES worker; callers must catch pure-host panics there.
@@ -124,7 +199,7 @@ impl Session {
             selection.vehicle.original_slot,
             None,
             selection,
-            BootAids { automatic, clutch_help: true, lesson: None },
+            BootAids { automatic, clutch_help: true, lesson: None, overrides: BootOverrides::default() },
         )
     }
 
@@ -145,6 +220,24 @@ impl Session {
         pack_path: &std::path::Path,
         automatic: bool,
         clutch_help: bool,
+    ) -> Result<Self, String> {
+        Self::boot_experimental_pack_with_overrides(
+            paths,
+            selection,
+            pack_path,
+            automatic,
+            clutch_help,
+            BootOverrides::default(),
+        )
+    }
+
+    pub fn boot_experimental_pack_with_overrides(
+        paths: &inputs::Paths,
+        selection: &rerbr_content::Selection,
+        pack_path: &std::path::Path,
+        automatic: bool,
+        clutch_help: bool,
+        overrides: BootOverrides,
     ) -> Result<Self, String> {
         selection.validate_for_mode(true)?;
         if cfg!(panic = "abort") {
@@ -182,7 +275,7 @@ impl Session {
             rbr_formats::car_pack::SLOT,
             car_pack,
             selection,
-            BootAids { automatic, clutch_help, lesson: None },
+            BootAids { automatic, clutch_help, lesson: None, overrides },
         )
     }
 
@@ -191,6 +284,16 @@ impl Session {
         selection: &rerbr_content::Selection,
         automatic: bool,
         clutch_help: bool,
+    ) -> Result<Self, String> {
+        Self::boot_with_aids_and_overrides(paths, selection, automatic, clutch_help, BootOverrides::default())
+    }
+
+    pub fn boot_with_aids_and_overrides(
+        paths: &inputs::Paths,
+        selection: &rerbr_content::Selection,
+        automatic: bool,
+        clutch_help: bool,
+        overrides: BootOverrides,
     ) -> Result<Self, String> {
         selection.validate_current_backend()?;
         let checked = inputs::check_selection(paths, selection)?;
@@ -202,7 +305,7 @@ impl Session {
             selection.vehicle.original_slot,
             None,
             selection,
-            BootAids { automatic, clutch_help, lesson: None },
+            BootAids { automatic, clutch_help, lesson: None, overrides },
         )
     }
 
@@ -232,7 +335,7 @@ impl Session {
             rbr_school::lesson::CAR,
             None,
             selection,
-            BootAids { automatic, clutch_help, lesson: Some(lesson) },
+            BootAids { automatic, clutch_help, lesson: Some(lesson), overrides: BootOverrides::default() },
         )?;
         // School stages skip countdown; burn off spawn override_timer and crank starter if lesson starts off.
         let car = session.playback.pure.mem.u32(rbr_hybrid::pure::CAR_PTR);
@@ -295,13 +398,17 @@ impl Session {
             ));
         };
         let audit_archive = physics_archive.clone();
-        let mut race = boot::Race::quick_race(
-            selection.stage.original_map,
-            slot,
-            boot::default_tyre(boot::surface(selection.stage.original_map)),
-            weather,
-            physics_archive,
-        );
+        let tyre = aids
+            .overrides
+            .tyre
+            .filter(|&t| t <= 6)
+            .unwrap_or_else(|| boot::default_tyre(boot::surface(selection.stage.original_map)));
+        let mut race = boot::Race::quick_race(selection.stage.original_map, slot, tyre, weather, physics_archive);
+        if let Some(damage_bytes) = aids.overrides.carried_damage_bytes.as_deref() {
+            if let Some(carried) = CarriedDamage::from_bytes(damage_bytes) {
+                race.damage = Some(carried);
+            }
+        }
         if let Some(lesson) = aids.lesson {
             race = race.in_school(lesson);
         }
@@ -439,6 +546,9 @@ impl Session {
             verdict,
             failure_reasons,
         })
+    }
+    pub fn damage_summary(&self) -> DamageSummary {
+        summarize_carried_damage(&self.carried_damage())
     }
     fn carried_damage(&self) -> CarriedDamage {
         let mem = &self.playback.pure.mem;
