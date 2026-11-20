@@ -111,6 +111,7 @@ pub struct Runtime {
     gamepad_started: Instant,
     gamepad_frame: gamepad::GamepadDrivingFrame,
     gamepad_polled_this_frame: bool,
+    motion_polled_this_frame: bool,
     recover_car_frames: u32,
     pub pacenote_atlas: Option<pacenote_icons::PacenoteIconAtlas>,
     pacenote_atlas_status: String,
@@ -250,6 +251,7 @@ impl Runtime {
             gamepad_started: Instant::now(),
             gamepad_frame: gamepad::GamepadDrivingFrame::default(),
             gamepad_polled_this_frame: false,
+            motion_polled_this_frame: false,
             recover_car_frames: 0,
             pacenote_atlas,
             pacenote_atlas_status,
@@ -286,6 +288,15 @@ impl Runtime {
             pending_buy_vehicle_id: None,
             selected_career_difficulty: career::CareerDifficulty::Beginner,
         }
+    }
+
+    /// True when the device/window is in landscape orientation (`width > height`), or a finite
+    /// CoreMotion tilt sample or external gamepad is active. This prevents false "Sujeta en horizontal"
+    /// blocks in menus (`CareerChampionship`, `Drive`) before a 3D stage `ChasePath` has been loaded.
+    pub fn is_landscape_ready(&self) -> bool {
+        self.tilt.is_finite()
+            || self.gamepad.connected
+            || (self.drawable_size.0 > self.drawable_size.1 && self.drawable_size.1 > 0)
     }
 
     /// Returns `(primary, fallbacks)` for the 3D Showroom when a showroom page is active.
@@ -458,6 +469,25 @@ impl Runtime {
                         gamepad::MenuNavEvent::Confirm => {
                             let idx = self.menu.main_section;
                             self.menu_command(menu::Command::MainSectionActivate(idx));
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+                if self.menu.page == menu::Page::Settings {
+                    match ev {
+                        gamepad::MenuNavEvent::Left | gamepad::MenuNavEvent::Up => {
+                            self.menu_command(menu::Command::SettingsCardStep(-1));
+                        }
+                        gamepad::MenuNavEvent::Right | gamepad::MenuNavEvent::Down => {
+                            self.menu_command(menu::Command::SettingsCardStep(1));
+                        }
+                        gamepad::MenuNavEvent::Confirm => {
+                            let idx = self.menu.settings_card;
+                            self.menu_command(menu::Command::SettingsCardActivate(idx));
+                        }
+                        gamepad::MenuNavEvent::Back => {
+                            self.menu_command(menu::Command::Back);
                         }
                         _ => {}
                     }
@@ -1218,9 +1248,7 @@ impl Runtime {
                     self.race.phase,
                     race::Phase::Finishing | race::Phase::Finished
                 ) && self.pivots.is_some()
-                    && (self.experimental_visual_only
-                        || self.tilt.is_finite()
-                        || self.gamepad.connected)
+                    && (self.experimental_visual_only || self.is_landscape_ready())
                     && self.scene_error.is_none()
                     && worker_ok
                 {
@@ -2435,6 +2463,32 @@ impl Runtime {
                 self.menu.open(menu::Page::CareerHub);
                 self.menu.open(menu::Page::CareerChampionship);
             }
+            ScrollRowsUp => {
+                let total = {
+                    let ctx = self.context();
+                    self.menu.rows(&ctx).len()
+                };
+                self.menu.scroll_rows(total, -1);
+            }
+            ScrollRowsDown => {
+                let total = {
+                    let ctx = self.context();
+                    self.menu.rows(&ctx).len()
+                };
+                self.menu.scroll_rows(total, 1);
+            }
+            SettingsCardStep(delta) => {
+                let len = menu::SettingsCard::ALL.len() as isize;
+                self.menu.settings_card =
+                    ((self.menu.settings_card as isize + delta as isize).rem_euclid(len)) as usize;
+                self.menu.focused_row = self.menu.settings_card;
+            }
+            SettingsCardActivate(index) => {
+                let len = menu::SettingsCard::ALL.len();
+                self.menu.settings_card = index % len;
+                let card = menu::SettingsCard::from_index(self.menu.settings_card);
+                self.apply_command(Open(card.target_page()));
+            }
         }
     }
     fn refresh_pilot_draft_name(&mut self) {
@@ -2877,6 +2931,7 @@ impl Runtime {
             self.fps = self.fps * 0.9 + 0.1 / seconds;
         }
         self.tilt = motion(true);
+        self.motion_polled_this_frame = true;
         self.poll_gamepad();
         self.gamepad_polled_this_frame = true;
         if now >= self.footprint_at {
@@ -2946,7 +3001,7 @@ impl Runtime {
         }
 
         let layout = self.effective_layout(self.drawable_size);
-        let steering_ready = self.tilt.is_finite() || self.gamepad.connected;
+        let steering_ready = self.is_landscape_ready();
         let (pair, rest, paused) = self.sync_race_state(now, seconds, &layout, steering_ready);
         audio::set_paused(paused);
         if self.experimental_visual_only {
@@ -3189,7 +3244,7 @@ impl Runtime {
             selection: &self.selection,
             content: &self.content,
             camera: self.camera_label(),
-            steering_ready: self.tilt.is_finite(),
+            steering_ready: self.is_landscape_ready(),
             cockpit_ready: self.cockpit_ready,
             scene_loaded: self.pivots.is_some(),
             loading_phase: self.loading_started.elapsed().as_secs_f32() * 5.0,
@@ -3260,7 +3315,7 @@ impl Runtime {
         if (!self.experimental_visual_only && state.rest.is_none()) || self.pivots.is_none() {
             return "LOADING PRIVATE STAGE / CAR / PHYSICS".into();
         }
-        if !self.experimental_visual_only && !self.tilt.is_finite() && !self.gamepad.connected {
+        if !self.experimental_visual_only && !self.is_landscape_ready() {
             return "STEERING UNAVAILABLE - HOLD IPAD IN LANDSCAPE".into();
         }
         if let Some(message) = &self.message {
@@ -3283,6 +3338,14 @@ impl Runtime {
         size: (u32, u32),
     ) {
         self.drawable_size = size;
+        if !std::mem::take(&mut self.motion_polled_this_frame)
+            && self.menu.page != menu::Page::Paused
+        {
+            let live_tilt = motion(true);
+            if live_tilt.is_finite() {
+                self.tilt = live_tilt;
+            }
+        }
         if !std::mem::take(&mut self.gamepad_polled_this_frame) {
             self.poll_gamepad();
         }
@@ -4943,6 +5006,64 @@ mod reload_tests {
         assert_eq!(champ.locked_vehicle_id, "mg-zr-s1600");
         assert_eq!(champ.difficulty, career::CareerDifficulty::Intermediate);
         assert_eq!(champ.total_stages(), 3);
+
+        // 6. Verify Regional Championship stage start is NOT blocked by tilt == NaN
+        // when the iPad is in landscape (drawable_size.0 > drawable_size.1) before any
+        // 3D stage ChasePath has been loaded.
+        app.tilt = f64::NAN;
+        app.gamepad.connected = false;
+        app.drawable_size = (1024, 768);
+        assert!(app.is_landscape_ready());
+        let champ_rows = {
+            let ctx = app.context();
+            assert!(ctx.steering_ready);
+            app.menu.rows(&ctx)
+        };
+        assert!(
+            !champ_rows
+                .iter()
+                .any(|r| r.label.contains("SUJETA EN HORIZONTAL")),
+            "Must NOT display 'SUJETA EN HORIZONTAL PARA CORRER' when iPad is in landscape"
+        );
+        let run_row = champ_rows
+            .iter()
+            .find(|r| r.label.starts_with("CORRER ETAPA 1/3:"))
+            .expect("CORRER ETAPA 1/3 row must exist");
+        assert_eq!(
+            run_row.kind,
+            menu::RowKind::Action {
+                command: menu::Command::CareerChampRunNextStage,
+                enabled: true,
+            }
+        );
+
+        // Conversely, if held in portrait (768x1024) with no tilt and no gamepad, it blocks cleanly.
+        app.drawable_size = (768, 1024);
+        assert!(!app.is_landscape_ready());
+        let portrait_rows = {
+            let ctx = app.context();
+            assert!(!ctx.steering_ready);
+            app.menu.rows(&ctx)
+        };
+        assert!(portrait_rows
+            .iter()
+            .any(|r| r.label == "SUJETA EN HORIZONTAL PARA CORRER"));
+
+        // Restore landscape and verify Settings 5-card navigation works end-to-end.
+        app.drawable_size = (1024, 768);
+        app.menu.open(menu::Page::Settings);
+        for (idx, expected_page) in [
+            (0usize, menu::Page::Controls),
+            (1usize, menu::Page::SoundSettings),
+            (2usize, menu::Page::HudCameraSettings),
+            (3usize, menu::Page::About),
+            (4usize, menu::Page::Content),
+        ] {
+            app.apply_command(menu::Command::SettingsCardActivate(idx));
+            assert_eq!(app.menu.page, expected_page);
+            app.apply_command(menu::Command::Back);
+            assert_eq!(app.menu.page, menu::Page::Settings);
+        }
     }
 
     #[test]

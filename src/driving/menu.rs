@@ -22,6 +22,8 @@ pub enum Page {
     ContentCompatibility,
     Settings,
     Controls,
+    SoundSettings,
+    HudCameraSettings,
     CameraEditor,
     ControlsEditor,
     About,
@@ -63,6 +65,76 @@ impl Page {
             Self::Dealership => Some(super::career::DealershipKind::UsedCars),
             Self::NewDealership => Some(super::career::DealershipKind::NewSalon),
             _ => None,
+        }
+    }
+
+    /// True for the five main Settings sub-pages and their nested configuration screens,
+    /// which display top-bar quick buttons for `< AJUSTES` and `MENÚ PRINCIPAL`.
+    pub fn is_settings_subpage(self) -> bool {
+        matches!(
+            self,
+            Self::Controls
+                | Self::SoundSettings
+                | Self::HudCameraSettings
+                | Self::About
+                | Self::Content
+                | Self::ContentImport
+                | Self::ContentCompatibility
+                | Self::GamepadSettings
+                | Self::PacenoteHudSettings
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsCard {
+    Controls,
+    Sound,
+    HudCamera,
+    Credits,
+    Content,
+}
+
+impl SettingsCard {
+    pub const ALL: [Self; 5] = [
+        Self::Controls,
+        Self::Sound,
+        Self::HudCamera,
+        Self::Credits,
+        Self::Content,
+    ];
+
+    pub fn from_index(index: usize) -> Self {
+        Self::ALL[index % Self::ALL.len()]
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Controls => "CONTROLES",
+            Self::Sound => "SONIDO",
+            Self::HudCamera => "HUD Y CÁMARA",
+            Self::Credits => "CRÉDITOS",
+            Self::Content => "CONTENIDO",
+        }
+    }
+
+    pub fn subtitle(self) -> &'static str {
+        match self {
+            Self::Controls => "GIROSCOPIO · TÁCTIL · MANDO",
+            Self::Sound => "MOTOR FMOD · COPILOTO · MÚSICA",
+            Self::HudCamera => "VISTAS · INDICADORES · NOTAS",
+            Self::Credits => "PROYECTO · VERSIÓN · LICENCIAS",
+            Self::Content => "COCHES · TRAMOS · DIAGNÓSTICO",
+        }
+    }
+
+    pub fn target_page(self) -> Page {
+        match self {
+            Self::Controls => Page::Controls,
+            Self::Sound => Page::SoundSettings,
+            Self::HudCamera => Page::HudCameraSettings,
+            Self::Credits => Page::About,
+            Self::Content => Page::Content,
         }
     }
 }
@@ -338,7 +410,13 @@ pub enum Command {
     CareerChampAbandon,
     CareerChampDismissFinished,
     OpenCareerAfterStage,
+    ScrollRowsUp,
+    ScrollRowsDown,
+    SettingsCardStep(i32),
+    SettingsCardActivate(usize),
 }
+
+pub const MAX_VISIBLE_ROWS: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowKind {
@@ -473,6 +551,7 @@ pub struct Menu {
     pub page: Page,
     stack: Vec<Page>,
     pub main_section: usize,
+    pub settings_card: usize,
     pub garage_filter: GarageFilter,
     pub dealership_filter: DealershipFilter,
     pub inspected_vehicle: usize,
@@ -481,6 +560,7 @@ pub struct Menu {
     pub inspected_stage: usize,
     pub garage_page: usize,
     pub stage_page: usize,
+    pub row_scroll: usize,
     pub focused_row: usize,
     pub gamepad_focus_active: bool,
 }
@@ -490,6 +570,7 @@ impl Default for Menu {
             page: Page::Title,
             stack: Vec::new(),
             main_section: 1, // Contrarreloj focused by default for immediate driving access
+            settings_card: 0,
             garage_filter: GarageFilter::All,
             dealership_filter: DealershipFilter::Initiation,
             inspected_vehicle: 0,
@@ -498,6 +579,7 @@ impl Default for Menu {
             inspected_stage: 0,
             garage_page: 0,
             stage_page: 0,
+            row_scroll: 0,
             focused_row: 0,
             gamepad_focus_active: false,
         }
@@ -510,33 +592,61 @@ impl Menu {
         }
         self.stack.push(self.page);
         self.page = page;
+        self.row_scroll = 0;
         self.focused_row = 0;
     }
     pub fn back(&mut self) {
         self.page = self.stack.pop().unwrap_or(Page::Main);
+        self.row_scroll = 0;
         self.focused_row = 0;
     }
     pub fn reset_to_main(&mut self) {
         self.stack.clear();
         self.page = Page::Main;
+        self.row_scroll = 0;
         self.focused_row = 0;
     }
     pub fn show(&mut self, page: Page) {
         self.stack.clear();
         self.page = page;
+        self.row_scroll = 0;
         self.focused_row = 0;
     }
     pub fn resume(&mut self) {
         self.stack.clear();
         self.page = Page::Driving;
+        self.row_scroll = 0;
         self.focused_row = 0;
     }
     pub fn pause(&mut self) {
         if self.page == Page::Driving {
             self.stack.clear();
             self.page = Page::Paused;
+            self.row_scroll = 0;
             self.focused_row = 0;
         }
+    }
+
+    pub fn visible_row_window(&self, total_rows: usize) -> (usize, usize) {
+        if matches!(self.page, Page::CameraEditor | Page::ControlsEditor)
+            || total_rows <= MAX_VISIBLE_ROWS
+        {
+            return (0, total_rows);
+        }
+        let max_scroll = total_rows.saturating_sub(MAX_VISIBLE_ROWS);
+        let start = self.row_scroll.min(max_scroll);
+        let end = (start + MAX_VISIBLE_ROWS).min(total_rows);
+        (start, end)
+    }
+
+    pub fn scroll_rows(&mut self, total_rows: usize, delta: isize) {
+        if total_rows <= MAX_VISIBLE_ROWS {
+            self.row_scroll = 0;
+            return;
+        }
+        let max_scroll = total_rows.saturating_sub(MAX_VISIBLE_ROWS) as isize;
+        let next = (self.row_scroll as isize + delta).clamp(0, max_scroll);
+        self.row_scroll = next as usize;
     }
 
     fn row_interactive(row: &Row) -> bool {
@@ -566,6 +676,15 @@ impl Menu {
             None => 0,
         };
         self.focused_row = indices[next_pos];
+        if !matches!(self.page, Page::CameraEditor | Page::ControlsEditor)
+            && rows.len() > MAX_VISIBLE_ROWS
+        {
+            if self.focused_row < self.row_scroll {
+                self.row_scroll = self.focused_row;
+            } else if self.focused_row >= self.row_scroll + MAX_VISIBLE_ROWS {
+                self.row_scroll = self.focused_row + 1 - MAX_VISIBLE_ROWS;
+            }
+        }
     }
 
     pub fn focus_confirm(&self, rows: &[Row]) -> Option<Command> {
@@ -600,13 +719,15 @@ impl Menu {
             Page::Garage | Page::GarageDetail => "GARAJE 3D",
             Page::Stages | Page::StageDetail => "SELECCIONAR TRAMO",
             Page::Content | Page::ContentImport | Page::ContentCompatibility => {
-                "GESTOR DE CONTENIDO"
+                "AJUSTES — CONTENIDO"
             }
             Page::Settings => "AJUSTES",
-            Page::Controls => "CONTROLES",
+            Page::Controls => "AJUSTES — CONTROLES",
+            Page::SoundSettings => "AJUSTES — SONIDO",
+            Page::HudCameraSettings => "AJUSTES — HUD Y CÁMARA",
             Page::CameraEditor => "EDITOR DE CÁMARAS",
             Page::ControlsEditor => "EDITOR DE CONTROLES",
-            Page::About => "ACERCA DE",
+            Page::About => "AJUSTES — CRÉDITOS",
             Page::Paused => "PAUSA",
             Page::Driving => "CONDUCCIÓN",
             Page::StageComplete => "STAGE COMPLETE",
@@ -778,7 +899,6 @@ impl Menu {
                             enabled: ctx.steering_ready,
                         },
                     },
-                    Row::action("CAMPEONATO RBR", Command::Open(Page::Championship)),
                     Row::action(
                         format!("MODO NGP EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
                         Command::ToggleExperimentalMode,
@@ -1066,23 +1186,43 @@ impl Menu {
                 rows
             }
             Page::Content => vec![
-                Row::action("MANAGE CARS", Command::Open(Page::Garage)),
-                Row::action("MANAGE STAGES", Command::Open(Page::Stages)),
-                Row::disabled("IMPORT FROM IPAD FILES - UNAVAILABLE"),
-                Row::disabled("PACKAGE INSPECTOR - UNAVAILABLE"),
                 Row::action(
-                    "COMPATIBILITY REPORT",
+                    format!(
+                        "COCHES DISPONIBLES ({} EN CATÁLOGO)",
+                        ctx.content.vehicles.len()
+                    ),
+                    Command::Open(Page::Garage),
+                ),
+                Row::action(
+                    format!(
+                        "TRAMOS DISPONIBLES ({} EN CATÁLOGO)",
+                        ctx.content.stages.len()
+                    ),
+                    Command::Open(Page::Stages),
+                ),
+                Row::action(
+                    format!("MODO NGP EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
+                    Command::ToggleExperimentalMode,
+                ),
+                Row::action(
+                    "DIAGNÓSTICO NGP / FMOD (10 ETAPAS)",
+                    Command::RunFocusDiagnostics,
+                ),
+                Row::action(
+                    "INFORME DE COMPATIBILIDAD Y BACKEND",
                     Command::Open(Page::ContentCompatibility),
                 ),
-                Row::action("REFRESH CONTENT AUDIT", Command::InspectContent),
-                Row::action("BACK", Command::Back),
+                Row::action("ACTUALIZAR AUDITORÍA DE DOCUMENTS", Command::InspectContent),
+                Row::disabled("IMPORT FROM IPAD FILES - UNAVAILABLE"),
+                Row::action("VOLVER A AJUSTES", Command::Back),
+                Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
             ],
             Page::ContentImport => {
                 let mut rows = IMPORT_STEPS
                     .iter()
                     .map(|step| Row::info(step.label, step.detail))
                     .collect::<Vec<_>>();
-                rows.push(Row::action("BACK", Command::Back));
+                rows.push(Row::action("VOLVER A AJUSTES", Command::Back));
                 rows
             }
             Page::ContentCompatibility => {
@@ -1118,82 +1258,14 @@ impl Menu {
                         Command::RunFocusDiagnostics,
                     ),
                     Row::action("RUN DESCRIPTOR CHECK", Command::CheckPhysics),
-                    Row::action("BACK", Command::Back),
+                    Row::action("VOLVER A CONTENIDO", Command::Back),
                 ]
             }
-            Page::Settings => vec![
-                Row::stepper(
-                    "SENSIBILIDAD GIROSCOPIO",
-                    Command::SensDown,
-                    Command::SensUp,
-                    format!("{:.2}", ctx.sensitivity),
-                ),
-                Row::stepper(
-                    "ZONA MUERTA",
-                    Command::DeadDown,
-                    Command::DeadUp,
-                    format!("{:.2}", ctx.dead_zone),
-                ),
-                Row::action(format!("CÁMARA: {}", ctx.camera), Command::CameraNext),
-                Row::stepper(
-                    "VOLUMEN MOTOR",
-                    Command::VolumeDown,
-                    Command::VolumeUp,
-                    format!("{:.0}%", ctx.volume * 100.0),
-                ),
-                Row::stepper(
-                    "VOLUMEN MÚSICA",
-                    Command::MusicVolumeDown,
-                    Command::MusicVolumeUp,
-                    format!("{:.0}%", ctx.music_volume * 100.0),
-                ),
-                Row::stepper(
-                    "VOLUMEN COPILOTO",
-                    Command::CodriverVolumeDown,
-                    Command::CodriverVolumeUp,
-                    format!("{:.0}%", ctx.codriver_volume * 100.0),
-                ),
-                Row::action(
-                    format!("INVERTIR PEDALES: {}", on_off(ctx.invert_pedals)),
-                    Command::ToggleInvertPedals,
-                ),
-                Row::action(
-                    format!("AYUDA EMBRAGUE: {}", on_off(ctx.clutch_help)),
-                    Command::ToggleClutchHelp,
-                ),
-                Row::action(
-                    format!("CONTADOR FPS: {}", on_off(ctx.fps)),
-                    Command::ToggleFps,
-                ),
-                Row::action(
-                    format!("TELEMETRÍA: {}", on_off(ctx.diagnostics)),
-                    Command::ToggleDiagnostics,
-                ),
-                Row::action(
-                    format!("HUD MÍNIMO: {}", on_off(ctx.minimal_hud)),
-                    Command::ToggleMinimalHud,
-                ),
-                Row {
-                    label: if ctx.scene_loaded {
-                        "EDITAR CÁMARAS".into()
-                    } else {
-                        "EDITAR CÁMARAS (INICIA RALLY)".into()
-                    },
-                    kind: RowKind::Action {
-                        command: Command::Open(Page::CameraEditor),
-                        enabled: ctx.scene_loaded && cfg!(feature = "physics-stage"),
-                    },
-                },
-                Row::action("EDITAR CONTROLES", Command::Open(Page::ControlsEditor)),
-                Row::action(
-                    "NOTAS VISUALES COPILOTO",
-                    Command::Open(Page::PacenoteHudSettings),
-                ),
-                Row::action("CONTROLES Y MANDO", Command::Open(Page::Controls)),
-                Row::action("GESTOR DE CONTENIDO / NGP", Command::Open(Page::Content)),
-                Row::action("ACERCA DE", Command::Open(Page::About)),
-                Row::action("VOLVER", Command::Back),
-            ],
+            Page::Settings => SettingsCard::ALL
+                .iter()
+                .enumerate()
+                .map(|(i, card)| Row::action(card.title(), Command::SettingsCardActivate(i)))
+                .collect(),
             Page::PacenoteHudSettings => {
                 let pn = &ctx.pacenote_hud;
                 vec![
@@ -1448,14 +1520,41 @@ impl Menu {
                 Row::action("VOLVER", Command::Back),
             ],
             Page::Controls => vec![
+                Row::stepper(
+                    "SENSIBILIDAD GIROSCOPIO",
+                    Command::SensDown,
+                    Command::SensUp,
+                    format!("{:.2}", ctx.sensitivity),
+                ),
+                Row::stepper(
+                    "ZONA MUERTA DIRECCIÓN",
+                    Command::DeadDown,
+                    Command::DeadUp,
+                    format!("{:.2}", ctx.dead_zone),
+                ),
                 Row {
-                    label: "CALIBRAR GIROSCOPIO".into(),
+                    label: "CALIBRAR GIROSCOPIO (POSICIÓN ACTUAL)".into(),
                     kind: RowKind::Action {
                         command: Command::Calibrate,
                         enabled: ctx.steering_ready,
                     },
                 },
                 Row::action("RESTABLECER CALIBRACIÓN", Command::ResetCalibration),
+                Row::action(
+                    format!(
+                        "INVERTIR PEDALES (ACEL. / FRENO): {}",
+                        on_off(ctx.invert_pedals)
+                    ),
+                    Command::ToggleInvertPedals,
+                ),
+                Row::action(
+                    format!("AYUDA DE EMBRAGUE: {}", on_off(ctx.clutch_help)),
+                    Command::ToggleClutchHelp,
+                ),
+                Row::action(
+                    "EDITAR CONTROLES TÁCTILES EN PANTALLA",
+                    Command::Open(Page::ControlsEditor),
+                ),
                 Row::action(
                     format!(
                         "MANDO / GAMEPAD: {}",
@@ -1467,9 +1566,74 @@ impl Menu {
                     ),
                     Command::Open(Page::GamepadSettings),
                 ),
-                Row::info("TRANSMISIÓN", format!("MANUAL {}", vehicle.forward_gears)),
-                Row::info("CAMBIO", "PULSA GEAR - / +"),
-                Row::action("VOLVER", Command::Back),
+                Row::action("VOLVER A AJUSTES", Command::Back),
+                Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
+            ],
+            Page::SoundSettings => vec![
+                Row::stepper(
+                    "VOLUMEN MOTOR Y EFECTOS",
+                    Command::VolumeDown,
+                    Command::VolumeUp,
+                    format!("{:.0}%", ctx.volume * 100.0),
+                ),
+                Row::stepper(
+                    "VOLUMEN COPILOTO (VOZ)",
+                    Command::CodriverVolumeDown,
+                    Command::CodriverVolumeUp,
+                    format!("{:.0}%", ctx.codriver_volume * 100.0),
+                ),
+                Row::stepper(
+                    "VOLUMEN MÚSICA DE MENÚ",
+                    Command::MusicVolumeDown,
+                    Command::MusicVolumeUp,
+                    format!("{:.0}%", ctx.music_volume * 100.0),
+                ),
+                Row::info("AUDIO COCHE ACTIVO", vehicle.audio_index.clone()),
+                Row::info("SALIDA DE AUDIO", "ESTÉREO 44.1 KHZ · FMOD / SÍNTESIS"),
+                Row::action("VOLVER A AJUSTES", Command::Back),
+                Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
+            ],
+            Page::HudCameraSettings => vec![
+                Row::action(
+                    format!("VISTA DE CÁMARA ACTIVA: {}", ctx.camera),
+                    Command::CameraNext,
+                ),
+                Row::action(
+                    format!("MODO HUD MÍNIMO (VELOCÍMETRO): {}", on_off(ctx.minimal_hud)),
+                    Command::ToggleMinimalHud,
+                ),
+                Row::action(
+                    format!("CONTADOR DE FPS EN PANTALLA: {}", on_off(ctx.fps)),
+                    Command::ToggleFps,
+                ),
+                Row::action(
+                    format!("TELEMETRÍA E INDICADORES: {}", on_off(ctx.diagnostics)),
+                    Command::ToggleDiagnostics,
+                ),
+                Row::action(
+                    format!(
+                        "NOTAS VISUALES COPILOTO: {}",
+                        on_off(ctx.pacenote_hud.enabled)
+                    ),
+                    Command::Open(Page::PacenoteHudSettings),
+                ),
+                Row::action(
+                    "POSICIÓN Y OPACIDAD CONTROLES HUD",
+                    Command::Open(Page::ControlsEditor),
+                ),
+                Row {
+                    label: if ctx.scene_loaded {
+                        "EDITAR CÁMARAS 3D (FOV Y POSICIÓN)".into()
+                    } else {
+                        "EDITAR CÁMARAS 3D (INICIA UN TRAMO)".into()
+                    },
+                    kind: RowKind::Action {
+                        command: Command::Open(Page::CameraEditor),
+                        enabled: ctx.scene_loaded && cfg!(feature = "physics-stage"),
+                    },
+                },
+                Row::action("VOLVER A AJUSTES", Command::Back),
+                Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
             ],
             Page::GamepadSettings => {
                 let gp = &ctx.gamepad_settings;
@@ -1534,14 +1698,26 @@ impl Menu {
                     ),
                     Row::action("GUARDAR PERFIL MANDO", Command::GpSave),
                     Row::action("RESTABLECER MANDO", Command::GpReset),
-                    Row::action("VOLVER", Command::Back),
+                    Row::action("VOLVER A CONTROLES", Command::Back),
                 ]
             }
             Page::About => vec![
+                Row::info("PROYECTO", "RBR MOBILE — PORT iOS / iPadOS (METAL / WGPU)"),
+                Row::info("MOTOR BASE", "ReRBR POR JODUSNODUS"),
+                Row::info(
+                    "FÍSICAS Y RECURSOS",
+                    "RICHARD BURNS RALLY · RALLYSIMFANS (NGP)",
+                ),
                 Row::info("VERSIÓN", env!("CARGO_PKG_VERSION")),
-                Row::info("BUILD", option_env!("GITHUB_RUN_NUMBER").unwrap_or("LOCAL")),
-                Row::info("LICENCIA", "GPL-3.0-OR-LATER"),
-                Row::action("VOLVER", Command::Back),
+                Row::info(
+                    "BUILD / LICENCIA",
+                    format!(
+                        "{} · GPL-3.0-OR-LATER",
+                        option_env!("GITHUB_RUN_NUMBER").unwrap_or("LOCAL")
+                    ),
+                ),
+                Row::action("VOLVER A AJUSTES", Command::Back),
+                Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
             ],
             Page::Paused => {
                 let mut rows = vec![
@@ -1972,9 +2148,8 @@ impl Menu {
             }
             Page::CameraEditor | Page::ControlsEditor => Vec::new(),
             Page::Content => vec![
-                "PRIVATE DOCUMENTS CATALOG / NO NEW DIRECTORY LAYOUT".into(),
-                "IMPORT AND INSTALL ARE NOT AVAILABLE IN THIS BUILD".into(),
-                "ONLY VALIDATED CONTENT IS SELECTABLE".into(),
+                "GESTIÓN DE COCHES, TRAMOS Y AUDITORÍA DE ARCHIVOS EN DOCUMENTS".into(),
+                "DIAGNÓSTICO DE FÍSICAS NGP 7.4 Y BANCOS DE AUDIO FMOD".into(),
             ],
             Page::ContentImport => vec![
                 "FUTURE FILES IMPORT PIPELINE - NOT AVAILABLE".into(),
@@ -1990,27 +2165,27 @@ impl Menu {
                 ]
             }
             Page::Settings => vec![
-                "PREFERENCES SAVED IN DOCUMENTS".into(),
-                "VOLUME CONTROLS ENGINE AUDIO OUTPUT".into(),
-                "CAMERA CHANGES APPLY IMMEDIATELY".into(),
+                "SELECCIONA UN APARTADO DE CONFIGURACIÓN".into(),
+                "TODOS LOS CAMBIOS SE GUARDAN AUTOMÁTICAMENTE EN DOCUMENTS".into(),
             ],
             Page::Controls => vec![
-                "TILT TO STEER / CALIBRATE AT YOUR HOLDING ANGLE".into(),
-                if ctx.invert_pedals {
-                    "PEDALS: SLIDE UP FOR MORE PRESSURE (INVERTED)".into()
-                } else {
-                    "PEDALS: SLIDE DOWN FOR MORE PRESSURE".into()
-                },
-                "CLUTCH AND HANDBRAKE ARE HELD CONTROLS".into(),
+                "GIROSCOPIO, CALIBRACIÓN, PEDALES, EMBRAGUE Y MANDO".into(),
                 format!(
-                    "GEAR - / + STEPS R N 1-{} / MANUAL ONLY",
+                    "TRANSMISIÓN MANUAL {} VEL. · PULSA GEAR - / + PARA CAMBIAR",
                     vehicle.forward_gears
                 ),
             ],
+            Page::SoundSettings => vec![
+                "VOLUMEN DE MOTOR FMOD, VOZ DEL COPILOTO Y MÚSICA DE MENÚ".into(),
+                "LOS AJUSTES DE AUDIO SE APLICAN Y GUARDAN AL INSTANTE".into(),
+            ],
+            Page::HudCameraSettings => vec![
+                "VISTAS DE CÁMARA, VELOCÍMETRO, INDICADORES, FPS Y NOTAS VISUALES".into(),
+                "LOS CAMBIOS DE CÁMARA Y HUD SE APLICAN INMEDIATAMENTE".into(),
+            ],
             Page::About => vec![
-                "ReRBR BY JODUSNODUS / GPL-3.0-OR-LATER".into(),
-                "iOS PROBE / PRIVATE GAME ASSETS REQUIRED".into(),
-                "NO GAME ASSETS ARE BUNDLED IN THE IPA".into(),
+                "CRÉDITOS DEL PROYECTO, VERSIÓN, RECONOCIMIENTOS Y LICENCIAS".into(),
+                "ReRBR BY JODUSNODUS / GPL-3.0-OR-LATER · PORT iOS / iPadOS".into(),
             ],
             Page::Paused => vec![
                 "SIMULATION PAUSED / INPUTS RELEASED".into(),
@@ -2118,9 +2293,15 @@ impl Menu {
         if rows == 0 {
             return Rect::default();
         }
-        let h = ((bottom - top) / rows as f32).min(0.078);
-        let gap = (h * 0.16).min(0.009);
-        Rect::new(rx, top + index as f32 * h, rw, (h - gap).max(0.02))
+        let (start, end) = self.visible_row_window(rows);
+        if index < start || index >= end {
+            return Rect::default();
+        }
+        let visible_rows = (end - start).max(1);
+        let slot = index - start;
+        let h = ((bottom - top) / visible_rows as f32).min(0.078);
+        let gap = (h * 0.16).min(0.010);
+        Rect::new(rx, top + slot as f32 * h, rw, (h - gap).max(0.02))
     }
     fn stepper_split_for(&self, value: &str) -> f32 {
         let (rx, rw, _, _) = self.row_bounds();
@@ -2162,6 +2343,42 @@ impl Menu {
         }
     }
 
+    pub fn settings_card_rect(index: usize) -> Rect {
+        match index {
+            0..=2 => {
+                let total_w = 0.930;
+                let gap = 0.024;
+                let card_w = (total_w - gap * 2.0) / 3.0;
+                let x = 0.035 + index as f32 * (card_w + gap);
+                Rect::new(x, 0.190, card_w, 0.325)
+            }
+            _ => {
+                let col = index.saturating_sub(3).min(1);
+                let total_w = 0.930;
+                let gap = 0.026;
+                let card_w = (total_w - gap) / 2.0;
+                let x = 0.035 + col as f32 * (card_w + gap);
+                Rect::new(x, 0.545, card_w, 0.325)
+            }
+        }
+    }
+
+    fn subpage_back_rect() -> Rect {
+        Rect::new(0.555, 0.021, 0.185, 0.068)
+    }
+
+    fn subpage_home_rect() -> Rect {
+        Rect::new(0.752, 0.021, 0.193, 0.068)
+    }
+
+    fn scroll_up_rect() -> Rect {
+        Rect::new(0.680, 0.130, 0.125, 0.060)
+    }
+
+    fn scroll_down_rect() -> Rect {
+        Rect::new(0.815, 0.130, 0.130, 0.060)
+    }
+
     fn garage_back_rect() -> Rect {
         Rect::new(0.025, 0.022, 0.160, 0.068)
     }
@@ -2187,7 +2404,7 @@ impl Menu {
     }
 
     /// Context-aware hit test supporting Title Screen, Horizontal Main Menu, 3D Garage,
-    /// and all standard vertical row pages using the exact same rectangles used for drawing.
+    /// 5-Card Settings Hub, and all standard vertical row pages.
     pub fn press_with_ctx(&self, x: f64, y: f64, ctx: &Context, rows: &[Row]) -> Option<Command> {
         if !x.is_finite() || !y.is_finite() {
             return None;
@@ -2201,6 +2418,20 @@ impl Menu {
                 for idx in 0..MainSection::ALL.len() {
                     if self.main_section_rect(idx).contains(x, y) {
                         return Some(Command::MainSectionActivate(idx));
+                    }
+                }
+                None
+            }
+            Page::Settings => {
+                if Self::subpage_back_rect().contains(x, y) {
+                    return Some(Command::Back);
+                }
+                if Self::subpage_home_rect().contains(x, y) {
+                    return Some(Command::ResetToMain);
+                }
+                for idx in 0..SettingsCard::ALL.len() {
+                    if Self::settings_card_rect(idx).contains(x, y) {
+                        return Some(Command::SettingsCardActivate(idx));
                     }
                 }
                 None
@@ -2323,13 +2554,49 @@ impl Menu {
 
     /// Resolves a touch to a command using the same rectangles used for drawing.
     pub fn press(&self, x: f64, y: f64, rows: &[Row]) -> Option<Command> {
-        if !x.is_finite() || !y.is_finite() || rows.is_empty() {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        if self.page == Page::Settings {
+            if Self::subpage_back_rect().contains(x, y) {
+                return Some(Command::Back);
+            }
+            if Self::subpage_home_rect().contains(x, y) {
+                return Some(Command::ResetToMain);
+            }
+            for idx in 0..SettingsCard::ALL.len() {
+                if Self::settings_card_rect(idx).contains(x, y) {
+                    return Some(Command::SettingsCardActivate(idx));
+                }
+            }
+            return None;
+        }
+        if self.page.is_settings_subpage() {
+            if Self::subpage_back_rect().contains(x, y) {
+                return Some(Command::Back);
+            }
+            if Self::subpage_home_rect().contains(x, y) {
+                return Some(Command::ResetToMain);
+            }
+        }
+        if !matches!(self.page, Page::CameraEditor | Page::ControlsEditor)
+            && rows.len() > MAX_VISIBLE_ROWS
+        {
+            if Self::scroll_up_rect().contains(x, y) {
+                return Some(Command::ScrollRowsUp);
+            }
+            if Self::scroll_down_rect().contains(x, y) {
+                return Some(Command::ScrollRowsDown);
+            }
+        }
+        if rows.is_empty() {
             return None;
         }
         let (xf, yf) = (x as f32, y as f32);
-        let index = (0..rows.len()).find(|&i| {
+        let (vis_start, vis_end) = self.visible_row_window(rows.len());
+        let index = (vis_start..vis_end).find(|&i| {
             let r = self.row_rect_for(i, rows.len());
-            xf >= r.x && xf <= r.x + r.w && yf >= r.y && yf <= r.y + r.h
+            r.w > 0.0 && xf >= r.x && xf <= r.x + r.w && yf >= r.y && yf <= r.y + r.h
         })?;
         match &rows[index].kind {
             RowKind::Action {
@@ -2352,6 +2619,11 @@ impl Menu {
         }
         if self.page == Page::Main {
             self.draw_horizontal_main(canvas, ctx, status);
+            self.draw_transition_fade(canvas, ctx.transition_alpha);
+            return;
+        }
+        if self.page == Page::Settings {
+            self.draw_settings_hub(canvas, ctx, status);
             self.draw_transition_fade(canvas, ctx.transition_alpha);
             return;
         }
@@ -2380,7 +2652,17 @@ impl Menu {
             ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 1.0), ui::BACKDROP);
             ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 0.11), [12, 15, 21, 255]);
             ui::fill(canvas, Rect::new(0.055, 0.042, 0.006, 0.045), ACCENT);
-            canvas.text(0.072 * 640.0, 0.032 * height, self.title(), 1.45, TEXT);
+            canvas.text(0.072 * 640.0, 0.032 * height, self.title(), 1.35, TEXT);
+            if self.page.is_settings_subpage() {
+                ui::button(canvas, Self::subpage_back_rect(), "< AJUSTES", false, true);
+                ui::button(
+                    canvas,
+                    Self::subpage_home_rect(),
+                    "MENÚ PRINCIPAL",
+                    false,
+                    true,
+                );
+            }
             ui::rule(canvas, 0.055, 0.110, 0.89, LINE);
 
             let subtitle = self.subtitle(ctx);
@@ -2476,8 +2758,32 @@ impl Menu {
         }
 
         let rows = self.rows(ctx);
-        let label_scale = if rows.len() > 7 { 0.74 } else { 0.82 };
-        for (index, row) in rows.iter().enumerate() {
+        let (vis_start, vis_end) = self.visible_row_window(rows.len());
+        let visible_count = (vis_end - vis_start).max(1);
+        if !compact && rows.len() > MAX_VISIBLE_ROWS {
+            ui::button(
+                canvas,
+                Self::scroll_up_rect(),
+                "SUBIR ▲",
+                false,
+                vis_start > 0,
+            );
+            let down_lbl = format!("BAJAR ▼ ({}/{})", vis_end, rows.len());
+            ui::button(
+                canvas,
+                Self::scroll_down_rect(),
+                &down_lbl,
+                false,
+                vis_end < rows.len(),
+            );
+        }
+        let label_scale = if visible_count > 7 { 0.74 } else { 0.82 };
+        for (index, row) in rows
+            .iter()
+            .enumerate()
+            .skip(vis_start)
+            .take(vis_end - vis_start)
+        {
             let rect = self.row_rect_for(index, rows.len());
             let (x, y, w, h) = ui::px(rect, canvas);
             let interactive = matches!(
@@ -3129,6 +3435,175 @@ impl Menu {
                 &sub,
                 s_scale,
                 sub_col,
+            );
+        }
+    }
+
+    /// Full-screen 5-Card Settings Hub (`AJUSTES`) styled consistently with the horizontal Main Menu:
+    /// Top row: `CONTROLES`, `SONIDO`, `HUD Y CÁMARA`.
+    /// Bottom row: `CRÉDITOS`, `CONTENIDO`.
+    fn draw_settings_hub(&self, canvas: &mut Canvas, ctx: &Context, status: &str) {
+        let height = canvas.height();
+        ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 1.0), ui::BACKDROP);
+        ui::fill(canvas, Rect::new(0.0, 0.0, 1.0, 0.11), [12, 15, 21, 255]);
+        ui::fill(canvas, Rect::new(0.035, 0.032, 0.006, 0.048), ACCENT);
+        canvas.text(0.052 * 640.0, 0.030 * height, "AJUSTES", 1.45, TEXT);
+        ui::button(canvas, Self::subpage_back_rect(), "< VOLVER", false, true);
+        ui::button(
+            canvas,
+            Self::subpage_home_rect(),
+            "MENÚ PRINCIPAL",
+            false,
+            true,
+        );
+        ui::rule(canvas, 0.035, 0.110, 0.930, LINE);
+
+        canvas.text(
+            0.035 * 640.0,
+            0.130 * height,
+            "TOCA UNA TARJETA PARA ABRIR SU PANTALLA DE CONFIGURACIÓN · GUARDADO AUTOMÁTICO",
+            0.70,
+            DIM,
+        );
+
+        let active_card = if self.gamepad_focus_active {
+            self.focused_row.min(SettingsCard::ALL.len() - 1)
+        } else {
+            self.settings_card.min(SettingsCard::ALL.len() - 1)
+        };
+
+        for (idx, card) in SettingsCard::ALL.iter().enumerate() {
+            let rect = Self::settings_card_rect(idx);
+            let active = idx == active_card;
+            let fill = if active {
+                [26, 34, 48, 244]
+            } else {
+                PANEL_ACTIVE
+            };
+            let border = if active { ACCENT } else { LINE };
+            ui::panel(canvas, rect, fill, border);
+            ui::fill(
+                canvas,
+                Rect::new(rect.x, rect.y, rect.w, 0.012),
+                if active { ACCENT } else { INFO },
+            );
+
+            let (rx, ry, rw, rh) = ui::px(rect, canvas);
+            ui::text_clipped(
+                canvas,
+                rx + 14.0,
+                ry + 12.0,
+                rw - 28.0,
+                card.title(),
+                0.98,
+                TEXT,
+            );
+            ui::text_clipped(
+                canvas,
+                rx + 14.0,
+                ry + 31.0,
+                rw - 28.0,
+                card.subtitle(),
+                0.56,
+                INFO,
+            );
+            canvas.rect(rx + 14.0, ry + 48.0, (rw - 28.0).max(1.0), 1.0, LINE);
+
+            let summaries: [String; 3] = match card {
+                SettingsCard::Controls => [
+                    format!(
+                        "GIROSCOPIO: SENS {:.2} · ZONA MUERTA {:.2}",
+                        ctx.sensitivity, ctx.dead_zone
+                    ),
+                    format!(
+                        "PEDALES: {} · EMBRAGUE AUTO: {}",
+                        if ctx.invert_pedals {
+                            "INVERTIDOS"
+                        } else {
+                            "NORMAL"
+                        },
+                        on_off(ctx.clutch_help)
+                    ),
+                    format!(
+                        "MANDO: {}",
+                        if ctx.gamepad_connected {
+                            ctx.gamepad_name.unwrap_or("CONECTADO")
+                        } else {
+                            "TÁCTIL / GIROSCOPIO"
+                        }
+                    ),
+                ],
+                SettingsCard::Sound => [
+                    format!("MOTOR Y EFECTOS: {:.0}%", ctx.volume * 100.0),
+                    format!("VOZ COPILOTO: {:.0}%", ctx.codriver_volume * 100.0),
+                    format!("MÚSICA DE MENÚ: {:.0}%", ctx.music_volume * 100.0),
+                ],
+                SettingsCard::HudCamera => [
+                    format!("CÁMARA ACTIVA: {}", ctx.camera),
+                    format!(
+                        "HUD MÍN: {} · FPS: {} · TELEMETRÍA: {}",
+                        on_off(ctx.minimal_hud),
+                        on_off(ctx.fps),
+                        on_off(ctx.diagnostics)
+                    ),
+                    format!(
+                        "NOTAS VISUALES COPILOTO: {}",
+                        on_off(ctx.pacenote_hud.enabled)
+                    ),
+                ],
+                SettingsCard::Credits => [
+                    format!(
+                        "VERSIÓN {} · BUILD {}",
+                        env!("CARGO_PKG_VERSION"),
+                        option_env!("GITHUB_RUN_NUMBER").unwrap_or("LOCAL")
+                    ),
+                    "MOTOR BASE: ReRBR POR JODUSNODUS".into(),
+                    "GPL-3.0-OR-LATER · RBR / RALLYSIMFANS NGP".into(),
+                ],
+                SettingsCard::Content => [
+                    format!(
+                        "INSTALADOS: {} COCHES · {} TRAMOS",
+                        ctx.content.vehicles.len(),
+                        ctx.content.stages.len()
+                    ),
+                    format!("MODO NGP EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
+                    "AUDITORÍA DE ARCHIVOS Y DIAGNÓSTICO 10 ETAPAS".into(),
+                ],
+            };
+
+            for (li, line) in summaries.iter().enumerate() {
+                ui::text_clipped(
+                    canvas,
+                    rx + 14.0,
+                    ry + 58.0 + li as f32 * 16.5,
+                    rw - 28.0,
+                    line,
+                    0.56,
+                    DIM,
+                );
+            }
+
+            let cta = "ABRIR APARTADO >";
+            let cta_scale = 0.58;
+            let cta_w = ui::texture_width(cta, cta_scale);
+            canvas.text(
+                rx + (rw - cta_w - 14.0).max(14.0),
+                ry + (rh - 22.0).max(60.0),
+                cta,
+                cta_scale,
+                if active { GOOD } else { ACCENT },
+            );
+        }
+
+        let footer = ui::wrap(status, 58);
+        ui::rule(canvas, 0.035, 0.900, 0.930, LINE);
+        for (index, line) in footer.iter().take(2).enumerate() {
+            canvas.text(
+                0.035 * 640.0,
+                (0.914 + index as f32 * 0.026) * height,
+                line,
+                0.70,
+                GOOD,
             );
         }
     }
@@ -4018,9 +4493,13 @@ mod tests {
         assert!(menu.is_showroom_orbit_zone(0.5, 0.45));
         assert_eq!(menu.press_with_ctx(0.5, 0.45, &ctx, &rows), None);
 
-        // Drive hub retains explicit StartRally.
+        // Drive hub retains explicit StartRally and no longer exposes legacy "CAMPEONATO RBR".
         menu.open(Page::Drive);
         let drive = menu.rows(&ctx);
+        assert!(
+            !drive.iter().any(|r| r.label.contains("CAMPEONATO RBR")),
+            "Legacy CAMPEONATO RBR row must not appear in CONTRARRELOJ (Page::Drive)"
+        );
         let start_row = drive
             .iter()
             .position(|row| {
@@ -4085,61 +4564,152 @@ mod tests {
         let selection = Selection::default();
         let content = Catalog::descriptors(&selection);
         let ctx = context(&selection, &content);
-        let menu = Menu {
+        let mut menu = Menu {
             page: Page::Settings,
             ..Menu::default()
         };
-        let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 18);
+        // 1. Page::Settings is a 5-card visual hub with non-overlapping card hit-boxes.
+        let hub_rows = menu.rows(&ctx);
+        assert_eq!(hub_rows.len(), 5);
+        assert_eq!(hub_rows[0].label, "CONTROLES");
+        assert_eq!(hub_rows[1].label, "SONIDO");
+        assert_eq!(hub_rows[2].label, "HUD Y CÁMARA");
+        assert_eq!(hub_rows[3].label, "CRÉDITOS");
+        assert_eq!(hub_rows[4].label, "CONTENIDO");
+
+        let back_rect = Menu::subpage_back_rect();
+        let main_rect = Menu::subpage_home_rect();
+        assert_eq!(
+            menu.press_with_ctx(
+                back_rect.center_x() as f64,
+                (back_rect.y + back_rect.h * 0.5) as f64,
+                &ctx,
+                &hub_rows
+            ),
+            Some(Command::Back)
+        );
+        assert_eq!(
+            menu.press_with_ctx(
+                main_rect.center_x() as f64,
+                (main_rect.y + main_rect.h * 0.5) as f64,
+                &ctx,
+                &hub_rows
+            ),
+            Some(Command::ResetToMain)
+        );
+        for i in 0..SettingsCard::ALL.len() {
+            let r_i = Menu::settings_card_rect(i);
+            assert_eq!(
+                menu.press_with_ctx(
+                    r_i.center_x() as f64,
+                    (r_i.y + r_i.h * 0.5) as f64,
+                    &ctx,
+                    &hub_rows
+                ),
+                Some(Command::SettingsCardActivate(i))
+            );
+            for j in (i + 1)..SettingsCard::ALL.len() {
+                let r_j = Menu::settings_card_rect(j);
+                let overlap_x = r_i.x < r_j.right() && r_i.right() > r_j.x;
+                let overlap_y = r_i.y < r_j.bottom() && r_i.bottom() > r_j.y;
+                assert!(
+                    !(overlap_x && overlap_y),
+                    "Settings cards {i} and {j} must not overlap"
+                );
+            }
+        }
+
+        // 2. Page::Controls holds gyroscope sensitivity, dead zone, invert pedals, and clutch help.
+        menu.open(Page::Controls);
+        let ctrl_rows = menu.rows(&ctx);
+        assert_eq!(ctrl_rows.len(), 10);
         for (row_idx, value, expected_down, expected_up) in [
             (0usize, "2.00", Command::SensDown, Command::SensUp),
-            (3usize, "80%", Command::VolumeDown, Command::VolumeUp),
-            (
-                4usize,
-                "70%",
-                Command::MusicVolumeDown,
-                Command::MusicVolumeUp,
-            ),
-            (
-                5usize,
-                "85%",
-                Command::CodriverVolumeDown,
-                Command::CodriverVolumeUp,
-            ),
+            (1usize, "0.03", Command::DeadDown, Command::DeadUp),
         ] {
-            let rect = menu.row_rect_for(row_idx, rows.len());
+            let rect = menu.row_rect_for(row_idx, ctrl_rows.len());
             let (rx, _ry, rw, _rh) = (rect.x * 640.0, rect.y, rect.w * 640.0, rect.h);
             let value_width = ui::texture_width(value, 0.78);
             let minus_center_x = f64::from((rx + rw - value_width - 42.0) / 640.0);
             let plus_center_x = f64::from((rx + rw - 16.0) / 640.0);
             let center_y = f64::from(rect.y + rect.h * 0.5);
             assert_eq!(
-                menu.press(minus_center_x, center_y, &rows),
+                menu.press(minus_center_x, center_y, &ctrl_rows),
                 Some(expected_down)
             );
             assert_eq!(
-                menu.press(plus_center_x, center_y, &rows),
+                menu.press(plus_center_x, center_y, &ctrl_rows),
                 Some(expected_up)
             );
         }
-        let inv_rect = menu.row_rect_for(6, rows.len());
+        let inv_rect = menu.row_rect_for(4, ctrl_rows.len());
         assert_eq!(
             menu.press(
                 inv_rect.center_x() as f64,
                 (inv_rect.y + inv_rect.h * 0.5) as f64,
-                &rows
+                &ctrl_rows
             ),
             Some(Command::ToggleInvertPedals)
         );
-        let clutch_rect = menu.row_rect_for(7, rows.len());
+        let clutch_rect = menu.row_rect_for(5, ctrl_rows.len());
         assert_eq!(
             menu.press(
                 clutch_rect.center_x() as f64,
                 (clutch_rect.y + clutch_rect.h * 0.5) as f64,
-                &rows
+                &ctrl_rows
             ),
             Some(Command::ToggleClutchHelp)
         );
+
+        // 3. Page::SoundSettings holds engine/effects, codriver, and menu music volume steppers.
+        menu.open(Page::SoundSettings);
+        let sound_rows = menu.rows(&ctx);
+        assert_eq!(sound_rows.len(), 7);
+        for (row_idx, value, expected_down, expected_up) in [
+            (0usize, "80%", Command::VolumeDown, Command::VolumeUp),
+            (
+                1usize,
+                "85%",
+                Command::CodriverVolumeDown,
+                Command::CodriverVolumeUp,
+            ),
+            (
+                2usize,
+                "70%",
+                Command::MusicVolumeDown,
+                Command::MusicVolumeUp,
+            ),
+        ] {
+            let rect = menu.row_rect_for(row_idx, sound_rows.len());
+            let (rx, _ry, rw, _rh) = (rect.x * 640.0, rect.y, rect.w * 640.0, rect.h);
+            let value_width = ui::texture_width(value, 0.78);
+            let minus_center_x = f64::from((rx + rw - value_width - 42.0) / 640.0);
+            let plus_center_x = f64::from((rx + rw - 16.0) / 640.0);
+            let center_y = f64::from(rect.y + rect.h * 0.5);
+            assert_eq!(
+                menu.press(minus_center_x, center_y, &sound_rows),
+                Some(expected_down)
+            );
+            assert_eq!(
+                menu.press(plus_center_x, center_y, &sound_rows),
+                Some(expected_up)
+            );
+        }
+
+        // 4. Page::HudCameraSettings holds camera view, minimal HUD, FPS, telemetry, pacenotes, controls editor, and 3D camera editor.
+        menu.open(Page::HudCameraSettings);
+        let hud_cam_rows = menu.rows(&ctx);
+        assert_eq!(hud_cam_rows.len(), 9);
+        let cam_rect = menu.row_rect_for(0, hud_cam_rows.len());
+        assert_eq!(
+            menu.press(
+                cam_rect.center_x() as f64,
+                (cam_rect.y + cam_rect.h * 0.5) as f64,
+                &hud_cam_rows
+            ),
+            Some(Command::CameraNext)
+        );
+
         let s = Settings::parse(
             "sensitivity=NaN\ndead_zone=inf\nvolume=nan\ncamera=9\nfps=true\ninvert_pedals=true\nclutch_help=false",
         );
@@ -4163,12 +4733,12 @@ mod tests {
             ..Menu::default()
         };
         let rows = menu.rows(&ctx);
-        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.len(), 9);
         let import = rows
             .iter()
-            .position(|row| row.label.starts_with("IMPORT FROM"))
+            .position(|row| row.label.starts_with("IMPORT"))
             .unwrap();
-        let rect = row_rect(import, rows.len());
+        let rect = menu.row_rect_for(import, rows.len());
         assert_eq!(
             menu.press(rect.center_x() as f64, rect.y as f64 + 0.01, &rows),
             None
@@ -4177,7 +4747,7 @@ mod tests {
         let rows = menu.rows(&ctx);
         assert_eq!(rows.len(), IMPORT_STEPS.len() + 1);
         for (index, step) in IMPORT_STEPS.iter().enumerate() {
-            let rect = row_rect(index, rows.len());
+            let rect = menu.row_rect_for(index, rows.len());
             assert_eq!(
                 menu.press(rect.center_x() as f64, rect.y as f64 + 0.01, &rows),
                 None,
@@ -4564,8 +5134,12 @@ mod tests {
             Page::ContentCompatibility,
             Page::Settings,
             Page::Controls,
+            Page::SoundSettings,
+            Page::HudCameraSettings,
             Page::CameraEditor,
             Page::ControlsEditor,
+            Page::GamepadSettings,
+            Page::PacenoteHudSettings,
             Page::About,
             Page::Paused,
             Page::StageComplete,
