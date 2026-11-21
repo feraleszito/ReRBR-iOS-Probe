@@ -55,7 +55,7 @@ pub fn install(
         for path in geometry
             .materials
             .iter()
-            .map(|m| &m.path)
+            .filter_map(|m| m.path.as_ref())
             .collect::<BTreeSet<_>>()
         {
             if car.textures.contains_key(path) {

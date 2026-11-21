@@ -44,6 +44,7 @@ pub struct Geometry {
     pub body_points: Vec<Vec3>,
     pub drawn: Vec<String>,
     pub skipped: Vec<(String, String)>,
+    pub unresolved_faces: Vec<String>,
 }
 
 pub fn checked_worlds(elements: &[sgc::Element]) -> Result<HashMap<i32, [[f32; 4]; 3]>, String> {
@@ -144,6 +145,7 @@ fn convert_set(
         body_points: Vec::new(),
         drawn: Vec::new(),
         skipped: Vec::new(),
+        unresolved_faces: Vec::new(),
     };
     let mut found = [false; 4];
     for (k, side) in selection::SIDES.iter().enumerate() {
@@ -221,6 +223,13 @@ fn convert_set(
     }
     let mut door_l_acc = (Vec3::ZERO, 0usize);
     let mut door_r_acc = (Vec3::ZERO, 0usize);
+    let mesh_names: BTreeSet<_> = elements
+        .iter()
+        .filter_map(|element| match element {
+            sgc::Element::Mesh(mesh) => Some(mesh.node.name.as_str()),
+            _ => None,
+        })
+        .collect();
     for element in elements {
         let sgc::Element::Mesh(mesh) = element else {
             continue;
@@ -228,7 +237,7 @@ fn convert_set(
         let selected = if interior {
             selection::interior(&mesh.node.name, parts)
         } else {
-            selection::exterior(&mesh.node.name, parts)
+            selection::exterior_with_lamps(&mesh.node.name, parts, |name| mesh_names.contains(name))
         };
         let part = match selected {
             Ok(part) => part,
@@ -249,13 +258,6 @@ fn convert_set(
                 mesh.node.name,
                 mesh.faces.len(),
                 blocks.len()
-            ));
-        }
-        if !mesh.faces.is_empty() && blocks.is_empty() {
-            return Err(format!(
-                "CAR FACES: {} has {} mesh faces but 0 material bindings",
-                mesh.node.name,
-                mesh.faces.len(),
             ));
         }
         let mut remap = HashMap::new();
@@ -281,51 +283,62 @@ fn convert_set(
             }
         };
         for (face_idx, face) in mesh.faces.iter().enumerate() {
-            let block = blocks
-                .iter()
-                .find(|b| allow_material_override && b.material.eq_ignore_ascii_case(&face.name))
-                .or_else(|| blocks.get(face_idx))
-                .unwrap_or(&blocks[blocks.len() - 1]);
-            if !allow_material_override && face.name != block.material {
-                return Err(format!(
-                    "CAR MATERIAL: SGC/INI mismatch on {} (sgc='{}' ini='{}')",
-                    mesh.node.name, face.name, block.material
-                ));
-            }
-            let mat_name = if allow_material_override {
-                if materials::resolve(shaders, settings, &block.shader, &block.material).is_ok() {
-                    block.material.as_str()
+            let indexed = blocks.get(face_idx);
+            let resolved = if allow_material_override {
+                let matches =
+                    |block: &&car_parts::FaceBlock| block.material.eq_ignore_ascii_case(&face.name);
+                let block = indexed.filter(matches).or_else(|| {
+                    let mut named = blocks.iter().filter(matches);
+                    let first = named.next()?;
+                    named
+                        .all(|other| other.shader.eq_ignore_ascii_case(&first.shader))
+                        .then_some(first)
+                });
+                if let Some(block) = block {
+                    materials::resolve(shaders, settings, &block.shader, &block.material)
+                } else if let Some(block) = indexed.filter(|_| blocks.len() == mesh.faces.len()) {
+                    // A complete table can bind by index. Some exporters leave the
+                    // original editor material name in the SGC after editing the INI.
+                    materials::resolve(shaders, settings, &block.shader, &block.material).or_else(
+                        |_| materials::resolve(shaders, settings, &block.shader, &face.name),
+                    )
                 } else {
-                    face.name.as_str()
+                    Err("no corresponding FaceBlock".into())
                 }
             } else {
-                block.material.as_str()
+                let block = &blocks[face_idx];
+                if face.name != block.material {
+                    return Err(format!(
+                        "CAR MATERIAL: SGC/INI mismatch on {} (sgc='{}' ini='{}')",
+                        mesh.node.name, face.name, block.material
+                    ));
+                }
+                materials::resolve(shaders, settings, &block.shader, &block.material)
             };
-            let material = match result
+            let resolved = match resolved {
+                Ok(material) => material,
+                Err(err) if allow_material_override => {
+                    result.unresolved_faces.push(format!(
+                        "{} FaceBlock{face_idx} '{}': {err}",
+                        mesh.node.name, face.name
+                    ));
+                    Material::untextured()
+                }
+                Err(err) => return Err(err),
+            };
+            let material = result
                 .materials
                 .iter()
-                .position(|m| m.shader == block.shader && m.name == mat_name)
-            {
-                Some(i) => i,
-                None => match materials::resolve(shaders, settings, &block.shader, mat_name) {
-                    Ok(mat) => {
-                        let i = result.materials.len();
-                        result.materials.push(mat);
-                        i
-                    }
-                    Err(err)
-                        if allow_material_override
-                            && (mat_name.eq_ignore_ascii_case("Default Material")
-                                || block.shader.trim().is_empty()) =>
-                    {
-                        result
-                            .skipped
-                            .push((format!("{}::{mat_name}", mesh.node.name), err));
-                        continue;
-                    }
-                    Err(err) => return Err(err),
-                },
-            };
+                .position(|m| {
+                    m.shader == resolved.shader
+                        && m.name == resolved.name
+                        && m.pass == resolved.pass
+                })
+                .unwrap_or_else(|| {
+                    let index = result.materials.len();
+                    result.materials.push(resolved);
+                    index
+                });
             let start = face.start_index as usize;
             let triangles = if start.is_multiple_of(3) {
                 mesh.triangles
@@ -485,6 +498,7 @@ impl Geometry {
         }));
         self.draws.sort_by_key(|d| d.order);
         self.drawn.append(&mut other.drawn);
+        self.unresolved_faces.append(&mut other.unresolved_faces);
     }
     pub fn stats(&self, blended: Option<bool>) -> Stats {
         let mut vertices = BTreeSet::new();
@@ -497,7 +511,7 @@ impl Geometry {
                 continue;
             }
             vertices.extend(self.indices[d.indices.clone()].iter().copied());
-            textures.insert(&m.path);
+            textures.extend(m.path.as_ref());
             triangles += d.indices.len() / 3;
             draws += 1;
         }

@@ -177,10 +177,16 @@ impl Gpu {
             ..Default::default()
         });
         let mut groups = Vec::new();
+        let mut untextured = None;
         for m in &car.geometry.materials {
-            let texture = textures
-                .get(&m.path)
-                .ok_or("CAR GPU: required diffuse missing")?;
+            let texture = match &m.path {
+                Some(path) => textures
+                    .get(path)
+                    .ok_or("CAR GPU: required diffuse missing")?,
+                None => untextured.get_or_insert_with(|| {
+                    crate::harwood::solid(device, queue, [110, 110, 110, 255])
+                }),
+            };
             groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(&m.name),
                 layout: &material_layout,

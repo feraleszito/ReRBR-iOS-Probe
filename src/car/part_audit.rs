@@ -91,7 +91,9 @@ fn coincidence_of_switch_true_parts_with_body() {
         if !m.node.name.starts_with("e_") || m.node.name == "e_body" {
             continue;
         }
-        let Some(sec) = car_parts::section(&parts, &m.node.name) else { continue };
+        let Some(sec) = car_parts::section(&parts, &m.node.name) else {
+            continue;
+        };
         let v = car_space_vertices(m, &elements, &worlds);
         let lit_pair = m
             .node
@@ -130,11 +132,21 @@ fn audit_variant_selection_across_installed_cars_if_pc_present() {
     let mut missing_lamps: Vec<String> = Vec::new();
     let mut cars = 0usize;
     for dir in dirs {
-        let Some((sgc_path, ini_path)) = car_files(&dir) else { continue };
-        let Ok(bytes) = std::fs::read(&sgc_path) else { continue };
-        let Ok(elements) = sgc::parse(&bytes) else { continue };
-        let Ok(text) = std::fs::read(&ini_path) else { continue };
-        let Ok(parts) = ini::parse(&String::from_utf8_lossy(&text)) else { continue };
+        let Some((sgc_path, ini_path)) = car_files(&dir) else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&sgc_path) else {
+            continue;
+        };
+        let Ok(elements) = sgc::parse(&bytes) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read(&ini_path) else {
+            continue;
+        };
+        let Ok(parts) = ini::parse(&String::from_utf8_lossy(&text)) else {
+            continue;
+        };
         cars += 1;
         let folder = dir.file_name().unwrap().to_string_lossy().to_string();
         let meshes: Vec<&str> = elements
@@ -144,10 +156,14 @@ fn audit_variant_selection_across_installed_cars_if_pc_present() {
                 _ => None,
             })
             .collect();
-        let drawn = |n: &str| selection::exterior(n, &parts).is_ok();
+        let mesh_names: std::collections::BTreeSet<_> = meshes.iter().copied().collect();
+        let drawn = |n: &str| {
+            selection::exterior_with_lamps(n, &parts, |name| mesh_names.contains(name)).is_ok()
+        };
         for n in &meshes {
             if n.starts_with("e_")
-                && selection::exterior(n, &parts) == Err("optional variant deselected by Switch=true")
+                && selection::exterior(n, &parts)
+                    == Err("optional variant deselected by Switch=true")
             {
                 *hidden_by_name.entry((*n).to_string()).or_default() += 1;
             }
@@ -160,7 +176,11 @@ fn audit_variant_selection_across_installed_cars_if_pc_present() {
         }
         for base in ["e_light_lf", "e_light_rf", "e_light_lb", "e_light_rb"] {
             let lit = format!("{base}_lit");
-            if meshes.contains(&base) && meshes.contains(&lit.as_str()) && !drawn(base) && !drawn(&lit) {
+            if meshes.contains(&base)
+                && meshes.contains(&lit.as_str())
+                && !drawn(base)
+                && !drawn(&lit)
+            {
                 missing_lamps.push(format!("{folder}: {base}"));
             }
         }
@@ -185,15 +205,31 @@ fn audit_variant_selection_across_installed_cars_if_pc_present() {
 #[test]
 fn bmw_m3_e30_draws_one_variant_per_group_if_pc_present() {
     let Some(root) = rbr_root() else { return };
-    let Some((_, ini_path)) = car_files(&root.join("Cars").join("bmw_m3_e30")) else { return };
+    let Some((_, ini_path)) = car_files(&root.join("Cars").join("bmw_m3_e30")) else {
+        return;
+    };
     let parts = ini::parse(&String::from_utf8_lossy(&std::fs::read(ini_path).unwrap())).unwrap();
     let drawn = |n: &str| selection::exterior(n, &parts).is_ok();
     // Structural panels remain.
-    for n in ["e_body", "e_door_l", "e_door_r", "e_bonnet", "e_bumper_f", "e_bumper_b", "e_wing", "e_exhaust"] {
+    for n in [
+        "e_body",
+        "e_door_l",
+        "e_door_r",
+        "e_bonnet",
+        "e_bumper_f",
+        "e_bumper_b",
+        "e_wing",
+        "e_exhaust",
+    ] {
         assert!(drawn(n), "{n} must stay drawn");
     }
     // Optional variants: exactly the Switch=false member.
-    assert!(drawn("e_wing_evo1") && !drawn("e_wing_evo2a") && !drawn("e_wing_evo2b") && !drawn("e_wing_evo2abig"));
+    assert!(
+        drawn("e_wing_evo1")
+            && !drawn("e_wing_evo2a")
+            && !drawn("e_wing_evo2b")
+            && !drawn("e_wing_evo2abig")
+    );
     assert!(drawn("e_racingmirror") && !drawn("e_stockmirror"));
     assert!(drawn("e_bumperstrip_black") && !drawn("e_bumperstrip_mapped"));
     assert!(drawn("e_light_lf") && !drawn("e_light_lf_lit"));
@@ -216,21 +252,35 @@ fn bbox_of_exterior_parts() {
     let worlds = sgc::chained_worlds(&elements);
     for e in &elements {
         let sgc::Element::Mesh(m) = e else { continue };
-        if !m.node.name.starts_with("e_") || m.node.name.contains("wheel") || m.node.name.contains("brakedisc") {
+        if !m.node.name.starts_with("e_")
+            || m.node.name.contains("wheel")
+            || m.node.name.contains("brakedisc")
+        {
             continue;
         }
-        let Some(sec) = car_parts::section(&parts, &m.node.name) else { continue };
+        let Some(sec) = car_parts::section(&parts, &m.node.name) else {
+            continue;
+        };
         let v = car_space_vertices(m, &elements, &worlds);
         if v.is_empty() {
             continue;
         }
-        let min = v.iter().fold(rerbr_render_core::Vec3::splat(1e9), |a, b| a.min(*b));
-        let max = v.iter().fold(rerbr_render_core::Vec3::splat(-1e9), |a, b| a.max(*b));
+        let min = v
+            .iter()
+            .fold(rerbr_render_core::Vec3::splat(1e9), |a, b| a.min(*b));
+        let max = v
+            .iter()
+            .fold(rerbr_render_core::Vec3::splat(-1e9), |a, b| a.max(*b));
         println!(
             "BBOX {:<24} sw={:<5} min=({:>5.2},{:>5.2},{:>5.2}) max=({:>5.2},{:>5.2},{:>5.2})",
             m.node.name,
             sec.get("Switch").unwrap_or("-"),
-            min.x, min.y, min.z, max.x, max.y, max.z
+            min.x,
+            min.y,
+            min.z,
+            max.x,
+            max.y,
+            max.z
         );
     }
 }

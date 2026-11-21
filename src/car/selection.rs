@@ -38,6 +38,35 @@ pub fn shown_at_start(part: &Section) -> bool {
 pub fn exterior<'a>(name: &str, parts: &'a [Section]) -> Result<&'a Section, &'static str> {
     part_set(name, parts, false)
 }
+
+pub fn exterior_with_lamps<'a>(
+    name: &str,
+    parts: &'a [Section],
+    has_mesh: impl Fn(&str) -> bool,
+) -> Result<&'a Section, &'static str> {
+    let selected = exterior(name, parts);
+    if !name.starts_with("e_light_") {
+        return selected;
+    }
+    if let Some(base) = name.strip_suffix("_lit") {
+        if selected.is_ok() && has_mesh(base) && exterior(base, parts).is_ok() {
+            return Err("unlit lamp already selected");
+        }
+    } else if matches!(
+        name,
+        "e_light_lf" | "e_light_rf" | "e_light_lb" | "e_light_rb"
+    ) && selected == Err("optional variant deselected by Switch=true")
+    {
+        let lit = format!("{name}_lit");
+        if has_mesh(&lit) && exterior(&lit, parts) == selected {
+            // Some packs disable both states of a standard lamp. Keep its unlit mesh.
+            return car_parts::section(parts, name)
+                .filter(|part| !car_parts::face_blocks(part).is_empty())
+                .ok_or("no headlamp face blocks");
+        }
+    }
+    selected
+}
 pub fn interior<'a>(name: &str, parts: &'a [Section]) -> Result<&'a Section, &'static str> {
     part_set(name, parts, true)
 }

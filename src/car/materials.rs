@@ -41,9 +41,20 @@ pub fn list_for(shader: &str, opacity: bool) -> u8 {
 pub struct Material {
     pub shader: String,
     pub name: String,
-    pub path: String,
+    pub path: Option<String>,
     pub pass: Pass,
     pub list: u8,
+}
+impl Material {
+    pub fn untextured() -> Self {
+        Self {
+            shader: String::new(),
+            name: "Unresolved car material".into(),
+            path: None,
+            pass: Pass::Opaque,
+            list: 1,
+        }
+    }
 }
 fn resolved_diffuse_and_opacity<'a>(shaders: &'a [Section], name: &str) -> Option<(&'a str, bool)> {
     if let Some(path) = car_parts::diffuse_path(shaders, name) {
@@ -96,7 +107,7 @@ pub fn resolve(
     Ok(Material {
         shader: effective_shader.into(),
         name: name.into(),
-        path: path.replace('/', "\\").to_ascii_lowercase(),
+        path: Some(path.replace('/', "\\").to_ascii_lowercase()),
         pass: pass_for(effective_shader, opacity),
         list: list_for(effective_shader, opacity),
     })
@@ -126,15 +137,15 @@ mod tests {
         )
         .expect("space/underscore scope should resolve from car's own shader bitmap");
         assert_eq!(
-            parts.path,
-            "cars\\yaris_rally2\\textures\\yaris_rally2_internal_parts.dds"
+            parts.path.as_deref(),
+            Some("cars\\yaris_rally2\\textures\\yaris_rally2_internal_parts.dds")
         );
 
         let body = resolve(&shaders, &settings, "CarTire", "internal::body")
             .expect("declared TextureSet0 internal_body.dds should resolve without fallback");
         assert_eq!(
-            body.path,
-            "cars\\yaris_rally2\\textures\\yaris_rally2_internal_body.dds"
+            body.path.as_deref(),
+            Some("cars\\yaris_rally2\\textures\\yaris_rally2_internal_body.dds")
         );
     }
 }

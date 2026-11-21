@@ -846,7 +846,11 @@ pub(crate) fn upload(
     Ok(texture.create_view(&Default::default()))
 }
 
-fn solid(device: &wgpu::Device, queue: &wgpu::Queue, color: [u8; 4]) -> wgpu::TextureView {
+pub(crate) fn solid(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    color: [u8; 4],
+) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("harwood untextured dummy"),
         size: wgpu::Extent3d {

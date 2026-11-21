@@ -79,6 +79,69 @@ fn geometry() -> mesh::Geometry {
     let (e, p, s, c) = fixture();
     mesh::convert(&e, &p, &s, &c).unwrap()
 }
+
+#[test]
+fn auxiliary_lamp_faces_keep_their_own_materials_and_unmatched_geometry() {
+    let (mut elements, mut parts, mut shaders, mut settings) = fixture();
+    let mut lamp = triangle(node("e_aux_lamp", 6, 0.0, 0.5, 1.0));
+    for (index, name) in ["glass", "paint", "unmapped"].into_iter().enumerate() {
+        let mut face = lamp.faces[0].clone();
+        face.name = name.into();
+        face.start_index = (3 * index) as u32;
+        if index != 0 {
+            lamp.triangles.push([0, 1, 2]);
+            lamp.faces.push(face);
+        } else {
+            lamp.faces[0] = face;
+        }
+    }
+    elements.push(sgc::Element::Mesh(lamp));
+    parts.extend(ini::parse("[e_aux_lamp]\nFaceBlock0_Shader=CarTextureNoDirt\nFaceBlock0_Material=paint\nFaceBlock1_Shader=CarLight\nFaceBlock1_Material=glass\n").unwrap());
+    shaders.extend(ini::parse("[glass]\nOpacityChannel=true\n[glass_diffuse_bitmap]\nFilename=lamp.dds\n[TSDefault]\nlamp.dds=Cars/fixture/lamp.dds\n").unwrap());
+    settings.extend(ini::parse("[CarLight]\n").unwrap());
+
+    let geometry = mesh::convert_for_mode(&elements, &parts, &shaders, &settings, true).unwrap();
+    let material = |first| {
+        let draw = geometry
+            .draws
+            .iter()
+            .find(|d| d.indices.start == first)
+            .unwrap();
+        &geometry.materials[draw.material]
+    };
+    assert_eq!(
+        material(15).path.as_deref(),
+        Some("cars\\fixture\\lamp.dds")
+    );
+    assert_eq!(material(15).pass, materials::Pass::Blended);
+    assert_eq!(
+        material(18).path.as_deref(),
+        Some("cars\\fixture\\base.dds")
+    );
+    assert!(material(21).path.is_none());
+    assert_eq!(geometry.stats(None).triangles, 8);
+    assert_eq!(geometry.unresolved_faces.len(), 1);
+    assert!(geometry.unresolved_faces[0].contains("e_aux_lamp FaceBlock2"));
+}
+
+#[test]
+fn showroom_texture_uses_only_the_selected_car_directory() {
+    let root = std::env::temp_dir().join(format!("rerbr-showroom-texture-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("Cars/Selected/textures")).unwrap();
+    std::fs::create_dir_all(root.join("Cars/Other/textures")).unwrap();
+    let local = root.join("Cars/Selected/textures/paint.dds");
+    std::fs::write(&local, b"selected").unwrap();
+    std::fs::write(root.join("Cars/Other/textures/paint.dds"), b"other").unwrap();
+
+    let foreign = "Cars/Other/textures/paint.dds";
+    let (resolved, bytes) = read_showroom_texture(&root, "Cars/Selected", foreign).unwrap();
+    assert_eq!(resolved, "Cars/Selected/textures/paint.dds");
+    assert_eq!(bytes, b"selected");
+    assert!(read_showroom_file(&root, "Cars/Selected", foreign, 128).is_err());
+    std::fs::remove_file(local).unwrap();
+    assert!(read_showroom_texture(&root, "Cars/Selected", foreign).is_err());
+    assert!(read_showroom_texture(&root, "Cars/Selected", "../paint.dds").is_err());
+}
 pub(super) fn path_fixture(slope: f32) -> placement::ChasePath {
     let p = [[-20.0, -30.0], [-20.0, 130.0], [20.0, 130.0], [20.0, -30.0]]
         .map(|[x, z]| Vec3::new(x, z * slope, z));
