@@ -151,6 +151,32 @@ fn auxiliary_lamp_faces_keep_their_own_materials_and_unmatched_geometry() {
 }
 
 #[test]
+fn merged_face_uses_first_slot_only_when_surplus_slots_agree_on_material() {
+    let (mut elements, mut parts, shaders, mut settings) = fixture();
+    let sgc::Element::Mesh(body) = &mut elements[1] else {
+        panic!("fixture body mesh missing");
+    };
+    body.faces[0].name = "editor alias".into();
+    let part = &mut parts[0];
+    part.entries.extend([
+        ("FaceBlock1_Shader".into(), "CarRim".into()),
+        ("FaceBlock1_Material".into(), "PAINT".into()),
+    ]);
+    settings.extend(ini::parse("[CarRim]\n").unwrap());
+    let converted = mesh::convert_for_mode(&elements, &parts, &shaders, &settings, true).unwrap();
+    let body_draw = converted.draws.iter().find(|draw| draw.slot == 0).unwrap();
+    let material = &converted.materials[body_draw.material];
+    assert_eq!(material.path.as_deref(), Some("cars\\fixture\\base.dds"));
+    assert_eq!(material.shader, "CarTextureNoDirt");
+    assert!(converted.unresolved_faces.is_empty());
+
+    parts[0].entries.last_mut().unwrap().1 = "different material".into();
+    let converted = mesh::convert_for_mode(&elements, &parts, &shaders, &settings, true).unwrap();
+    assert_eq!(converted.unresolved_faces.len(), 1);
+    assert_eq!(converted.stats(None).triangles, 5);
+}
+
+#[test]
 fn showroom_texture_uses_only_the_selected_car_directory() {
     let root = std::env::temp_dir().join(format!("rerbr-showroom-texture-{}", std::process::id()));
     std::fs::create_dir_all(root.join("Cars/Selected/textures")).unwrap();

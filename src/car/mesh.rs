@@ -252,6 +252,19 @@ fn convert_set(
         }
         let normals = matrix.inverse().transpose();
         let blocks = car_parts::face_blocks(part);
+        // Some exports merge every triangle into one SGC face but retain the
+        // old INI slots. When all slots still name the same material, FaceBlock0
+        // provides its shader without borrowing a material from another face.
+        let merged_material = match (mesh.faces.as_slice(), blocks.split_first()) {
+            ([face], Some((first, rest))) => {
+                face.start_index == 0
+                    && face.prim_count as usize == mesh.triangles.len()
+                    && rest
+                        .iter()
+                        .all(|block| block.material.eq_ignore_ascii_case(&first.material))
+            }
+            _ => false,
+        };
         if !allow_material_override && blocks.len() != mesh.faces.len() {
             return Err(format!(
                 "CAR FACES: {} has {} mesh faces but {} material bindings",
@@ -296,9 +309,11 @@ fn convert_set(
                 });
                 if let Some(block) = block {
                     materials::resolve(shaders, settings, &block.shader, &block.material)
-                } else if let Some(block) = indexed.filter(|_| blocks.len() == mesh.faces.len()) {
-                    // A complete table can bind by index. Some exporters leave the
-                    // original editor material name in the SGC after editing the INI.
+                } else if let Some(block) =
+                    indexed.filter(|_| blocks.len() == mesh.faces.len() || merged_material)
+                {
+                    // Some exporters leave the original editor material name in
+                    // the SGC after editing the INI.
                     materials::resolve(shaders, settings, &block.shader, &block.material).or_else(
                         |_| materials::resolve(shaders, settings, &block.shader, &face.name),
                     )
