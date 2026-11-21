@@ -339,6 +339,7 @@ fn convert_set(
                     result.materials.push(resolved);
                     index
                 });
+            let textured = result.materials[material].path.is_some();
             let start = face.start_index as usize;
             let triangles = if start.is_multiple_of(3) {
                 mesh.triangles
@@ -355,6 +356,12 @@ fn convert_set(
                         .vertices
                         .get(i)
                         .ok_or("CAR INDEX: outside SGC vertices")?;
+                    let uv = match mesh.uvs.get(i) {
+                        Some(uv) => *uv,
+                        // A solid surface has no UV dependency.
+                        None if !textured => [0.0; 2],
+                        None => return Err("CAR UV: missing original coordinates".into()),
+                    };
                     let id = if let Some(&id) = remap.get(&i) {
                         id
                     } else {
@@ -362,11 +369,6 @@ fn convert_set(
                         let normal = normals
                             .transform_vector3(Vec3::from(v.normal))
                             .normalize_or_zero();
-                        let uv = mesh
-                            .uvs
-                            .get(i)
-                            .copied()
-                            .ok_or("CAR UV: missing original coordinates")?;
                         if !p.is_finite()
                             || p.abs().max_element() > 50.0
                             || !normal.is_finite()

@@ -95,6 +95,8 @@ fn auxiliary_lamp_faces_keep_their_own_materials_and_unmatched_geometry() {
             lamp.faces[0] = face;
         }
     }
+    lamp.vertices.extend_from_within(..3);
+    lamp.triangles[2] = [3, 4, 5];
     elements.push(sgc::Element::Mesh(lamp));
     parts.extend(ini::parse("[e_aux_lamp]\nFaceBlock0_Shader=CarTextureNoDirt\nFaceBlock0_Material=paint\nFaceBlock1_Shader=CarLight\nFaceBlock1_Material=glass\n").unwrap());
     shaders.extend(ini::parse("[glass]\nOpacityChannel=true\n[glass_diffuse_bitmap]\nFilename=lamp.dds\n[TSDefault]\nlamp.dds=Cars/fixture/lamp.dds\n").unwrap());
