@@ -20,11 +20,12 @@ pub fn collision_triangles_for(
         .collect())
 }
 use rbr_gameplay::{
-    car_damage::{level as damage_level, CarriedDamage, Rules as DamageRules},
+    car_damage::{level as damage_level, reset_damage, CarriedDamage, Rules as DamageRules},
     mode::{ModeEnd, ModeRules, StepView},
     stage::{Stage, State, NGP_LOAD_SUBSTEPS},
     weather::{self, Draws, Preset, Season},
 };
+pub use rbr_gameplay::race_options::DamageLevel;
 use rbr_hybrid::pure::{self, Playback};
 use rbr_physics::rigid_body::layout as body;
 use rbr_school::{lesson::Lesson, step::SchoolEvent, SchoolRun};
@@ -100,6 +101,36 @@ pub struct BootOverrides {
     pub tyre: Option<u32>,
     /// Optional serialized `CarriedDamage` bytes carried into the stage.
     pub carried_damage_bytes: Option<Vec<u8>>,
+    /// Use the original damage handler's selected severity for this session.
+    pub damage_level: Option<DamageLevel>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DamageGroup {
+    Engine,
+    Transmission,
+    Suspension,
+    BodyElectrics,
+    Tyres,
+}
+
+impl DamageGroup {
+    fn parts(self) -> impl Iterator<Item = u32> {
+        let (main, wheel): (&[u32], &[u32]) = match self {
+            Self::Engine => (&[10, 11, 12, 13, 20, 21, 22, 23], &[]),
+            Self::Transmission => (&[30, 31, 32, 33, 35, 36, 90, 91, 92], &[]),
+            Self::Suspension => (&[37], &[0, 1, 2, 3, 4, 7, 9, 10]),
+            Self::BodyElectrics => (&[28, 29, 34, 40, 41, 42, 43, 44, 45, 46, 47, 50, 51, 52], &[]),
+            Self::Tyres => (&[], &[5]),
+        };
+        main.iter().copied().chain(wheel.iter().flat_map(|&part| (0..4).map(move |w| 101 + 20 * w + part)))
+    }
+
+    pub fn repair(self, damage: &mut CarriedDamage) {
+        for part in self.parts() {
+            reset_damage(damage, part, DamageRules::Ngp);
+        }
+    }
 }
 
 /// Mechanical damage snapshot extracted directly from RBR/NGP `CarriedDamage` (`Rules::Ngp`).
@@ -137,33 +168,15 @@ fn health_from_max_severity(max_sev: u8) -> u8 {
 /// Summarizes a `CarriedDamage` buffer using NGP damage rules (`rbr_gameplay::car_damage`).
 pub fn summarize_carried_damage(d: &CarriedDamage) -> DamageSummary {
     let sev = |id: u32| damage_level(d, id, DamageRules::Ngp);
-    let max_of = |ids: &[u32]| ids.iter().copied().map(sev).max().unwrap_or(0);
-
-    let engine_max = max_of(&[10, 11, 12, 13, 20, 21, 22, 23]);
-    let trans_max = max_of(&[30, 31, 32, 33, 35, 36, 90, 91, 92]);
-
-    let mut susp_max = sev(37);
-    let mut ngp_tyre_damage_levels = [0u8; 4];
-    let mut ngp_wheel_damage_levels = [0u8; 4];
-    for w in 0..4u32 {
-        let base = 101 + 20 * w;
-        for part in [0u32, 1, 2, 3, 7, 9, 10] {
-            susp_max = susp_max.max(sev(base + part));
-        }
-        ngp_wheel_damage_levels[w as usize] = sev(base + 4);
-        ngp_tyre_damage_levels[w as usize] = sev(base + 5);
-        susp_max = susp_max.max(ngp_wheel_damage_levels[w as usize]);
-    }
-
-    let body_max = max_of(&[28, 29, 34, 40, 41, 42, 43, 44, 45, 46, 47, 50, 51, 52]);
+    let health = |group: DamageGroup| health_from_max_severity(group.parts().map(sev).max().unwrap_or(0));
 
     DamageSummary {
-        engine_pct: health_from_max_severity(engine_max),
-        transmission_pct: health_from_max_severity(trans_max),
-        suspension_pct: health_from_max_severity(susp_max),
-        body_electrics_pct: health_from_max_severity(body_max),
-        ngp_tyre_damage_levels,
-        ngp_wheel_damage_levels,
+        engine_pct: health(DamageGroup::Engine),
+        transmission_pct: health(DamageGroup::Transmission),
+        suspension_pct: health(DamageGroup::Suspension),
+        body_electrics_pct: health(DamageGroup::BodyElectrics),
+        ngp_tyre_damage_levels: std::array::from_fn(|w| sev(106 + 20 * w as u32)),
+        ngp_wheel_damage_levels: std::array::from_fn(|w| sev(105 + 20 * w as u32)),
         raw_bytes: d.to_bytes(),
     }
 }
@@ -404,6 +417,9 @@ impl Session {
             .filter(|&t| t <= 6)
             .unwrap_or_else(|| boot::default_tyre(boot::surface(selection.stage.original_map)));
         let mut race = boot::Race::quick_race(selection.stage.original_map, slot, tyre, weather, physics_archive);
+        if let Some(level) = aids.overrides.damage_level {
+            race.options.damage = level;
+        }
         if let Some(damage_bytes) = aids.overrides.carried_damage_bytes.as_deref() {
             if let Some(carried) = CarriedDamage::from_bytes(damage_bytes) {
                 race.damage = Some(carried);

@@ -312,15 +312,13 @@ impl Runtime {
         if !self.active_career_stage {
             return rerbr_sim::drive::BootOverrides::default();
         }
-        let Some(p) = self.career.profile.as_ref() else {
-            return rerbr_sim::drive::BootOverrides::default();
-        };
-        let Some(st) = p.vehicle_state(&self.selection.vehicle.id) else {
-            return rerbr_sim::drive::BootOverrides::default();
-        };
+        let state = self.career.profile.as_ref().and_then(|profile| {
+            profile.vehicle_state(&self.selection.vehicle.id)
+        });
         rerbr_sim::drive::BootOverrides {
-            tyre: Some(st.installed_tyre.rbr_tyre_id()),
-            carried_damage_bytes: st.condition.carried_damage_bytes(),
+            tyre: state.map(|state| state.installed_tyre.rbr_tyre_id()),
+            carried_damage_bytes: state.and_then(|state| state.condition.carried_damage_bytes()),
+            damage_level: Some(rerbr_sim::drive::DamageLevel::Realistic),
         }
     }
 

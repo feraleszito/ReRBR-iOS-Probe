@@ -6,6 +6,7 @@
 
 use super::content_manager::{DriveCapability, VehicleEntry};
 use rerbr_content::StageDescriptor;
+use rerbr_sim::{drive::{summarize_carried_damage, DamageGroup}, rbr_gameplay::car_damage::CarriedDamage};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1277,8 +1278,54 @@ impl VehicleCondition {
     }
 
     pub fn carried_damage_bytes(&self) -> Option<Vec<u8>> {
+        Some(self.damage_for_stage()?.to_bytes())
+    }
+
+    fn damage_for_stage(&self) -> Option<CarriedDamage> {
+        let mut carried = self.decode_carried_damage()?;
+        let summary = summarize_carried_damage(&carried);
+        // Older saves recorded the paid repair only in the condition percentages.
+        for (stored, measured, group) in [
+            (self.engine_pct, summary.engine_pct, DamageGroup::Engine),
+            (self.transmission_pct, summary.transmission_pct, DamageGroup::Transmission),
+            (self.suspension_pct, summary.suspension_pct, DamageGroup::Suspension),
+            (self.body_electrics_pct, summary.body_electrics_pct, DamageGroup::BodyElectrics),
+        ] {
+            if stored == 100 && measured < 100 {
+                group.repair(&mut carried);
+            }
+        }
+        Some(carried)
+    }
+
+    fn decode_carried_damage(&self) -> Option<CarriedDamage> {
         let hex = self.carried_damage_hex.as_deref()?;
-        decode_hex(hex)
+        CarriedDamage::from_bytes(&decode_hex(hex)?)
+    }
+
+    fn repair_mechanical(&mut self, components: &[RepairComponent]) {
+        let mut damage = self.damage_for_stage();
+        for component in components {
+            let (health, group) = match component {
+                RepairComponent::Engine => (&mut self.engine_pct, DamageGroup::Engine),
+                RepairComponent::Transmission => (&mut self.transmission_pct, DamageGroup::Transmission),
+                RepairComponent::Suspension => (&mut self.suspension_pct, DamageGroup::Suspension),
+                RepairComponent::BodyElectrics => (&mut self.body_electrics_pct, DamageGroup::BodyElectrics),
+            };
+            *health = 100;
+            if let Some(damage) = damage.as_mut() {
+                group.repair(damage);
+            }
+        }
+        self.carried_damage_hex = damage.map(|damage| encode_hex(&damage.to_bytes()));
+    }
+
+    fn replace_tyres(&mut self) {
+        self.tyre_wear_pct = 0;
+        if let Some(mut damage) = self.decode_carried_damage() {
+            DamageGroup::Tyres.repair(&mut damage);
+            self.carried_damage_hex = Some(encode_hex(&damage.to_bytes()));
+        }
     }
 }
 
@@ -1332,13 +1379,14 @@ impl RepairComponent {
         }
     }
 
-    /// Base USD cost per 1% of missing health on a Regional (`1.0x`) vehicle.
+    /// Base USD per point of Regional damage. Full restoration costs $2,500,
+    /// compared with $4,500 for a Regional win before the difficulty adjustment.
     fn base_usd_per_missing_pct(self) -> u64 {
         match self {
-            Self::Engine => 28,
-            Self::Transmission => 24,
-            Self::Suspension => 22,
-            Self::BodyElectrics => 14,
+            Self::Engine => 9,
+            Self::Transmission => 7,
+            Self::Suspension => 6,
+            Self::BodyElectrics => 3,
         }
     }
 }
@@ -2081,15 +2129,7 @@ impl CareerProfile {
         }
         self.cash_usd -= cost;
         let state = self.ensure_vehicle_state(&id);
-        match component {
-            RepairComponent::Engine => state.condition.engine_pct = 100,
-            RepairComponent::Transmission => state.condition.transmission_pct = 100,
-            RepairComponent::Suspension => state.condition.suspension_pct = 100,
-            RepairComponent::BodyElectrics => state.condition.body_electrics_pct = 100,
-        }
-        if !state.condition.needs_mechanical_repair() {
-            state.condition.carried_damage_hex = None;
-        }
+        state.condition.repair_mechanical(&[component]);
         let now = unix_now_s();
         self.last_saved_unix_s = now;
         self.transactions.push(Transaction {
@@ -2123,11 +2163,7 @@ impl CareerProfile {
         }
         self.cash_usd -= cost;
         let state = self.ensure_vehicle_state(&id);
-        state.condition.engine_pct = 100;
-        state.condition.transmission_pct = 100;
-        state.condition.suspension_pct = 100;
-        state.condition.body_electrics_pct = 100;
-        state.condition.carried_damage_hex = None;
+        state.condition.repair_mechanical(&RepairComponent::ALL);
         let now = unix_now_s();
         self.last_saved_unix_s = now;
         self.transactions.push(Transaction {
@@ -2159,7 +2195,7 @@ impl CareerProfile {
         self.cash_usd -= cost;
         let state = self.ensure_vehicle_state(&id);
         state.installed_tyre = compound;
-        state.condition.tyre_wear_pct = 0;
+        state.condition.replace_tyres();
         let now = unix_now_s();
         self.last_saved_unix_s = now;
         self.transactions.push(Transaction {
@@ -2547,11 +2583,7 @@ impl CareerProfile {
             }
             self.cash_usd -= cost;
             let state = self.ensure_vehicle_state(&v_id);
-            state.condition.engine_pct = 100;
-            state.condition.transmission_pct = 100;
-            state.condition.suspension_pct = 100;
-            state.condition.body_electrics_pct = 100;
-            state.condition.carried_damage_hex = None;
+            state.condition.repair_mechanical(&RepairComponent::ALL);
             let now = unix_now_s();
             self.last_saved_unix_s = now;
             self.transactions.push(Transaction {
@@ -4568,6 +4600,71 @@ mod tests {
                 .overall_pct(),
             100
         );
+    }
+
+    #[test]
+    fn authentic_repairs_survive_roundtrip_and_leave_unpaid_damage_intact() {
+        let mut carried = CarriedDamage::default();
+        carried.set(0x3AA0, 1.0f32.to_bits());
+        for group in [DamageGroup::Engine, DamageGroup::Transmission, DamageGroup::Suspension, DamageGroup::BodyElectrics] {
+            group.repair(&mut carried);
+        }
+        carried.set(0x3AF4, 0); // Engine flag
+        carried.set(0x3A98, 0); // Steering flag
+        for word in 0..8 {
+            carried.set(0x3C18 + 4 * word, 0.7f32.to_bits()); // LF wheel
+            carried.set(0x3D04 + 4 * word, 0.7f32.to_bits()); // LF tyre
+        }
+        let damaged = summarize_carried_damage(&carried);
+        assert!(damaged.engine_pct < 100 && damaged.suspension_pct < 100);
+        let mut condition = VehicleCondition {
+            engine_pct: damaged.engine_pct,
+            suspension_pct: damaged.suspension_pct,
+            carried_damage_hex: Some(encode_hex(&damaged.raw_bytes)),
+            ..VehicleCondition::factory_new()
+        };
+        let read = |c: &VehicleCondition| {
+            let bytes = c.carried_damage_bytes().unwrap();
+            summarize_carried_damage(&CarriedDamage::from_bytes(&bytes).unwrap())
+        };
+
+        let mut legacy = condition.clone();
+        legacy.suspension_pct = 100;
+        assert_eq!(read(&legacy).suspension_pct, 100);
+        assert_eq!(read(&legacy).engine_pct, damaged.engine_pct);
+
+        condition.repair_mechanical(&[RepairComponent::Suspension]);
+        let repaired = read(&condition);
+        assert_eq!(repaired.suspension_pct, 100);
+        assert_eq!(repaired.ngp_wheel_damage_levels, [0; 4]);
+        assert_eq!(repaired.engine_pct, damaged.engine_pct);
+        assert_eq!(repaired.ngp_tyre_damage_levels, damaged.ngp_tyre_damage_levels);
+        condition.replace_tyres();
+        assert_eq!(read(&condition).ngp_tyre_damage_levels, [0; 4]);
+        assert_eq!(read(&condition).engine_pct, damaged.engine_pct);
+        condition.repair_mechanical(&RepairComponent::ALL);
+        assert_eq!(read(&condition).engine_pct, 100);
+    }
+
+    #[test]
+    fn repair_quotes_scale_by_severity_component_and_career_tier() {
+        let mut condition = VehicleCondition::factory_new();
+        condition.engine_pct = 80;
+        condition.transmission_pct = 80;
+        condition.suspension_pct = 80;
+        condition.body_electrics_pct = 80;
+        let tyre = TyreCompound::GravelHard;
+        let regional = ServiceQuote::for_condition(&condition, CareerTier::Regional, tyre);
+        let historic = ServiceQuote::for_condition(&condition, CareerTier::Historic, tyre);
+        assert_eq!(regional.total_repair_cost_usd, 500);
+        assert_eq!(historic.total_repair_cost_usd, 1_250);
+        assert!(regional.engine_cost_usd > regional.transmission_cost_usd);
+        assert!(regional.transmission_cost_usd > regional.suspension_cost_usd);
+        assert!(regional.suspension_cost_usd > regional.body_electrics_cost_usd);
+        assert!(regional.total_repair_cost_usd < REGIONAL_BASE_PRIZES_USD[4]);
+        assert!(historic.total_repair_cost_usd < HISTORIC_BASE_PRIZES_USD[4]);
+        condition.engine_pct = 60;
+        assert!(ServiceQuote::for_condition(&condition, CareerTier::Regional, tyre).total_repair_cost_usd > regional.total_repair_cost_usd);
     }
 
     #[test]
