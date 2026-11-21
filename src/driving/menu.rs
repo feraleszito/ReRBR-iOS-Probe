@@ -919,11 +919,9 @@ impl Menu {
             return Vec::new();
         };
         ctx.content
-            .vehicles
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| profile.owns_vehicle(&e.descriptor.id))
-            .map(|(i, _)| i)
+            .browse_vehicle_indices(|entry| profile.owns_vehicle(&entry.descriptor.id))
+            .into_iter()
+            .filter(|&i| profile.owns_vehicle(&ctx.content.vehicles[i].descriptor.id))
             .collect()
     }
     pub fn rows(&self, ctx: &Context) -> Vec<Row> {

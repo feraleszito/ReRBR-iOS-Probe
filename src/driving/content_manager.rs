@@ -474,6 +474,7 @@ impl Catalog {
             );
         }
         catalog.index_vehicle_aliases();
+        catalog.index_numbered_vehicle_copies(&rbr_root);
         catalog
     }
 
@@ -509,6 +510,30 @@ impl Catalog {
             if first != index {
                 self.vehicle_aliases.insert(index, first);
             }
+        }
+    }
+
+    fn index_numbered_vehicle_copies(&mut self, root: &Path) {
+        let mut by_model = BTreeMap::new();
+        for (index, entry) in self.vehicles.iter().enumerate() {
+            if !entry.has_3d_model || entry.using_fallback_model || entry.model_missing {
+                continue;
+            }
+            let d = &entry.descriptor;
+            let model = d.model.replace('\\', "/").to_ascii_lowercase();
+            if d.rsf_pack.is_none()
+                && entry.classification == VehicleClassification::VisualInspectionOnly
+            {
+                if let Some(original) = unnumbered_model_path(&model) {
+                    if let Some(&first) = by_model.get(&original) {
+                        let first = *self.vehicle_aliases.get(&first).unwrap_or(&first);
+                        if identical_visual_copy(root, &self.vehicles[first].descriptor, d) {
+                            self.vehicle_aliases.insert(index, first);
+                        }
+                    }
+                }
+            }
+            by_model.entry(model).or_insert(index);
         }
     }
 
@@ -572,6 +597,91 @@ impl Catalog {
     }
 }
 
+fn unnumbered_model_path(model: &str) -> Option<String> {
+    let (directory, file) = model.rsplit_once('/')?;
+    let (base, suffix) = directory.rsplit_once(' ')?;
+    suffix.parse::<u32>().ok().filter(|&number| number >= 2)?;
+    Some(format!("{base}/{file}"))
+}
+
+fn identical_visual_copy(
+    root: &Path,
+    original: &VehicleDescriptor,
+    copy: &VehicleDescriptor,
+) -> bool {
+    use rerbr_asset_formats::cars::resolve;
+    use std::fs;
+    use std::io::Read;
+
+    let Ok(root_canonical) = root.canonicalize() else {
+        return false;
+    };
+    let files_match = |a: &Path, b: &Path| -> Option<bool> {
+        let (a, b) = (a.canonicalize().ok()?, b.canonicalize().ok()?);
+        if !a.starts_with(&root_canonical) || !b.starts_with(&root_canonical) {
+            return Some(false);
+        }
+        let (mut a, mut b) = (fs::File::open(a).ok()?, fs::File::open(b).ok()?);
+        let mut left = a.metadata().ok()?.len();
+        if left != b.metadata().ok()?.len() {
+            return Some(false);
+        }
+        let (mut first, mut second) = ([0_u8; 16384], [0_u8; 16384]);
+        while left != 0 {
+            let len = left.min(first.len() as u64) as usize;
+            a.read_exact(&mut first[..len]).ok()?;
+            b.read_exact(&mut second[..len]).ok()?;
+            if first[..len] != second[..len] {
+                return Some(false);
+            }
+            left -= len as u64;
+        }
+        Some(true)
+    };
+    for (a, b) in [
+        (&original.model, &copy.model),
+        (&original.parts, &copy.parts),
+        (&original.shaders, &copy.shaders),
+        (&original.shader_settings, &copy.shader_settings),
+    ] {
+        if resolve(root, a)
+            .zip(resolve(root, b))
+            .and_then(|(a, b)| files_match(&a, &b))
+            != Some(true)
+        {
+            return false;
+        }
+    }
+    let textures = |d: &VehicleDescriptor| -> Option<BTreeMap<String, PathBuf>> {
+        let normalized = d.model.replace('\\', "/");
+        let (dir, _) = normalized.rsplit_once('/')?;
+        let path = resolve(root, &format!("{dir}/textures"))?;
+        let mut files = BTreeMap::new();
+        for file in fs::read_dir(path).ok()? {
+            let file = file.ok()?;
+            let path = file.path();
+            if file.file_type().ok()?.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("dds"))
+            {
+                let name = file.file_name().to_str()?.to_ascii_lowercase();
+                if files.insert(name, path).is_some() {
+                    return None;
+                }
+            }
+        }
+        (!files.is_empty()).then_some(files)
+    };
+    let Some((a, b)) = textures(original).zip(textures(copy)) else {
+        return false;
+    };
+    a.len() == b.len()
+        && a.iter().all(|(name, path)| {
+            b.get(name).and_then(|other| files_match(path, other)) == Some(true)
+        })
+}
+
 #[cfg(test)]
 #[test]
 fn catalog_collapses_aliases_but_retains_legacy_lookup_and_ngp_variants() {
@@ -605,6 +715,49 @@ fn catalog_collapses_aliases_but_retains_legacy_lookup_and_ngp_variants() {
     assert!(catalog.vehicle("rsf-bmw-m3-2").is_some());
     let owned = catalog.browse_vehicle_indices(|entry| entry.descriptor.id == "rsf-bmw-m3-2");
     assert_eq!(&owned[canonical..], &[alias, variant]);
+}
+
+#[cfg(test)]
+#[test]
+fn numbered_visual_copies_require_equal_assets_and_keep_saved_ids() {
+    let root = std::env::temp_dir().join(format!("rerbr-numbered-catalog-{}", std::process::id()));
+    for (folder, paint) in [("Model", b"red"), ("Model 2", b"red"), ("Model 3", b"tan")] {
+        let dir = root.join("RBR/Cars").join(folder);
+        std::fs::create_dir_all(dir.join("textures")).unwrap();
+        for file in [
+            "Model.sgc",
+            "Model.ini",
+            "Model_shaders.ini",
+            "Model_shader_settings_clear.ini",
+        ] {
+            std::fs::write(dir.join(file), b"same").unwrap();
+        }
+        std::fs::write(dir.join("textures/paint.dds"), paint).unwrap();
+    }
+    // An incomplete sibling can sort before the usable canonical SGC.
+    std::fs::write(root.join("RBR/Cars/Model/Model 2.sgc"), b"same").unwrap();
+    let catalog = Catalog::scan_root(&root, &Selection::default());
+    let id = |suffix: &str| format!("rsf-model{suffix}");
+    let canonical = id("");
+    let copy = id("-2");
+    let different_skin = id("-3");
+    assert_eq!(
+        catalog.vehicle(&canonical).unwrap().descriptor.model,
+        "Cars/Model/Model.sgc"
+    );
+    assert!(catalog.vehicle(&copy).is_some());
+    let browses = |preferred: &str| {
+        catalog
+            .browse_vehicle_indices(|entry| entry.descriptor.id == preferred)
+            .into_iter()
+            .map(|i| catalog.vehicles[i].descriptor.id.as_str())
+            .collect::<Vec<_>>()
+    };
+    let regular = browses("");
+    assert!(regular.contains(&canonical.as_str()) && regular.contains(&different_skin.as_str()));
+    assert!(!regular.contains(&copy.as_str()));
+    assert!(browses(&copy).contains(&copy.as_str()));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn state_of(id: &str, selected: &str, supported: bool, files: &FileAudit) -> EntryState {

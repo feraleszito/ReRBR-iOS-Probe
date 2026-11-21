@@ -9,8 +9,7 @@ use super::ngp_experimental::{resolve_named_pack_state, PackAuditState};
 use super::ngp_proto::{inspect_pack_path_result, VehicleTechSheet};
 use rerbr_content::{VehicleClassification, VehicleDescriptor};
 use rerbr_sim::rbr_formats::{
-    car_pack::{self, Pack},
-    car_parts,
+    car_pack, car_parts,
     cars::{self, CarEntry},
     ini, rsf,
 };
@@ -298,15 +297,15 @@ pub fn discover(rbr_root: &Path) -> Vec<DiscoveredRsfVehicle> {
     if let Ok(install) = rsf::Install::open(rbr_root) {
         for car in &install.cars {
             let mut item = match resolve_named_pack_state(rbr_root, &car.pack) {
-                PackAuditState::Ready { path }
-                | PackAuditState::Incomplete { path, .. }
-                | PackAuditState::Incompatible { path, .. } => {
+                state @ (PackAuditState::Ready { .. }
+                | PackAuditState::Incomplete { .. }
+                | PackAuditState::Incompatible { .. }) => {
                     seen_packs.insert(car.pack.to_ascii_lowercase());
                     build_rsf_entry(
                         rbr_root,
                         Some(&install),
                         car,
-                        &path,
+                        state,
                         &retail,
                         &audiobanks,
                         ngp_runtime.as_ref().err().cloned(),
@@ -355,11 +354,9 @@ pub fn discover(rbr_root: &Path) -> Vec<DiscoveredRsfVehicle> {
             if !path.is_dir() && !raw_name.to_ascii_lowercase().ends_with(".zip") {
                 continue;
             }
-            let resolved_pack = match resolve_named_pack_state(rbr_root, &pack_name) {
-                PackAuditState::Ready { path: p }
-                | PackAuditState::Incomplete { path: p, .. }
-                | PackAuditState::Incompatible { path: p, .. } => p,
+            let pack_state = match resolve_named_pack_state(rbr_root, &pack_name) {
                 PackAuditState::Missing { .. } => continue,
+                state => state,
             };
             seen_packs.insert(pack_name.to_ascii_lowercase());
             let synthetic_car = rsf::Car {
@@ -377,7 +374,7 @@ pub fn discover(rbr_root: &Path) -> Vec<DiscoveredRsfVehicle> {
                 rbr_root,
                 None,
                 &synthetic_car,
-                &resolved_pack,
+                pack_state,
                 &retail,
                 &audiobanks,
                 ngp_runtime.as_ref().err().cloned(),
@@ -531,25 +528,35 @@ fn build_rsf_entry(
     rbr_root: &Path,
     install: Option<&rsf::Install>,
     car: &rsf::Car,
-    pack_path: &Path,
+    pack_state: PackAuditState,
     retail: &[CarEntry],
     audiobanks: &BTreeMap<u32, String>,
     ngp_err: Option<String>,
 ) -> DiscoveredRsfVehicle {
     let mut notes = Vec::new();
+    let (pack_path, pack_ready) = match &pack_state {
+        PackAuditState::Ready { path } => (path, true),
+        PackAuditState::Incomplete {
+            path,
+            missing_files,
+        } => {
+            notes.push(format!("PACK NGP INCOMPLETO: {}", missing_files.join(", ")));
+            (path, false)
+        }
+        PackAuditState::Incompatible { path, reason } => {
+            notes.push(format!("PACK NGP INCOMPATIBLE: {reason}"));
+            (path, false)
+        }
+        PackAuditState::Missing { .. } => {
+            unreachable!("missing packs are handled before discovery")
+        }
+    };
     let tech_sheet = match inspect_pack_path_result(pack_path) {
         Ok(sheet) => Some(sheet),
         Err(err) => {
             notes.push(format!("TECH SHEET: {err}"));
             None
         }
-    };
-    let pack_readable = match Pack::open(pack_path) {
-        Ok(p) => match (p.read("common.lsp"), p.read("gravel.lsp")) {
-            (Ok(_), Ok(_)) => Ok(p),
-            (Err(e), _) | (_, Err(e)) => Err(e),
-        },
-        Err(e) => Err(e),
     };
 
     let using_fallback_model = false;
@@ -588,27 +595,17 @@ fn build_rsf_entry(
     if let Some(ref e) = ngp_err {
         notes.push(e.clone());
     }
-    if let Err(ref e) = pack_readable {
-        notes.push(e.clone());
-    }
-
     let own_model_ok = !model_missing && !using_fallback_model;
-    let classification = match (&pack_readable, own_model_ok) {
-        (Ok(_), true) if !is_ngp7_pack && fmod_present && ngp_err.is_none() => {
+    let classification = match (pack_ready, own_model_ok) {
+        (true, true) if !is_ngp7_pack && fmod_present && ngp_err.is_none() => {
             VehicleClassification::RsfNgpVerified
         }
-        (Ok(_), true) => VehicleClassification::RsfNgpPartial,
+        (true, true) => VehicleClassification::RsfNgpPartial,
         _ => VehicleClassification::VisualInspectionOnly,
     };
 
     let forward_gears = tech_sheet.as_ref().map(|t| t.forward_gears).unwrap_or(5);
-    let display_name = pack_readable
-        .as_ref()
-        .ok()
-        .and_then(|p| p.title())
-        .filter(|t| !t.is_empty() && !car.name.is_empty())
-        .map(|_| car.name.clone())
-        .unwrap_or_else(|| car.name.clone());
+    let display_name = car.name.clone();
     let id = slugify_id(&display_name);
 
     let audio_index = fmod_bank
@@ -643,7 +640,7 @@ fn build_rsf_entry(
         fmod_present,
         using_fallback_model,
         model_missing,
-        pack_missing: pack_readable.is_err(),
+        pack_missing: !pack_ready,
         notes,
     }
 }
@@ -760,39 +757,40 @@ pub fn discover_visual_car_folders(
         let Some(folder_name) = folder_path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let sgc_path = std::fs::read_dir(&folder_path)
+        let models = std::fs::read_dir(&folder_path)
             .ok()
             .into_iter()
             .flatten()
             .flatten()
             .map(|e| e.path())
-            .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("sgc")));
-        let Some(sgc_path) = sgc_path else {
+            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("sgc")))
+            .filter_map(|path| {
+                let stem = path.file_stem()?.to_str()?;
+                let base = format!("Cars/{folder_name}/{stem}");
+                let parts = format!("{base}.ini");
+                let shaders = format!("{base}_shaders.ini");
+                let exists = |p: &str| cars::resolve(rbr_root, p).is_some_and(|p| p.is_file());
+                if !exists(&parts) || !exists(&shaders) {
+                    return None;
+                }
+                let settings = ["clear", "overcast"]
+                    .into_iter()
+                    .map(|weather| format!("{base}_shader_settings_{weather}.ini"))
+                    .find(|p| exists(p))?;
+                Some((
+                    !stem.eq_ignore_ascii_case(folder_name),
+                    format!("{base}.sgc"),
+                    parts,
+                    shaders,
+                    settings,
+                ))
+            });
+        let Some((_, model_rel, parts_rel, shaders_rel, settings_rel)) = models.min() else {
             continue;
         };
-        let Some(stem) = sgc_path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let model_rel = format!("Cars/{folder_name}/{stem}.sgc");
         if existing_models.contains(&model_rel.to_ascii_lowercase()) {
             continue;
         }
-        let parts_rel = format!("Cars/{folder_name}/{stem}.ini");
-        let shaders_rel = format!("Cars/{folder_name}/{stem}_shaders.ini");
-        let clear_rel = format!("Cars/{folder_name}/{stem}_shader_settings_clear.ini");
-        let overcast_rel = format!("Cars/{folder_name}/{stem}_shader_settings_overcast.ini");
-        if cars::resolve(rbr_root, &parts_rel).is_none()
-            || cars::resolve(rbr_root, &shaders_rel).is_none()
-        {
-            continue;
-        }
-        let settings_rel = if cars::resolve(rbr_root, &clear_rel).is_some() {
-            clear_rel
-        } else if cars::resolve(rbr_root, &overcast_rel).is_some() {
-            overcast_rel
-        } else {
-            continue;
-        };
 
         let (display_name, category) = folder_names
             .get(&folder_name.to_ascii_lowercase())
@@ -820,6 +818,7 @@ pub fn discover_visual_car_folders(
             rsf_pack: None,
         };
         if descriptor.validate_schema().is_ok() {
+            let model_note = format!("MODELO EN {}", descriptor.model);
             out.push(DiscoveredRsfVehicle {
                 descriptor,
                 classification: VehicleClassification::VisualInspectionOnly,
@@ -833,7 +832,7 @@ pub fn discover_visual_car_folders(
                 pack_missing: true,
                 notes: vec![
                     "SOLO VISUALIZACIÓN 3D — SIN FÍSICA NGP INTEGRADA".into(),
-                    format!("MODELO EN Cars/{folder_name}/{stem}.sgc"),
+                    model_note,
                 ],
             });
         }
@@ -1306,6 +1305,11 @@ mod tests {
         let ds3 = catalog.vehicle("rsf-citroen-ds3-wrc").unwrap();
         assert_eq!(ds3.descriptor.model, "Cars/DS3_WRC/ds3_wrc.sgc");
         assert!(!ds3.model_missing);
+        assert_eq!(
+            ds3.classification,
+            VehicleClassification::VisualInspectionOnly
+        );
+        assert!(ds3.notes.iter().any(|note| note.contains("r_gravel.lsp")));
         assert!(
             !ds3.descriptor.audio_index.contains("Cars.ini"),
             "RSF car without audio bank must never fall back to retail Cars.ini: {}",
