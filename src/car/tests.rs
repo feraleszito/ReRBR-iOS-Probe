@@ -81,6 +81,30 @@ fn geometry() -> mesh::Geometry {
 }
 
 #[test]
+fn vehicle_texture_upload_converts_bgra_and_keeps_lamp_alpha() {
+    let mut source = vec![0; 128];
+    source[..4].copy_from_slice(b"DDS ");
+    for (offset, value) in [
+        (4, 124u32),
+        (12, 1),
+        (16, 1),
+        (76, 32),
+        (80, 0x41),
+        (88, 32),
+        (92, 0xff0000),
+        (96, 0xff00),
+        (100, 0xff),
+        (104, 0xff000000),
+    ] {
+        source[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    source.extend_from_slice(&[12, 34, 56, 78]);
+    let texture = prepare_texture("Cars/test/lamp.dds", "Cars/test/lamp.dds", source).unwrap();
+    assert_eq!(texture.info.format, dds::Format::Rgba8);
+    assert_eq!(dds::parse(&texture.bytes).unwrap().data, &[56, 34, 12, 78]);
+}
+
+#[test]
 fn auxiliary_lamp_faces_keep_their_own_materials_and_unmatched_geometry() {
     let (mut elements, mut parts, mut shaders, mut settings) = fixture();
     let mut lamp = triangle(node("e_aux_lamp", 6, 0.0, 0.5, 1.0));

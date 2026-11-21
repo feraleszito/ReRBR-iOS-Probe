@@ -9,8 +9,11 @@ pub mod selection;
 #[cfg(feature = "physics-drive")]
 pub(crate) mod showroom;
 
-use crate::harwood::texture::upload_plan;
-use rerbr_asset_formats::{cars, ini, sgc};
+use crate::{
+    asset_probe::{TextureData, TextureInfo},
+    harwood::texture::upload_plan,
+};
+use rerbr_asset_formats::{cars, dds, ini, sgc};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -176,6 +179,21 @@ fn sections(
     ini::parse(&String::from_utf8_lossy(&bytes)).map_err(|e| format!("CAR INI {path}: {e}"))
 }
 
+fn prepare_texture(request: &str, resolved: &str, bytes: Vec<u8>) -> Result<TextureData, String> {
+    let bytes = dds::to_rgba8(&bytes).unwrap_or(bytes);
+    let plan = upload_plan(&bytes, u32::MAX).map_err(|err| format!("CAR DDS {resolved}: {err}"))?;
+    let first = plan.mips.first().ok_or("CAR DDS: missing mip chain")?;
+    let info = TextureInfo {
+        request: request.into(),
+        resolved: resolved.into(),
+        width: first.width,
+        height: first.height,
+        mip_count: plan.mips.len() as u32,
+        format: plan.format,
+    };
+    Ok(TextureData { info, bytes })
+}
+
 pub fn load(root: &Path) -> Result<Car, String> {
     load_vehicle(root, &rerbr_content::VehicleDescriptor::default())
 }
@@ -294,23 +312,13 @@ pub fn load_vehicle_for_mode(
         .collect::<BTreeSet<_>>()
     {
         let bytes = read(root, vehicle, &path, 64 * 1024 * 1024)?;
-        let plan = upload_plan(&bytes, u32::MAX)?;
+        let texture = prepare_texture(&path, &path, bytes)?;
         eprintln!(
             "car-chase DDS PASS: {path} {:?}, {} mips",
-            plan.format,
-            plan.mips.len()
+            texture.info.format, texture.info.mip_count
         );
         files.push(path.clone());
-        let first = plan.mips.first().ok_or("CAR DDS: missing mip chain")?;
-        let info = crate::asset_probe::TextureInfo {
-            request: path.clone(),
-            resolved: path.clone(),
-            width: first.width,
-            height: first.height,
-            mip_count: plan.mips.len() as u32,
-            format: plan.format,
-        };
-        textures.insert(path, crate::asset_probe::TextureData { info, bytes });
+        textures.insert(path, texture);
     }
     let s = geometry.stats(None);
     let o = geometry.stats(Some(false));
@@ -466,18 +474,9 @@ pub fn load_showroom_model(
         .collect::<BTreeSet<_>>()
     {
         let (resolved, bytes) = read_showroom_texture(root, model_dir, &path)?;
-        let plan = upload_plan(&bytes, u32::MAX)?;
-        let first = plan.mips.first().ok_or("SHOWROOM DDS: missing mip chain")?;
-        let info = crate::asset_probe::TextureInfo {
-            request: path.clone(),
-            resolved: resolved.clone(),
-            width: first.width,
-            height: first.height,
-            mip_count: plan.mips.len() as u32,
-            format: plan.format,
-        };
+        let texture = prepare_texture(&path, &resolved, bytes)?;
         files.push(resolved);
-        textures.insert(path, crate::asset_probe::TextureData { info, bytes });
+        textures.insert(path, texture);
     }
     #[cfg(feature = "physics-stage")]
     let cameras = crate::driving::cameras::Mounts::parse(&parts)

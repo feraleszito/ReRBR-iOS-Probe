@@ -19,10 +19,6 @@ pub fn install(
     shaders: &[rerbr_asset_formats::ini::Section],
     settings: &[rerbr_asset_formats::ini::Section],
 ) -> super::Car {
-    use crate::{
-        asset_probe::{TextureData, TextureInfo},
-        harwood::texture::upload_plan,
-    };
     use rerbr_asset_formats::sgc;
     use std::collections::{BTreeMap, BTreeSet};
     let prepared = (|| {
@@ -62,17 +58,7 @@ pub fn install(
                 continue;
             }
             let bytes = super::read(root, &car.vehicle, path, 64 * 1024 * 1024)?;
-            let plan = upload_plan(&bytes, u32::MAX)?;
-            let first = plan.mips.first().ok_or("COCKPIT DDS: missing mips")?;
-            let info = TextureInfo {
-                request: path.clone(),
-                resolved: path.clone(),
-                width: first.width,
-                height: first.height,
-                mip_count: plan.mips.len() as u32,
-                format: plan.format,
-            };
-            textures.insert(path.clone(), TextureData { info, bytes });
+            textures.insert(path.clone(), super::prepare_texture(path, path, bytes)?);
         }
         Ok::<_, String>((geometry, node, textures))
     })();
