@@ -272,7 +272,7 @@ impl Scene {
                 {
                     self.benchmark.driving.showroom_camera.set_mode(mode);
                     self.showroom
-                        .ensure_vehicle(device, queue, format, &primary, fallbacks);
+                        .ensure_vehicle(device, queue, format, primary, fallbacks);
                 } else {
                     self.showroom.unload();
                 }

@@ -367,6 +367,7 @@ pub(crate) struct Showroom {
     depth_size: (u32, u32),
     loader: Loader<LoadedShowroomCar>,
     active: Option<LoadedShowroomCar>,
+    primary: Option<VehicleDescriptor>,
     requested_id: Option<String>,
     fallback_queue: Vec<VehicleDescriptor>,
     pub last_error: Option<String>,
@@ -378,6 +379,7 @@ impl Showroom {
     pub fn unload(&mut self) {
         self.loader.cancel();
         self.active = None;
+        self.primary = None;
         self.requested_id = None;
         self.fallback_queue.clear();
         self.loading = false;
@@ -400,14 +402,23 @@ impl Showroom {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
-        primary: &VehicleDescriptor,
+        primary: VehicleDescriptor,
         fallbacks: Vec<VehicleDescriptor>,
     ) {
-        if self.requested_id.as_deref() == Some(primary.id.as_str()) {
+        if !self.register_primary(&primary) {
             return;
         }
         self.fallback_queue = fallbacks;
-        self.start_load(device, queue, format, primary.clone());
+        self.start_load(device, queue, format, primary);
+    }
+
+    fn register_primary(&mut self, primary: &VehicleDescriptor) -> bool {
+        if self.primary.as_ref() == Some(primary) {
+            return false;
+        }
+        self.primary = Some(primary.clone());
+        self.active = None;
+        true
     }
 
     fn start_load(
@@ -642,4 +653,18 @@ impl Showroom {
                 .draw_showroom(queue, encoder, target, depth, size, format, &frame, fov);
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn showroom_keys_the_request_by_descriptor_and_keeps_fallback_in_flight() {
+    let mut showroom = Showroom::default();
+    let mut primary = VehicleDescriptor::default();
+    assert!(showroom.register_primary(&primary));
+    showroom.requested_id = Some("fallback".into());
+    assert!(!showroom.register_primary(&primary));
+    assert_eq!(showroom.requested_id.as_deref(), Some("fallback"));
+    primary.model = "Cars/Example/changed.sgc".into();
+    assert!(showroom.register_primary(&primary));
+    assert!(!showroom.register_primary(&primary));
 }
