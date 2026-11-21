@@ -1,5 +1,15 @@
 # RBR Mobile · Auditoría de vehículos originales y RSF
 
+## Revisión del respaldo recibido
+
+La carpeta `C:/Users/adria/Desktop/Respaldo RBR iPad/Cars 2` ya está disponible. Su inventario de 6.863 archivos, las comparaciones por SHA-256, los resultados por vehículo y la auditoría de físicas están en [RSF_VEHICLE_INVENTORY.md](RSF_VEHICLE_INVENTORY.md). Los resultados PC que se conservan más abajo corresponden al barrido original.
+
+El respaldo reprodujo dos copias de catálogo con los mismos recursos activos, DS3 WRC y Xsara 2006. Los IDs se conservan para los perfiles y ambas pantallas muestran una fila por grupo. También se recuperó el descubrimiento del Fabia RS Rally2 al preferir el SGC con INI válidos. En el Fiesta Rally2 numerado, el showroom recupera el DDS local cuando la ruta declarada de una copia verificada carece del archivo.
+
+Las verificaciones de BMW E30, DS3 WRC y Lancer Evo X siguen siendo estructurales. La cara de la antena del DS3 con clase de FaceBlock indeterminada continúa pendiente. Las capturas en Metal y el garaje real del iPad siguen pendientes de inspección.
+
+## Barrido original de la instalación PC
+
 21 de noviembre de 2026 · Rama `audit/rsf-vehicle-visuals` · Base `32dc754`
 
 ## Fuentes inspeccionadas
