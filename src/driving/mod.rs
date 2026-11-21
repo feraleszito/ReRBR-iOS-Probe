@@ -312,9 +312,11 @@ impl Runtime {
         if !self.active_career_stage {
             return rerbr_sim::drive::BootOverrides::default();
         }
-        let state = self.career.profile.as_ref().and_then(|profile| {
-            profile.vehicle_state(&self.selection.vehicle.id)
-        });
+        let state = self
+            .career
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.vehicle_state(&self.selection.vehicle.id));
         rerbr_sim::drive::BootOverrides {
             tyre: state.map(|state| state.installed_tyre.rbr_tyre_id()),
             carried_damage_bytes: state.and_then(|state| state.condition.carried_damage_bytes()),
@@ -3345,18 +3347,9 @@ impl Runtime {
                 player.step(seconds as f32);
                 let current_frame = player.current_frame()?;
                 let is_paused = player.state != replay::PlaybackState::Playing;
-                audio::set_paused(is_paused);
-                if !is_paused {
-                    let noise = rerbr_sim::engine_audio::EngineNoise::from_rpm_throttle(
-                        current_frame.rpm,
-                        0.7,
-                        current_frame.rpm * 0.1,
-                    );
-                    audio::update_engine_state(&noise, current_frame.gear as i32);
-                }
                 let car_pos = current_frame.car_position();
                 let car_model = current_frame.models[0];
-                let (camera, fov) = player.current_camera(
+                let (camera, fov, fixed_listener) = player.current_camera(
                     car_pos,
                     car_model,
                     |m| {
@@ -3389,6 +3382,8 @@ impl Runtime {
                         }
                     },
                 );
+                let mix = player.audio_mix(camera, car_pos + Vec3::Y * 0.65, fixed_listener);
+                audio::set_replay_audio(mix, (!is_paused).then_some(&current_frame));
                 self.effective_fov = fov;
                 return Some(Frame {
                     models: current_frame.models,

@@ -3,6 +3,7 @@
 //! Provides thread-safe communication between the 720 Hz physics worker, the main UIKit loop,
 //! and the realtime CoreAudio / RemoteIO audio render callback.
 
+use super::replay::{ReplayFrame, ReplayMix};
 use rerbr_sim::engine_audio::{self, CarAudio, EngineNoise};
 use std::collections::VecDeque;
 use std::path::Path;
@@ -11,6 +12,66 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// Pre-allocated scratch buffer capacity to prevent allocations in the audio callback.
 const PREALLOC_SCRATCH_FRAMES: usize = 4096;
 const MAX_SPEECH_QUEUE: usize = 16;
+
+struct ReplayResampler {
+    input: Vec<f32>,
+    cursor: f32,
+    buffered: usize,
+    gains: [f32; 2],
+}
+
+impl ReplayResampler {
+    fn new() -> Self {
+        Self {
+            input: vec![0.0; (PREALLOC_SCRATCH_FRAMES * 4 / 3 + 3) * 2],
+            cursor: 0.0,
+            buffered: 0,
+            gains: [1.0; 2],
+        }
+    }
+
+    fn reset(&mut self) {
+        self.cursor = 0.0;
+        self.buffered = 0;
+    }
+
+    fn render(
+        &mut self,
+        output: &mut [f32],
+        mix: ReplayMix,
+        mut render_engine: impl FnMut(&mut [f32]),
+    ) {
+        let frames = output.len() / 2;
+        if frames == 0 {
+            return;
+        }
+        if self.buffered == 0 {
+            self.gains = mix.channels;
+        }
+        let endpoint = self.cursor + mix.rate * frames as f32;
+        let consumed = endpoint.floor() as usize;
+        let needed = consumed + 2;
+        render_engine(&mut self.input[self.buffered * 2..needed * 2]);
+        for (index, stereo) in output.chunks_exact_mut(2).enumerate() {
+            let position = self.cursor + index as f32 * mix.rate;
+            let frame = position.floor() as usize;
+            let blend = position.fract();
+            let fade = (index + 1) as f32 / frames as f32;
+            let mono = |frame| (self.input[frame * 2] + self.input[frame * 2 + 1]) * 0.5;
+            let a = mono(frame);
+            let sample = a + (mono(frame + 1) - a) * blend;
+            for (channel, output) in stereo.iter_mut().enumerate() {
+                let gain =
+                    self.gains[channel] + (mix.channels[channel] - self.gains[channel]) * fade;
+                *output = (sample * gain).clamp(-1.0, 1.0);
+            }
+        }
+        self.input.copy_within(consumed * 2..needed * 2, 0);
+        self.buffered = 2;
+        self.cursor = endpoint.fract();
+        self.gains = mix.channels;
+    }
+}
 
 /// Sequential stereo PCM voice queue for authentic RBR co-driver pacenotes.
 #[derive(Default)]
@@ -313,6 +374,8 @@ struct AudioRuntime {
     is_cockpit: bool,
     sample_rate: u32,
     stereo_scratch: Vec<[f32; 2]>,
+    replay_mix: Option<ReplayMix>,
+    replay_resampler: Option<ReplayResampler>,
 }
 
 impl AudioRuntime {
@@ -336,6 +399,34 @@ impl AudioRuntime {
             is_cockpit: false,
             sample_rate: 44100,
             stereo_scratch: vec![[0.0, 0.0]; PREALLOC_SCRATCH_FRAMES],
+            replay_mix: None,
+            replay_resampler: Some(ReplayResampler::new()),
+        }
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        if let Some(audio) = self.car_audio.as_mut() {
+            audio.set_paused(paused);
+        }
+        if let Some(track) = self.menu_music.as_mut() {
+            track.active = self.menu_music_active && paused;
+        }
+    }
+
+    fn render_engine(&mut self, out: &mut [f32], cockpit: bool) {
+        out.fill(0.0);
+        if let Some(audio) = self.car_audio.as_mut() {
+            audio.set_cockpit(cockpit);
+            for chunk in out.chunks_mut(PREALLOC_SCRATCH_FRAMES * 2) {
+                let scratch = &mut self.stereo_scratch[..chunk.len() / 2];
+                audio.render_stereo(scratch);
+                for (stereo, frame) in chunk.chunks_exact_mut(2).zip(scratch) {
+                    stereo.copy_from_slice(frame);
+                }
+            }
+        } else if let Some(fmod) = self.fmod_audio.as_mut() {
+            fmod.mix_into(out, out.len() / 2, self.volume, cockpit);
         }
     }
 }
@@ -528,13 +619,33 @@ pub fn set_master_volume(volume: f32) {
 pub fn set_paused(paused: bool) {
     let rt = runtime();
     if let Ok(mut lock) = rt.lock() {
-        lock.paused = paused;
-        if let Some(audio) = lock.car_audio.as_mut() {
-            audio.set_paused(paused);
+        if lock.replay_mix.take().is_some() {
+            if let Some(resampler) = lock.replay_resampler.as_mut() {
+                resampler.reset();
+            }
         }
-        let music_active = lock.menu_music_active;
-        if let Some(track) = lock.menu_music.as_mut() {
-            track.active = music_active && paused;
+        lock.set_paused(paused);
+    }
+}
+
+pub(super) fn set_replay_audio(mix: ReplayMix, playing: Option<&ReplayFrame>) {
+    if let Ok(mut lock) = runtime().lock() {
+        lock.replay_mix = Some(mix);
+        lock.set_paused(playing.is_none());
+        if let Some(frame) = playing {
+            if let Some(audio) = lock.car_audio.as_mut() {
+                let noise = EngineNoise::from_rpm_throttle(frame.rpm, 0.7, frame.rpm * 0.1);
+                audio.step_physics(&noise, i32::from(frame.gear));
+            } else if let Some(fmod) = lock.fmod_audio.as_mut() {
+                fmod.update_telemetry(super::fmod_synth::FmodTelemetryInput {
+                    rpm: frame.rpm,
+                    throttle: 0.7,
+                    brake: 0.0,
+                    speed_mps: frame.speed_mps,
+                    gear: i32::from(frame.gear),
+                    wheel_speed_mps: frame.speed_mps,
+                });
+            }
         }
     }
 }
@@ -865,25 +976,17 @@ pub fn render(out: &mut [f32], frames: usize, sample_rate: u32) {
         return;
     }
 
-    if !lock.paused && lock.volume > 0.0 && lock.car_audio.is_some() {
-        let mut scratch = std::mem::take(&mut lock.stereo_scratch);
-        if let Some(audio) = lock.car_audio.as_mut() {
-            let render_slice = &mut scratch[..frames];
-            render_slice.fill([0.0, 0.0]);
-            audio.render_stereo(render_slice);
-            for (i, frame) in render_slice.iter().enumerate() {
-                if i * 2 + 1 < out.len() {
-                    out[i * 2] = frame[0];
-                    out[i * 2 + 1] = frame[1];
-                }
+    if !lock.paused && lock.volume > 0.0 {
+        if let Some(mix) = lock.replay_mix {
+            if let Some(mut resampler) = lock.replay_resampler.take() {
+                resampler.render(&mut out[..frames * 2], mix, |source| {
+                    lock.render_engine(source, false)
+                });
+                lock.replay_resampler = Some(resampler);
             }
-        }
-        lock.stereo_scratch = scratch;
-    } else if !lock.paused && lock.volume > 0.0 && lock.fmod_audio.is_some() {
-        let vol = lock.volume;
-        let is_cockpit = lock.is_cockpit;
-        if let Some(fmod) = lock.fmod_audio.as_mut() {
-            fmod.mix_into(out, frames, vol, is_cockpit);
+        } else {
+            let cockpit = lock.is_cockpit;
+            lock.render_engine(&mut out[..frames * 2], cockpit);
         }
     } else if lock.paused {
         let music_vol = lock.music_volume;
@@ -891,7 +994,7 @@ pub fn render(out: &mut [f32], frames: usize, sample_rate: u32) {
             track.mix_into(out, frames, sample_rate, music_vol);
         }
     }
-    if !lock.paused && lock.volume > 0.0 {
+    if !lock.paused && lock.volume > 0.0 && lock.replay_mix.is_none() {
         let vol = lock.volume;
         let is_cockpit = lock.is_cockpit;
         lock.surface_audio
@@ -1096,4 +1199,42 @@ mod tests {
             lock.fmod_audio = None;
         }
     }
+}
+#[test]
+fn replay_resamples_the_engine_once_and_keeps_phase_across_callbacks() {
+    let mut resampler = ReplayResampler::new();
+    let mut next = 0.0;
+    let mut render_source = |out: &mut [f32]| {
+        for frame in out.chunks_exact_mut(2) {
+            frame.copy_from_slice(&[next, next]);
+            next += 0.05;
+        }
+    };
+    let mix = ReplayMix {
+        channels: [1.0, 0.5],
+        rate: 1.25,
+    };
+    let mut first = [0.0; 6];
+    let mut second = [0.0; 6];
+    resampler.render(&mut first, mix, &mut render_source);
+    resampler.render(&mut second, mix, &mut render_source);
+    for (index, frame) in first
+        .chunks_exact(2)
+        .chain(second.chunks_exact(2))
+        .enumerate()
+    {
+        let expected = index as f32 * 1.25 * 0.05;
+        assert!((frame[0] - expected).abs() < 1.0e-6);
+        assert!((frame[1] - expected * 0.5).abs() < 1.0e-6);
+    }
+    let mut full_callback = vec![0.0; PREALLOC_SCRATCH_FRAMES * 2];
+    resampler.render(
+        &mut full_callback,
+        ReplayMix {
+            channels: [1.0; 2],
+            rate: 4.0 / 3.0,
+        },
+        |out| out.fill(0.1),
+    );
+    assert!(full_callback.iter().all(|sample| sample.is_finite()));
 }

@@ -397,6 +397,48 @@ pub enum PlaybackState {
     Finished,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ReplayMix {
+    pub channels: [f32; 2],
+    pub rate: f32,
+}
+
+impl ReplayMix {
+    const SOUND_SPEED: f32 = 343.0;
+
+    fn from_positions(
+        camera: Camera,
+        source: Vec3,
+        source_velocity: Vec3,
+        listener_velocity: Vec3,
+    ) -> Self {
+        let offset = source - camera.eye;
+        let direction = offset.normalize_or_zero();
+        let right = (camera.target - camera.eye)
+            .cross(camera.up)
+            .normalize_or_zero();
+        let pan = direction.dot(right).clamp(-1.0, 1.0);
+        // Inverse-distance gain outside the reference distance, with a constant-power stereo pan.
+        let gain = 6.0 / offset.length().max(6.0);
+        let radial = |velocity: Vec3| velocity.dot(direction).clamp(-120.0, 120.0);
+        let rate = (Self::SOUND_SPEED + radial(listener_velocity))
+            / (Self::SOUND_SPEED + radial(source_velocity));
+        Self {
+            channels: [(1.0 - pan).sqrt() * gain, (1.0 + pan).sqrt() * gain],
+            rate: rate.clamp(0.75, 4.0 / 3.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AudioPose {
+    time: f32,
+    source: Vec3,
+    eye: Vec3,
+    camera_mode: ReplayCameraMode,
+    fixed_listener: bool,
+}
+
 /// Active replay player driving the simulation visualization.
 #[derive(Debug, Clone, Default)]
 pub struct ReplayPlayer {
@@ -406,6 +448,7 @@ pub struct ReplayPlayer {
     pub current_time: f32,
     pub state: PlaybackState,
     pub camera_mode: ReplayCameraMode,
+    audio_pose: Option<AudioPose>,
 }
 
 impl ReplayPlayer {
@@ -418,6 +461,7 @@ impl ReplayPlayer {
             current_time: 0.0,
             state: PlaybackState::Playing,
             camera_mode: ReplayCameraMode::StageTV,
+            audio_pose: None,
         }
     }
 
@@ -434,6 +478,7 @@ impl ReplayPlayer {
             current_time: 0.0,
             state: PlaybackState::Playing,
             camera_mode: ReplayCameraMode::StageTV,
+            audio_pose: None,
         }
     }
 
@@ -467,6 +512,7 @@ impl ReplayPlayer {
     }
 
     pub fn toggle_pause(&mut self) {
+        self.audio_pose = None;
         match self.state {
             PlaybackState::Playing => self.state = PlaybackState::Paused,
             PlaybackState::Paused => self.state = PlaybackState::Playing,
@@ -478,11 +524,13 @@ impl ReplayPlayer {
     }
 
     pub fn restart(&mut self) {
+        self.audio_pose = None;
         self.current_time = 0.0;
         self.state = PlaybackState::Playing;
     }
 
     pub fn seek(&mut self, time: f32) {
+        self.audio_pose = None;
         let total = self.total_duration();
         self.current_time = time.clamp(0.0, total);
         if self.current_time < total && self.state == PlaybackState::Finished {
@@ -507,7 +555,7 @@ impl ReplayPlayer {
         car_model: Mat4,
         chase_camera_fn: impl Fn(Mat4) -> Camera,
         bonnet_camera_fn: impl Fn(Mat4) -> Camera,
-    ) -> (Camera, f32) {
+    ) -> (Camera, f32, bool) {
         match self.camera_mode {
             ReplayCameraMode::StageTV => {
                 let dist = self.current_frame().map_or(0.0, |f| f.driveline_distance);
@@ -516,21 +564,98 @@ impl ReplayPlayer {
                     .as_ref()
                     .and_then(|sc| sc.camera_for_distance(dist, car_pos))
                 {
-                    (cam, fov)
+                    (cam, fov, true)
                 } else {
                     // Fall back to chase view if stage has no TV cameras
-                    (chase_camera_fn(car_model), 65.0)
+                    (chase_camera_fn(car_model), 65.0, false)
                 }
             }
-            ReplayCameraMode::Chase => (chase_camera_fn(car_model), 65.0),
-            ReplayCameraMode::Bonnet => (bonnet_camera_fn(car_model), 70.0),
+            ReplayCameraMode::Chase => (chase_camera_fn(car_model), 65.0, false),
+            ReplayCameraMode::Bonnet => (bonnet_camera_fn(car_model), 70.0, false),
         }
+    }
+
+    pub(super) fn audio_mix(
+        &mut self,
+        camera: Camera,
+        source: Vec3,
+        fixed_listener: bool,
+    ) -> ReplayMix {
+        let current = AudioPose {
+            time: self.current_time,
+            source,
+            eye: camera.eye,
+            camera_mode: self.camera_mode,
+            fixed_listener,
+        };
+        let previous = self.audio_pose.replace(current);
+        let (mut source_velocity, mut listener_velocity) = (Vec3::ZERO, Vec3::ZERO);
+        if let Some(previous) = previous {
+            let elapsed = current.time - previous.time;
+            if (0.001..=0.25).contains(&elapsed) {
+                source_velocity = (current.source - previous.source) / elapsed;
+                if !fixed_listener
+                    && !previous.fixed_listener
+                    && current.camera_mode == previous.camera_mode
+                {
+                    listener_velocity = (current.eye - previous.eye) / elapsed;
+                }
+            }
+        }
+        ReplayMix::from_positions(camera, source, source_velocity, listener_velocity)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_audio_uses_camera_orientation_distance_and_relative_velocity() {
+        let camera = Camera {
+            eye: Vec3::ZERO,
+            target: Vec3::NEG_Z,
+            up: Vec3::Y,
+        };
+        let approaching =
+            ReplayMix::from_positions(camera, Vec3::NEG_Z * 6.0, Vec3::Z * 65.0, Vec3::ZERO);
+        let leaving =
+            ReplayMix::from_positions(camera, Vec3::NEG_Z * 60.0, Vec3::NEG_Z * 65.0, Vec3::ZERO);
+        assert!(approaching.rate > 1.0 && leaving.rate < 1.0);
+        assert!((leaving.channels[0] - approaching.channels[0] * 0.1).abs() < 1e-6);
+        let right = ReplayMix::from_positions(camera, Vec3::X * 6.0, Vec3::ZERO, Vec3::ZERO);
+        assert!(right.channels[1] > right.channels[0]);
+        let following = ReplayMix::from_positions(
+            camera,
+            Vec3::NEG_Z * 6.0,
+            Vec3::NEG_Z * 65.0,
+            Vec3::NEG_Z * 65.0,
+        );
+        assert_eq!(following.rate, 1.0);
+    }
+
+    #[test]
+    fn replay_camera_cuts_and_seeks_do_not_create_listener_velocity() {
+        let mut player = ReplayPlayer::default();
+        let camera = Camera {
+            eye: Vec3::ZERO,
+            target: Vec3::NEG_Z,
+            up: Vec3::Y,
+        };
+        let source = Vec3::NEG_Z * 10.0;
+        player.audio_mix(camera, source, true);
+        player.current_time += 0.02;
+        let cut = Camera {
+            eye: Vec3::X * 50.0,
+            ..camera
+        };
+        assert_eq!(player.audio_mix(cut, source, true).rate, 1.0);
+        player.current_time += 0.02;
+        player.cycle_camera();
+        assert_eq!(player.audio_mix(camera, source, false).rate, 1.0);
+        player.seek(0.0);
+        assert_eq!(player.audio_mix(camera, source * 3.0, false).rate, 1.0);
+    }
 
     #[test]
     fn replay_recorder_and_interpolation() {
