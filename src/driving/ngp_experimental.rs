@@ -1077,8 +1077,17 @@ pub fn find_focus_pack(rbr_root: &Path) -> Option<PathBuf> {
         };
         for entry in entries.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-            if name.contains("focus") && (name.contains("2006") || name.contains("mk_ii")) {
-                return Some(entry.path());
+            if !name.contains("focus") || !(name.contains("2006") || name.contains("mk_ii")) {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_file() && name.ends_with(".zip")
+                || path.is_dir()
+                    && REQUIRED_PACK_FILES
+                        .iter()
+                        .any(|file| cars::resolve(&path, file).is_some_and(|p| p.is_file()))
+            {
+                return Some(path);
             }
         }
     }
@@ -1088,6 +1097,27 @@ pub fn find_focus_pack(rbr_root: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_model_directory_is_not_a_physics_pack() {
+        let root =
+            std::env::temp_dir().join(format!("rerbr-focus-model-only-{}", std::process::id()));
+        let model = root.join("Cars/FORD_FOCUS_2006");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("focus06.sgc"), b"visual").unwrap();
+        let descriptor = VehicleDescriptor::ford_focus_2006();
+        assert!(matches!(
+            inspect_pack_state(&root, &descriptor),
+            PackAuditState::Missing { .. }
+        ));
+        let legacy = root.join("Cars/Ford_Focus_2006_Legacy");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("common.lsp"), b"((\"Car\"))").unwrap();
+        assert!(
+            matches!(inspect_pack_state(&root, &descriptor), PackAuditState::Incomplete { path, .. } if path == legacy)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn report_always_emits_all_nine_stages_and_handles_missing_documents() {
