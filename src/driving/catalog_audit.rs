@@ -76,3 +76,157 @@ fn dump_catalog_duplicates() {
         true_duplicate_groups(&catalog)
     );
 }
+
+/// Logs installation-local catalog, metadata and complete NGP dependencies without booting a pack.
+#[test]
+#[ignore = "requires a private Documents/RBR directory"]
+fn audit_rsf_physics_inventory() {
+    use super::ngp_experimental::{inspect_pack_state, PackAuditState};
+    use rerbr_sim::{
+        ngp_candidate::inspect_car_pack,
+        rbr_formats::{car_pack::Pack, cars, lsp, rsf},
+    };
+    use std::collections::BTreeSet;
+
+    let docs = PathBuf::from(
+        std::env::var_os("VEHICLE_AUDIT_DOCUMENTS").expect("set VEHICLE_AUDIT_DOCUMENTS"),
+    );
+    let root = docs.join("RBR");
+    let catalog = Catalog::scan_root(&docs, &Selection::default());
+    let metadata = rsf::Install::open(&root).ok();
+    let visible: BTreeSet<_> = catalog
+        .browse_vehicle_indices(|_| false)
+        .into_iter()
+        .collect();
+    let emit = |kind: &str, values: &[&str]| {
+        let fields = values
+            .iter()
+            .map(|f| f.replace(['\t', '\r', '\n'], " "))
+            .collect::<Vec<_>>();
+        println!("INVENTORY\t{kind}\t{}", fields.join("\t"));
+    };
+    let retail = cars::resolve(&root, "Cars/Cars.ini")
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| cars::parse(&text).ok())
+        .unwrap_or_default();
+    for (index, entry) in catalog.vehicles.iter().enumerate() {
+        let d = &entry.descriptor;
+        emit(
+            "vehicle",
+            &[
+                &d.id,
+                &d.name,
+                &d.model,
+                d.rsf_pack.as_deref().unwrap_or(""),
+                &visible.contains(&index).to_string(),
+                &format!("{:?}", entry.classification),
+                &entry.files.missing.join("; "),
+            ],
+        );
+        if d.is_original_rbr() {
+            let slot = retail.iter().find(|e| e.index == d.original_slot as usize);
+            emit(
+                "retail",
+                &[
+                    &d.id,
+                    &d.original_slot.to_string(),
+                    slot.map_or("", |s| s.file_name.as_str()),
+                ],
+            );
+            continue;
+        }
+        if d.rsf_pack.is_none() && !d.is_ngp_experimental_car() {
+            emit("physics", &[&d.id, "unknown", "", "", ""]);
+            continue;
+        }
+        let state = inspect_pack_state(&root, d);
+        let path = match &state {
+            PackAuditState::Missing { expected } => {
+                emit("physics", &[&d.id, "missing", expected, "", ""]);
+                continue;
+            }
+            PackAuditState::Incompatible { path, reason } => {
+                emit(
+                    "physics",
+                    &[&d.id, "incomplete", &path.display().to_string(), reason, ""],
+                );
+                continue;
+            }
+            PackAuditState::Ready { path } | PackAuditState::Incomplete { path, .. } => path,
+        };
+        let pack = Pack::open(path).expect("resolved pack");
+        let mut problems = Vec::new();
+        let mut inspect = |name: &str| match pack.read(name) {
+            Ok(bytes)
+                if !bytes.is_empty()
+                    && (!name.ends_with(".lsp")
+                        || lsp::parse(&String::from_utf8_lossy(&bytes)).is_ok()) => {}
+            Ok(_) => problems.push(format!("{name} (empty or invalid)")),
+            Err(_) => problems.push(name.to_owned()),
+        };
+        inspect("common.lsp");
+        inspect("repair.ini");
+        for surface in ["gravel", "tarmac", "snow"] {
+            inspect(&format!("{surface}.lsp"));
+            inspect(&format!("r_{surface}.lsp"));
+            inspect(&format!("setups/d_{surface}.lsp"));
+        }
+        let mut metadata_id = String::new();
+        let mut association = "pending";
+        if let (Some(metadata), Some(name)) = (&metadata, &d.rsf_pack) {
+            let mut matches = metadata
+                .cars
+                .iter()
+                .filter(|car| car.pack.eq_ignore_ascii_case(name));
+            if let (Some(car), None) = (matches.next(), matches.next()) {
+                metadata_id = format!("{}/{}", car.id, car.model);
+                let model = metadata.models.iter().find(|model| model.id == car.model);
+                if model.is_some_and(|m| {
+                    rerbr_content::same_path(
+                        &format!("Cars/{}/{}.sgc", m.path, m.filename),
+                        &d.model,
+                    )
+                }) && entry.has_3d_model
+                    && !entry.model_missing
+                    && !entry.using_fallback_model
+                {
+                    association = "verified";
+                }
+            }
+        }
+        if !problems.is_empty() || !matches!(state, PackAuditState::Ready { .. }) {
+            association = "incomplete";
+        }
+        let pack_path = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        emit(
+            "physics",
+            &[
+                &d.id,
+                association,
+                &pack_path,
+                &problems.join("; "),
+                &metadata_id,
+            ],
+        );
+        if let Ok(evidence) = inspect_car_pack(path) {
+            for surface in evidence.surfaces {
+                emit(
+                    "surface",
+                    &[
+                        &d.id,
+                        &surface.surface,
+                        &surface.car_id.map_or(String::new(), |v| v.to_string()),
+                        &surface.common_sha256,
+                        surface.surface_sha256.as_deref().unwrap_or(""),
+                        surface.options_sha256.as_deref().unwrap_or(""),
+                        evidence.title.as_deref().unwrap_or(""),
+                    ],
+                );
+            }
+        }
+    }
+}
