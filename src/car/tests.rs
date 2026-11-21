@@ -219,6 +219,14 @@ fn showroom_texture_preserves_isolation_and_verified_aliases() {
         source.read(foreign).unwrap(),
         (foreign.into(), b"other".to_vec())
     );
+    std::fs::remove_file(root.join("Cars/Other/textures/paint.dds")).unwrap();
+    assert_eq!(
+        source.read(foreign).unwrap(),
+        (
+            "Cars/Selected/textures/paint.dds".into(),
+            b"local skin".to_vec()
+        )
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 pub(super) fn path_fixture(slope: f32) -> placement::ChasePath {

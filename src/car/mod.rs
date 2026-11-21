@@ -447,7 +447,7 @@ impl ShowroomTextures<'_> {
                         // its original directory in an identical shader map.
                         matches(*shaders) && matches(*model)
                     });
-                    if verified {
+                    if verified && cars::resolve(root, &path).is_some() {
                         let bytes = read_showroom_file(root, &dir, &path, LIMIT)?;
                         return Ok((path, bytes));
                     }
