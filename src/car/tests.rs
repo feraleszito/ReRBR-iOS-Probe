@@ -177,6 +177,50 @@ fn merged_face_uses_first_slot_only_when_surplus_slots_agree_on_material() {
 }
 
 #[test]
+fn collapsed_panels_follow_the_body_atlas_with_exact_bindings() {
+    let (mut elements, mut parts, mut shaders, mut settings) = fixture();
+    parts[0].entries[0].1 = "CarPaint".into();
+    settings.extend(ini::parse("[CarPaint]\n").unwrap());
+    shaders.extend(ini::parse(
+        "[foreign_diffuse_bitmap]\nFilename=foreign.dds\n[TSDefault]\nforeign.dds=Cars/fixture/foreign.dds\n",
+    ).unwrap());
+    for (i, (mesh_name, sgc_material, block0, block1)) in [
+        ("e_door_l", "paint", "foreign", "foreign"),
+        ("e_bonnet", "Default Material", "paint", "foreign"),
+        ("e_bumper_b", "foreign", "paint", "foreign"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut panel = triangle(node(mesh_name, 6 + i as i32, 0.0, 1.0, 0.0));
+        panel.faces[0].name = sgc_material.into();
+        elements.push(sgc::Element::Mesh(panel));
+        parts.extend(ini::parse(&format!(
+            "[{mesh_name}]\nFaceBlock0_Shader=CarPaint\nFaceBlock0_Material={block0}\nFaceBlock1_Shader=CarTextureNoDirt\nFaceBlock1_Material={block1}\n"
+        )).unwrap());
+    }
+    let converted = mesh::convert_for_mode(&elements, &parts, &shaders, &settings, true).unwrap();
+    for (record, expected) in [(6, "base.dds"), (7, "base.dds"), (8, "foreign.dds")] {
+        let draw = converted
+            .draws
+            .iter()
+            .find(|draw| draw.source == (record, 0))
+            .unwrap();
+        let material = &converted.materials[draw.material];
+        // A true named slot keeps its own atlas, including a dedicated trim binding.
+        assert!(
+            material
+                .path
+                .as_deref()
+                .is_some_and(|path| path.ends_with(expected)),
+            "{record}: {material:?}"
+        );
+    }
+    assert!(converted.unresolved_faces.is_empty());
+    assert_eq!(converted.stats(None).triangles, 8);
+}
+
+#[test]
 fn showroom_texture_preserves_isolation_and_verified_aliases() {
     let root = std::env::temp_dir().join(format!("rerbr-showroom-texture-{}", std::process::id()));
     std::fs::create_dir_all(root.join("Cars/Selected/textures")).unwrap();

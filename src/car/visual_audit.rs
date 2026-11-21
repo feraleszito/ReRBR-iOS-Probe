@@ -16,7 +16,7 @@ fn record(kind: &str, fields: &[&str]) {
     println!();
 }
 
-fn report_load(mode: &str, id: &str, loaded: Result<Car, String>) {
+fn report_load(root: &Path, mode: &str, id: &str, loaded: Result<Car, String>) {
     let car = match loaded {
         Ok(car) => car,
         Err(error) => {
@@ -41,6 +41,9 @@ fn report_load(mode: &str, id: &str, loaded: Result<Car, String>) {
     );
     for file in &car.files {
         record("file", &[mode, id, file]);
+    }
+    if mode == "showroom" {
+        report_panels(root, &car);
     }
     for face in &g.unresolved_faces {
         record("unresolved", &[mode, id, face]);
@@ -72,6 +75,47 @@ fn report_load(mode: &str, id: &str, loaded: Result<Car, String>) {
                 m.path.as_deref().unwrap_or(""),
                 texture.map_or("", |t| t.info.resolved.as_str()),
                 &texture.map_or(String::new(), |t| format!("{:?}", t.info.format)),
+            ],
+        );
+    }
+}
+
+fn report_panels(root: &Path, car: &Car) {
+    let d = &car.vehicle;
+    let model = cars::resolve(root, &d.model).unwrap();
+    let shader_file = cars::resolve(root, &d.shaders).unwrap();
+    let elements = sgc::parse(&fs::read(&model).unwrap()).unwrap();
+    let shaders = ini::parse(&String::from_utf8_lossy(&fs::read(shader_file).unwrap())).unwrap();
+    for draw in &car.geometry.draws {
+        let (index, face_index) = draw.source;
+        let sgc::Element::Mesh(mesh) = &elements[index] else {
+            unreachable!()
+        };
+        let name = mesh.node.name.as_str();
+        if !matches!(
+            name,
+            "e_bonnet" | "e_door_l" | "e_door_r" | "e_door_b" | "e_bumper_f" | "e_bumper_b"
+        ) {
+            continue;
+        }
+        let face = &mesh.faces[face_index];
+        let original = car_parts::diffuse_path(&shaders, &face.name).unwrap_or("");
+        let material = &car.geometry.materials[draw.material];
+        let resolved = material.path.as_ref().and_then(|p| car.textures.get(p));
+        record(
+            "panel",
+            &[
+                &d.id,
+                &d.model,
+                name,
+                &index.to_string(),
+                &mesh.node.id.to_string(),
+                &face_index.to_string(),
+                &face.prim_count.to_string(),
+                &face.name,
+                original,
+                &material.name,
+                resolved.map_or("", |texture| texture.info.resolved.as_str()),
             ],
         );
     }
@@ -110,7 +154,12 @@ fn audit_models(root: &Path, folder: &Path, listed: &BTreeSet<String>) {
                 descriptor.parts = format!("{stem}.ini");
                 descriptor.shaders = format!("{stem}_shaders.ini");
                 descriptor.shader_settings = format!("{stem}_shader_settings_clear.ini");
-                report_load("unlisted", &model, load_showroom_model(root, &descriptor));
+                report_load(
+                    root,
+                    "unlisted",
+                    &model,
+                    load_showroom_model(root, &descriptor),
+                );
             }
         }
     }
@@ -225,10 +274,15 @@ fn audit_vehicle_resources() {
             ],
         );
         if entry.has_3d_model && !entry.model_missing && !entry.using_fallback_model {
-            report_load("showroom", &d.id, load_showroom_model(&root, d));
+            report_load(&root, "showroom", &d.id, load_showroom_model(&root, d));
         }
         if entry.capability(true) == DriveCapability::Drivable {
-            report_load("driving", &d.id, load_vehicle_for_mode(&root, d, true));
+            report_load(
+                &root,
+                "driving",
+                &d.id,
+                load_vehicle_for_mode(&root, d, true),
+            );
         }
     }
     audit_models(&root, &car_dir, &listed);
@@ -268,15 +322,31 @@ fn bmw_and_ds3_original_face_block_regressions() {
             "{panel}"
         );
     }
-    let paint = "cars\\bmw_m3_e30\\textures\\bmw_m3_e30_external2.dds";
-    assert!(first_bmw
-        .geometry
-        .materials
-        .iter()
-        .any(|m| m.shader == "CarPaint"
-            && m.name == "external::carpaintx"
-            && m.path.as_deref() == Some(paint)));
+    let paint = "cars\\bmw_m3_e30\\textures\\bmw_m3_e30_external.dds";
+    let source = cars::resolve(&root, &bmw.model).unwrap();
+    let sgc = sgc::parse(&fs::read(source).unwrap()).unwrap();
+    for panel in panels {
+        let (record, owner) = sgc
+            .iter()
+            .enumerate()
+            .find_map(|(record, element)| match element {
+                sgc::Element::Mesh(owner) if owner.node.name == panel => Some((record, owner)),
+                _ => None,
+            })
+            .unwrap();
+        let draw = first_bmw
+            .geometry
+            .draws
+            .iter()
+            .find(|draw| draw.source == (record, 0))
+            .unwrap();
+        assert_eq!(draw.indices.len(), owner.triangles.len() * 3, "{panel}");
+        let material = &first_bmw.geometry.materials[draw.material];
+        assert_eq!(material.path.as_deref(), Some(paint), "{panel}");
+    }
     assert!(first_bmw.textures.contains_key(paint));
+    let original = cars::resolve(&root, paint).unwrap();
+    assert_eq!(first_bmw.textures[paint].bytes, fs::read(original).unwrap());
 
     let wheels = "cars\\ds3_wrc\\textures\\ds3_wrc_external_dynamic.dds";
     let ds3 = load_showroom_model(&root, ds3).expect("original DS3 assets");

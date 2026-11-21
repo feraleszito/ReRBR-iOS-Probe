@@ -18,6 +18,8 @@ pub struct Vertex {
 }
 #[derive(Debug, Clone)]
 pub struct Draw {
+    #[cfg(test)]
+    pub(crate) source: (usize, usize),
     pub indices: Range<usize>,
     pub material: usize,
     pub slot: u32,
@@ -73,6 +75,21 @@ pub fn checked_worlds(elements: &[sgc::Element]) -> Result<HashMap<i32, [[f32; 4
         }
     }
     Ok(sgc::chained_worlds(elements))
+}
+
+fn exterior_paint_atlas<'a>(parts: &[Section], shaders: &'a [Section]) -> Option<&'a str> {
+    let body = car_parts::section(parts, "e_body")?;
+    let blocks = car_parts::face_blocks(body);
+    let mut paint = blocks
+        .iter()
+        .filter(|b| b.shader.eq_ignore_ascii_case("CarPaint"));
+    let atlas = car_parts::diffuse_path(shaders, &paint.next()?.material)?;
+    paint
+        .all(|b| {
+            car_parts::diffuse_path(shaders, &b.material)
+                .is_some_and(|path| rerbr_content::same_path(atlas, path))
+        })
+        .then_some(atlas)
 }
 pub fn convert(
     elements: &[sgc::Element],
@@ -230,7 +247,12 @@ fn convert_set(
             _ => None,
         })
         .collect();
-    for element in elements {
+    let body_atlas = (!interior && allow_material_override)
+        .then(|| exterior_paint_atlas(parts, shaders))
+        .flatten();
+    // The audit uses the original SGC record index, before draw sorting.
+    #[allow(clippy::unused_enumerate_index)]
+    for (_record_index, element) in elements.iter().enumerate() {
         let sgc::Element::Mesh(mesh) = element else {
             continue;
         };
@@ -255,16 +277,14 @@ fn convert_set(
         // Some exports merge every triangle into one SGC face but retain the
         // old INI slots. When all slots still name the same material, FaceBlock0
         // provides its shader without borrowing a material from another face.
-        let merged_material = match (mesh.faces.as_slice(), blocks.split_first()) {
-            ([face], Some((first, rest))) => {
-                face.start_index == 0
-                    && face.prim_count as usize == mesh.triangles.len()
-                    && rest
-                        .iter()
-                        .all(|block| block.material.eq_ignore_ascii_case(&first.material))
-            }
-            _ => false,
-        };
+        let collapsed = matches!(mesh.faces.as_slice(), [face]
+            if face.start_index == 0 && face.prim_count as usize == mesh.triangles.len());
+        let merged_material = collapsed
+            && blocks.first().is_some_and(|first| {
+                blocks
+                    .iter()
+                    .all(|block| block.material.eq_ignore_ascii_case(&first.material))
+            });
         if !allow_material_override && blocks.len() != mesh.faces.len() {
             return Err(format!(
                 "CAR FACES: {} has {} mesh faces but {} material bindings",
@@ -309,6 +329,36 @@ fn convert_set(
                 });
                 if let Some(block) = block {
                     materials::resolve(shaders, settings, &block.shader, &block.material)
+                } else if let Some((block, material)) = indexed
+                    .filter(|b| {
+                        collapsed
+                            && blocks.len() > 1
+                            && b.shader.eq_ignore_ascii_case("CarPaint")
+                            && matches!(
+                                mesh.node.name.as_str(),
+                                "e_bonnet"
+                                    | "e_bumper_f"
+                                    | "e_bumper_b"
+                                    | "e_door_l"
+                                    | "e_door_r"
+                                    | "e_door_b"
+                            )
+                    })
+                    .and_then(|b| {
+                        // Prefer an exact diffuse declaration that also agrees with the
+                        // active body paint. The editor's and INI's labels can both
+                        // refer to other atlases in community models.
+                        let atlas = body_atlas?;
+                        [&b.material, &face.name]
+                            .into_iter()
+                            .find(|name| {
+                                car_parts::diffuse_path(shaders, name)
+                                    .is_some_and(|path| rerbr_content::same_path(atlas, path))
+                            })
+                            .map(|name| (b, name))
+                    })
+                {
+                    materials::resolve(shaders, settings, &block.shader, material)
                 } else if let Some(block) =
                     indexed.filter(|_| blocks.len() == mesh.faces.len() || merged_material)
                 {
@@ -405,6 +455,8 @@ fn convert_set(
             }
             if result.indices.len() > first {
                 result.draws.push(Draw {
+                    #[cfg(test)]
+                    source: (_record_index, face_idx),
                     indices: first..result.indices.len(),
                     material,
                     slot,
