@@ -475,6 +475,7 @@ impl Catalog {
         }
         catalog.index_vehicle_aliases();
         catalog.index_numbered_vehicle_copies(&rbr_root);
+        catalog.index_numbered_pack_copies(&rbr_root);
         catalog
     }
 
@@ -515,7 +516,8 @@ impl Catalog {
 
     fn index_numbered_vehicle_copies(&mut self, root: &Path) {
         let mut by_model = BTreeMap::new();
-        for (index, entry) in self.vehicles.iter().enumerate() {
+        for index in 0..self.vehicles.len() {
+            let entry = &self.vehicles[index];
             if !entry.has_3d_model || entry.using_fallback_model || entry.model_missing {
                 continue;
             }
@@ -527,13 +529,56 @@ impl Catalog {
                 if let Some(original) = unnumbered_model_path(&model) {
                     if let Some(&first) = by_model.get(&original) {
                         let first = *self.vehicle_aliases.get(&first).unwrap_or(&first);
-                        if identical_visual_copy(root, &self.vehicles[first].descriptor, d) {
+                        let original = &self.vehicles[first].descriptor;
+                        if let Some(copy) = compare_visual_copy(root, original, d) {
+                            if copy == VisualCopy::CompleteCopy {
+                                let selected = d.clone();
+                                let original = &mut self.vehicles[first].descriptor;
+                                original.model = selected.model;
+                                original.parts = selected.parts;
+                                original.shaders = selected.shaders;
+                                original.shader_settings = selected.shader_settings;
+                            }
                             self.vehicle_aliases.insert(index, first);
                         }
                     }
                 }
             }
             by_model.entry(model).or_insert(index);
+        }
+    }
+
+    fn index_numbered_pack_copies(&mut self, root: &Path) {
+        let mut packs = BTreeMap::new();
+        for index in 0..self.vehicles.len() {
+            let entry = &self.vehicles[index];
+            let Some(name) = entry.descriptor.rsf_pack.as_deref() else {
+                continue;
+            };
+            let name = name.to_ascii_lowercase();
+            let base =
+                numbered_copy_base(&name).filter(|p| p.ends_with("_ngp6") || p.ends_with("_ngp7"));
+            if let Some(&first) = base.and_then(|name| packs.get(name)) {
+                let original: &VehicleEntry = &self.vehicles[first];
+                // Only the unregistered directory fallback fabricates this absent model path.
+                let unbound = entry.model_missing
+                    && entry.descriptor.category.as_deref() == Some("RSF CUSTOM");
+                let exact = same_visual_paths(&original.descriptor, &entry.descriptor)
+                    || compare_visual_copy(root, &original.descriptor, &entry.descriptor)
+                        == Some(VisualCopy::Exact);
+                if original.has_3d_model
+                    && !original.model_missing
+                    && !original.using_fallback_model
+                    && (unbound || exact)
+                    && identical_numbered_physics(root, &original.descriptor, &entry.descriptor)
+                {
+                    let mut replacement = original.clone();
+                    replacement.descriptor.id.clone_from(&entry.descriptor.id);
+                    self.vehicles[index] = replacement;
+                    self.vehicle_aliases.insert(index, first);
+                }
+            }
+            packs.entry(name).or_insert(index);
         }
     }
 
@@ -599,23 +644,81 @@ impl Catalog {
 
 fn unnumbered_model_path(model: &str) -> Option<String> {
     let (directory, file) = model.rsplit_once('/')?;
-    let (base, suffix) = directory.rsplit_once(' ')?;
-    suffix.parse::<u32>().ok().filter(|&number| number >= 2)?;
-    Some(format!("{base}/{file}"))
+    Some(format!("{}/{file}", numbered_copy_base(directory)?))
 }
 
-fn identical_visual_copy(
+fn numbered_copy_base(name: &str) -> Option<&str> {
+    let (base, suffix) = name.rsplit_once(' ')?;
+    suffix.parse::<u32>().ok().filter(|&number| number >= 2)?;
+    Some(base)
+}
+
+fn visual_paths(d: &VehicleDescriptor) -> [&str; 4] {
+    [&d.model, &d.parts, &d.shaders, &d.shader_settings]
+}
+
+fn same_visual_paths(a: &VehicleDescriptor, b: &VehicleDescriptor) -> bool {
+    visual_paths(a)
+        .into_iter()
+        .zip(visual_paths(b))
+        .all(|(a, b)| rerbr_content::same_path(a, b))
+}
+
+fn identical_numbered_physics(
     root: &Path,
     original: &VehicleDescriptor,
     copy: &VehicleDescriptor,
 ) -> bool {
+    use super::ngp_experimental::{inspect_pack_state, PackAuditState};
+    use rerbr_sim::rbr_formats::car_pack::Pack;
+    let Ok(canonical_root) = root.canonicalize() else {
+        return false;
+    };
+    let open = |descriptor: &VehicleDescriptor| match inspect_pack_state(root, descriptor) {
+        PackAuditState::Ready { path }
+            if path
+                .canonicalize()
+                .is_ok_and(|p| p.starts_with(&canonical_root)) =>
+        {
+            Pack::open(&path).ok()
+        }
+        _ => None,
+    };
+    let Some((original, copy)) = open(original).zip(open(copy)) else {
+        return false;
+    };
+    let same = |name: &str| {
+        original
+            .read(name)
+            .ok()
+            .zip(copy.read(name).ok())
+            .is_some_and(|(a, b)| !a.is_empty() && a == b)
+    };
+    same("common.lsp")
+        && same("repair.ini")
+        && ["gravel", "tarmac", "snow"].into_iter().all(|surface| {
+            same(&format!("{surface}.lsp"))
+                && same(&format!("r_{surface}.lsp"))
+                && same(&format!("setups/d_{surface}.lsp"))
+        })
+}
+
+#[derive(PartialEq, Eq)]
+enum VisualCopy {
+    Exact,
+    CompleteCopy,
+}
+
+fn compare_visual_copy(
+    root: &Path,
+    original: &VehicleDescriptor,
+    copy: &VehicleDescriptor,
+) -> Option<VisualCopy> {
     use rerbr_asset_formats::cars::resolve;
     use std::fs;
     use std::io::Read;
 
-    let Ok(root_canonical) = root.canonicalize() else {
-        return false;
-    };
+    let root_canonical = root.canonicalize().ok()?;
     let files_match = |a: &Path, b: &Path| -> Option<bool> {
         let (a, b) = (a.canonicalize().ok()?, b.canonicalize().ok()?);
         if !a.starts_with(&root_canonical) || !b.starts_with(&root_canonical) {
@@ -638,25 +741,18 @@ fn identical_visual_copy(
         }
         Some(true)
     };
-    for (a, b) in [
-        (&original.model, &copy.model),
-        (&original.parts, &copy.parts),
-        (&original.shaders, &copy.shaders),
-        (&original.shader_settings, &copy.shader_settings),
-    ] {
-        if resolve(root, a)
-            .zip(resolve(root, b))
-            .and_then(|(a, b)| files_match(&a, &b))
-            != Some(true)
-        {
-            return false;
+    for (a, b) in visual_paths(original).into_iter().zip(visual_paths(copy)) {
+        if !files_match(&resolve(root, a)?, &resolve(root, b)?)? {
+            return None;
         }
     }
     let textures = |d: &VehicleDescriptor| -> Option<BTreeMap<String, PathBuf>> {
         let normalized = d.model.replace('\\', "/");
         let (dir, _) = normalized.rsplit_once('/')?;
-        let path = resolve(root, &format!("{dir}/textures"))?;
         let mut files = BTreeMap::new();
+        let Some(path) = resolve(root, &format!("{dir}/textures")) else {
+            return Some(files);
+        };
         for file in fs::read_dir(path).ok()? {
             let file = file.ok()?;
             let path = file.path();
@@ -671,15 +767,35 @@ fn identical_visual_copy(
                 }
             }
         }
-        (!files.is_empty()).then_some(files)
+        Some(files)
     };
-    let Some((a, b)) = textures(original).zip(textures(copy)) else {
-        return false;
-    };
-    a.len() == b.len()
+    let (a, b) = textures(original).zip(textures(copy))?;
+    if !a.is_empty()
+        && a.len() == b.len()
         && a.iter().all(|(name, path)| {
             b.get(name).and_then(|other| files_match(path, other)) == Some(true)
         })
+    {
+        return Some(VisualCopy::Exact);
+    }
+    // This export can be split into a model-only directory and a numbered copy
+    // with its declared atlas. A competing DDS in the original forbids relocation.
+    let model = original.model.replace('\\', "/").to_ascii_lowercase();
+    let (dir, _) = model.rsplit_once('/')?;
+    let prefix = format!("{dir}/textures/");
+    (a.is_empty()
+        && !original.required_textures.is_empty()
+        && original.required_textures.iter().all(|path| {
+            path.replace('\\', "/")
+                .to_ascii_lowercase()
+                .strip_prefix(&prefix)
+                .and_then(|name| b.get(name))
+                .is_some_and(|file| {
+                    file.canonicalize()
+                        .is_ok_and(|p| p.starts_with(&root_canonical))
+                })
+        }))
+    .then_some(VisualCopy::CompleteCopy)
 }
 
 #[cfg(test)]
@@ -758,6 +874,102 @@ fn numbered_visual_copies_require_equal_assets_and_keep_saved_ids() {
     assert!(!regular.contains(&copy.as_str()));
     assert!(browses(&copy).contains(&copy.as_str()));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn numbered_visual_copy_supplies_only_a_complete_declared_atlas() {
+    let docs =
+        std::env::temp_dir().join(format!("rerbr-complete-visual-copy-{}", std::process::id()));
+    let cars = docs.join("RBR/Cars");
+    for folder in ["Model", "Model 2"] {
+        let dir = cars.join(folder);
+        std::fs::create_dir_all(dir.join("textures")).unwrap();
+        for file in ["Model.sgc", "Model.ini", "Model_shader_settings_clear.ini"] {
+            std::fs::write(dir.join(file), b"same").unwrap();
+        }
+        std::fs::write(dir.join("Model_shaders.ini"),
+            "[TextureSets]\nTextureSet0=Default\n[Default]\npaint.dds=Cars/Model/textures/paint.dds\n[paint_diffuse_bitmap]\nFilename=paint.dds\n[paint]\n").unwrap();
+    }
+    let copy_dds = cars.join("Model 2/textures/paint.dds");
+    std::fs::write(&copy_dds, b"paint").unwrap();
+    let visible = |catalog: &Catalog| {
+        catalog
+            .browse_vehicle_indices(|_| false)
+            .into_iter()
+            .filter(|&index| {
+                catalog.vehicles[index]
+                    .descriptor
+                    .id
+                    .starts_with("rsf-model")
+            })
+            .count()
+    };
+    let scan = || Catalog::scan_root(&docs, &Selection::default());
+    let catalog = scan();
+    assert_eq!(visible(&catalog), 1);
+    assert_eq!(
+        catalog.vehicle("rsf-model").unwrap().descriptor.model,
+        "Cars/Model 2/Model.sgc"
+    );
+    assert!(catalog.vehicle("rsf-model-2").is_some());
+    std::fs::write(cars.join("Model/textures/paint.dds"), b"distinct paint").unwrap();
+    assert_eq!(visible(&scan()), 2);
+    std::fs::remove_dir_all(docs).unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn numbered_ngp_copies_keep_saved_ids_and_distinct_physics_visible() {
+    let docs = std::env::temp_dir().join(format!("rerbr-numbered-packs-{}", std::process::id()));
+    let root = docs.join("RBR");
+    let cache = root.join("rsfdata/cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(
+        cache.join("cars.json"),
+        r#"[{"id":"42","name":"Test Rally Car","path":"Test_Rally_Car_ngp6","carmodel_id":"25"}]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        cache.join("carmodels.json"),
+        r#"[{"id":"25","name":"Test Rally Car","path":"Model","filename":"Model","fallback":"5"}]"#,
+    )
+    .unwrap();
+    let model_dir = root.join("Cars/Model");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    std::fs::write(model_dir.join("Model.sgc"), b"selected model").unwrap();
+    for suffix in ["", " 2", " 3"] {
+        let pack = root.join(format!("rsfdata/cars/Test_Rally_Car_ngp6{suffix}"));
+        std::fs::create_dir_all(pack.join("setups")).unwrap();
+        std::fs::write(pack.join("common.lsp"), b"((\"Car\"))").unwrap();
+        std::fs::write(pack.join("repair.ini"), b"[Repair]\n").unwrap();
+        for surface in ["gravel", "tarmac", "snow"] {
+            std::fs::write(pack.join(format!("{surface}.lsp")), b"((\"Car\"))").unwrap();
+            std::fs::write(pack.join(format!("r_{surface}.lsp")), b"((\"Car\"))").unwrap();
+            let setup = if surface == "snow" && suffix == " 3" {
+                b"((\"Alt\"))"
+            } else {
+                b"((\"Car\"))"
+            };
+            std::fs::write(pack.join(format!("setups/d_{surface}.lsp")), setup).unwrap();
+        }
+    }
+    let catalog = Catalog::scan_root(&docs, &Selection::default());
+    let visible = catalog
+        .browse_vehicle_indices(|_| false)
+        .into_iter()
+        .map(|i| catalog.vehicles[i].descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(visible.contains(&"rsf-test-rally-car"));
+    assert!(!visible.contains(&"rsf-test-rally-car-ngp6-2"));
+    assert!(visible.contains(&"rsf-test-rally-car-ngp6-3"));
+    let saved = catalog.vehicle("rsf-test-rally-car-ngp6-2").unwrap();
+    assert_eq!(saved.descriptor.model, "Cars/Model/Model.sgc");
+    assert_eq!(
+        saved.descriptor.rsf_pack.as_deref(),
+        Some("Test_Rally_Car_ngp6")
+    );
+    std::fs::remove_dir_all(docs).unwrap();
 }
 
 fn state_of(id: &str, selected: &str, supported: bool, files: &FileAudit) -> EntryState {
