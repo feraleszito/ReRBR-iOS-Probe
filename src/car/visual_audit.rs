@@ -401,6 +401,149 @@ fn lancer_evo_x_showroom_uses_the_declared_atlas() {
 }
 
 #[test]
+#[ignore = "requires original RSF resources"]
+fn beta_rsfs_authored_variants_and_wheel_atlases() {
+    let docs = std::env::var_os("VEHICLE_AUDIT_DOCUMENTS").expect("set VEHICLE_AUDIT_DOCUMENTS");
+    let docs = Path::new(&docs);
+    let root = docs.join("RBR");
+    let catalog = Catalog::scan_root(docs, &Selection::default());
+    let load = |id| load_showroom_model(&root, &catalog.vehicle(id).unwrap().descriptor).unwrap();
+    let bmw = load("rsf-bmw-m3-e30-grpa");
+    assert!(bmw.geometry.drawn.iter().any(|p| p == "e_wing_evo1"));
+    assert!(!bmw
+        .geometry
+        .drawn
+        .iter()
+        .any(|p| p == "e_wing" || p == "e_mirror_l" || p == "e_mirror_r"));
+    let c4 = load("rsf-citroen-c4-wrc-2008");
+    for side in ["l", "r"] {
+        assert!(c4
+            .geometry
+            .drawn
+            .iter()
+            .any(|p| p == &format!("e_mirror_{side}")));
+        assert!(c4
+            .geometry
+            .drawn
+            .iter()
+            .any(|p| p == &format!("e_mirror_{side}_glass")));
+    }
+    assert!(!c4
+        .geometry
+        .drawn
+        .iter()
+        .any(|p| p.starts_with("e_mirror_1_")));
+    let yaris = load("rsf-toyota-yaris-wrc-2018");
+    for (preset, lamps) in [
+        (
+            "light_on_bonnet",
+            ["e_bonnet_ramp", "e_extralights_lit", "e_extralights_glass"],
+        ),
+        (
+            "light_on_all",
+            [
+                "e_bumper_ramp_l",
+                "e_extralights2_l_lit",
+                "e_extralights_glass2_l",
+            ],
+        ),
+    ] {
+        let preset = fs::read_to_string(
+            root.join(format!("Cars/YARIS_WRC18/carparts/{preset}/yaris_wrc.ini")),
+        )
+        .unwrap();
+        let preset = ini::parse(&preset).unwrap();
+        for name in lamps {
+            assert!(!yaris.geometry.drawn.iter().any(|p| p == name), "{name}");
+            assert!(
+                super::selection::exterior_with_lamps(name, &preset, |_| true).is_ok(),
+                "{name}"
+            );
+        }
+    }
+    assert!(!yaris.geometry.drawn.iter().any(|p| p == "e_bumper_ramp_r"));
+    for (id, part) in [
+        ("rsf-ford-fiesta-wrc-2019", "e_tapas"),
+        ("rsf-hyundai-i20-coupe-wrc-2020", "e_diveplates"),
+    ] {
+        let car = load(id);
+        assert!(car.geometry.drawn.iter().any(|p| p == part), "{id}: {part}");
+        assert!(
+            !car.geometry
+                .unresolved_faces
+                .iter()
+                .any(|p| p.starts_with(&format!("{part} "))),
+            "{id}: {part}"
+        );
+        if part == "e_diveplates" {
+            assert!(!car.geometry.drawn.iter().any(|p| p == "e_bonnet_ramp"));
+        }
+    }
+    for (id, atlas) in [
+        (
+            "rsf-skoda-fabia-rs-rally2",
+            "fabia_rs_rally2_external_dynamic.dds",
+        ),
+        (
+            "rsf-toyota-gr-yaris-rally2",
+            "yaris_rally2_external_dynamic.dds",
+        ),
+    ] {
+        let car = load(id);
+        assert!(
+            !car.geometry
+                .unresolved_faces
+                .iter()
+                .any(|p| p.starts_with("e_wheel_gravel_")),
+            "{id}"
+        );
+        for slot in 1..=4 {
+            for shader in ["CarTire", "CarRim"] {
+                assert!(
+                    car.geometry.draws.iter().any(|d| {
+                        let material = &car.geometry.materials[d.material];
+                        d.slot == slot
+                            && material.shader == shader
+                            && material.path.as_deref().is_some_and(|p| p.ends_with(atlas))
+                    }),
+                    "{id} slot {slot} {shader}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires original Fiesta Rally2 metadata, pack and complete numbered visual copy"]
+fn beta_fiesta_relocated_atlas_loads_in_driving_without_retail_index() {
+    let docs = std::env::var_os("VEHICLE_AUDIT_DOCUMENTS").expect("set VEHICLE_AUDIT_DOCUMENTS");
+    let docs = Path::new(&docs);
+    let root = docs.join("RBR");
+    let catalog = Catalog::scan_root(docs, &Selection::default());
+    let entry = catalog.vehicle("rsf-ford-fiesta-rally2").unwrap();
+    assert!(!root.join("Cars/Cars.ini").exists());
+    assert_eq!(
+        entry.capability(true),
+        DriveCapability::Drivable,
+        "{:?}",
+        entry.files.missing
+    );
+    let vehicle = &entry.descriptor;
+    let pack = crate::driving::ngp_experimental::inspect_pack_state(&root, vehicle);
+    assert!(matches!(
+        pack,
+        crate::driving::ngp_experimental::PackAuditState::Ready { .. }
+    ));
+    let car = load_vehicle_for_mode(&root, vehicle, true).expect("original driving assets");
+    assert!(car.cockpit.is_some(), "{:?}", car.cockpit_error);
+    assert!(car.textures.values().all(|t| t
+        .info
+        .resolved
+        .to_ascii_lowercase()
+        .starts_with("cars/fiesta_rally2_23 2/textures/")));
+}
+
+#[test]
 #[ignore = "requires the original model and parts file"]
 fn dump_face_blocks() {
     let sgc_path = std::env::var_os("VEHICLE_AUDIT_SGC").expect("set VEHICLE_AUDIT_SGC");

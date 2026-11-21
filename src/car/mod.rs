@@ -293,7 +293,9 @@ pub fn load_vehicle_for_mode(
         elements.len()
     );
     let parts = sections(root, vehicle, &entry.ini_file)?;
-    let shaders = sections(root, vehicle, &entry.shader_file)?;
+    let shader_bytes = read(root, vehicle, &entry.shader_file, 1024 * 1024)?;
+    let shaders = ini::parse(&String::from_utf8_lossy(&shader_bytes))
+        .map_err(|e| format!("CAR INI {}: {e}", entry.shader_file))?;
     let settings = sections(root, vehicle, &clear)?;
     let geometry = mesh::convert_for_mode(
         &elements,
@@ -303,7 +305,30 @@ pub fn load_vehicle_for_mode(
         allow_experimental_ngp && vehicle.is_ngp_experimental_car(),
     )?;
     log_unresolved_faces(vehicle, &geometry);
-    let _ = &mut files;
+    let model = entry.file_name.replace('\\', "/");
+    let mut copy = model
+        .rsplit_once('/')
+        .map(|(model_dir, _)| ShowroomTextures {
+            root,
+            model_dir,
+            model: (&entry.file_name, &bytes),
+            shaders: (&entry.shader_file, &shader_bytes),
+            aliases: BTreeMap::new(),
+        });
+    let mut read_texture = |path: &str| {
+        let (resolved, bytes) = match read(root, vehicle, path, 64 * 1024 * 1024) {
+            Ok(bytes) => (path.to_owned(), bytes),
+            Err(error)
+                if vehicle.is_ngp_experimental_car() && cars::resolve(root, path).is_none() =>
+            {
+                let copy = copy.as_mut().ok_or_else(|| error.clone())?;
+                copy.read(path)
+                    .map_err(|copy_error| format!("{error}; {copy_error}"))?
+            }
+            Err(error) => return Err(error),
+        };
+        prepare_texture(path, &resolved, bytes)
+    };
     let mut textures = BTreeMap::new();
     for path in geometry
         .materials
@@ -311,13 +336,12 @@ pub fn load_vehicle_for_mode(
         .filter_map(|m| m.path.clone())
         .collect::<BTreeSet<_>>()
     {
-        let bytes = read(root, vehicle, &path, 64 * 1024 * 1024)?;
-        let texture = prepare_texture(&path, &path, bytes)?;
+        let texture = read_texture(&path)?;
         eprintln!(
             "car-chase DDS PASS: {path} {:?}, {} mips",
             texture.info.format, texture.info.mip_count
         );
-        files.push(path.clone());
+        files.push(texture.info.resolved.clone());
         textures.insert(path, texture);
     }
     let s = geometry.stats(None);
@@ -345,7 +369,7 @@ pub fn load_vehicle_for_mode(
         cockpit_error: None,
     };
     #[cfg(feature = "physics-stage")]
-    let car = cockpit::install(car, root, &elements, &parts, &shaders, &settings);
+    let car = cockpit::install(car, &elements, &parts, &shaders, &settings, read_texture);
     Ok(car)
 }
 pub fn private_root(documents: &Path) -> PathBuf {
@@ -353,7 +377,6 @@ pub fn private_root(documents: &Path) -> PathBuf {
 }
 
 /// Read a descriptor dependency from the selected car's directory.
-#[cfg(any(feature = "physics-drive", test))]
 fn read_showroom_file(
     root: &Path,
     model_dir: &str,
@@ -402,7 +425,6 @@ fn log_unresolved_faces(vehicle: &rerbr_content::VehicleDescriptor, geometry: &m
     }
 }
 
-#[cfg(any(feature = "physics-drive", test))]
 struct ShowroomTextures<'a> {
     root: &'a Path,
     model_dir: &'a str,
@@ -411,7 +433,6 @@ struct ShowroomTextures<'a> {
     aliases: BTreeMap<String, bool>,
 }
 
-#[cfg(any(feature = "physics-drive", test))]
 impl ShowroomTextures<'_> {
     fn read(&mut self, request: &str) -> Result<(String, Vec<u8>), String> {
         rerbr_content::validate_relative_path(request)?;

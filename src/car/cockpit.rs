@@ -11,13 +11,13 @@ pub fn steering_transform(node: Mat4, angle: f32) -> Mat4 {
 }
 
 #[cfg(feature = "physics-stage")]
-pub fn install(
+pub(super) fn install(
     mut car: super::Car,
-    root: &std::path::Path,
     elements: &[rerbr_asset_formats::sgc::Element],
     parts: &[rerbr_asset_formats::ini::Section],
     shaders: &[rerbr_asset_formats::ini::Section],
     settings: &[rerbr_asset_formats::ini::Section],
+    mut read_texture: impl FnMut(&str) -> Result<crate::asset_probe::TextureData, String>,
 ) -> super::Car {
     use rerbr_asset_formats::sgc;
     use std::collections::{BTreeMap, BTreeSet};
@@ -57,8 +57,7 @@ pub fn install(
             if car.textures.contains_key(path) {
                 continue;
             }
-            let bytes = super::read(root, &car.vehicle, path, 64 * 1024 * 1024)?;
-            textures.insert(path.clone(), super::prepare_texture(path, path, bytes)?);
+            textures.insert(path.clone(), read_texture(path)?);
         }
         Ok::<_, String>((geometry, node, textures))
     })();
@@ -69,7 +68,11 @@ pub fn install(
                 geometry.drawn,
                 textures.keys().collect::<Vec<_>>()
             );
-            car.files.extend(textures.keys().cloned());
+            car.files.extend(
+                textures
+                    .values()
+                    .map(|texture| texture.info.resolved.clone()),
+            );
             car.textures.extend(textures);
             car.geometry.append(geometry);
             car.cockpit = Some(node);

@@ -91,6 +91,18 @@ fn exterior_paint_atlas<'a>(parts: &[Section], shaders: &'a [Section]) -> Option
         })
         .then_some(atlas)
 }
+
+fn one_declared_atlas(blocks: &[car_parts::FaceBlock], shaders: &[Section]) -> bool {
+    blocks
+        .first()
+        .and_then(|b| car_parts::diffuse_path(shaders, &b.material))
+        .is_some_and(|atlas| {
+            blocks.iter().all(|b| {
+                car_parts::diffuse_path(shaders, &b.material)
+                    .is_some_and(|path| rerbr_content::same_path(atlas, path))
+            })
+        })
+}
 pub fn convert(
     elements: &[sgc::Element],
     parts: &[Section],
@@ -257,7 +269,9 @@ fn convert_set(
             continue;
         };
         let selected = if interior {
-            selection::interior(&mesh.node.name, parts)
+            selection::interior_with_variants(&mesh.node.name, parts, |name| {
+                mesh_names.contains(name)
+            })
         } else {
             selection::exterior_with_lamps(&mesh.node.name, parts, |name| mesh_names.contains(name))
         };
@@ -285,6 +299,30 @@ fn convert_set(
                     .iter()
                     .all(|block| block.material.eq_ignore_ascii_case(&first.material))
             });
+        let merged_paint = allow_material_override
+            && collapsed
+            && blocks.len() > 1
+            && blocks.first().is_some_and(|b| b.shader == "CarPaint")
+            && blocks.iter().all(|b| {
+                matches!(
+                    b.shader.as_str(),
+                    "CarPaint" | "CarTextureNoDirt" | "CarColorNoDirt"
+                )
+            })
+            && one_declared_atlas(&blocks, shaders);
+        // Some RSF gravel wheels split the same authored atlas into additional
+        // runs carrying a single editor label. Keep the declared tyre/rim order
+        // and use the last binding for further subdivisions of that atlas.
+        let split_wheel = allow_material_override
+            && selection::wheel(&mesh.node.name).is_some()
+            && mesh.faces.len() > 1
+            && !blocks.is_empty()
+            && blocks
+                .iter()
+                .all(|b| matches!(b.shader.as_str(), "CarTire" | "CarRim"))
+            && mesh.faces.iter().all(|f| f.name == mesh.faces[0].name)
+            && car_parts::diffuse_path(shaders, &mesh.faces[0].name).is_none()
+            && one_declared_atlas(&blocks, shaders);
         if !allow_material_override && blocks.len() != mesh.faces.len() {
             return Err(format!(
                 "CAR FACES: {} has {} mesh faces but {} material bindings",
@@ -359,8 +397,14 @@ fn convert_set(
                     })
                 {
                     materials::resolve(shaders, settings, &block.shader, material)
-                } else if let Some(block) =
-                    indexed.filter(|_| blocks.len() == mesh.faces.len() || merged_material)
+                } else if let Some(block) = indexed
+                    .filter(|_| {
+                        blocks.len() == mesh.faces.len()
+                            || merged_material
+                            || merged_paint
+                            || split_wheel
+                    })
+                    .or_else(|| split_wheel.then(|| blocks.last()).flatten())
                 {
                     // Some exporters leave the original editor material name in
                     // the SGC after editing the INI.

@@ -44,7 +44,7 @@ pub fn exterior_with_lamps<'a>(
     parts: &'a [Section],
     has_mesh: impl Fn(&str) -> bool,
 ) -> Result<&'a Section, &'static str> {
-    let selected = exterior(name, parts);
+    let selected = reject_inactive_variant(name, parts, exterior(name, parts), &has_mesh);
     if !name.starts_with("e_light_") {
         return selected;
     }
@@ -71,13 +71,73 @@ pub fn interior<'a>(name: &str, parts: &'a [Section]) -> Result<&'a Section, &'s
     part_set(name, parts, true)
 }
 
+pub fn interior_with_variants<'a>(
+    name: &str,
+    parts: &'a [Section],
+    has_mesh: impl Fn(&str) -> bool,
+) -> Result<&'a Section, &'static str> {
+    reject_inactive_variant(name, parts, interior(name, parts), has_mesh)
+}
+
+fn mirror_family(name: &str) -> Option<(&str, &str, bool)> {
+    let (view, rest) = name.split_at_checked(2)?;
+    let rest = rest.strip_prefix("mirror_")?;
+    let glass = rest.strip_suffix("_glass");
+    let side = glass.unwrap_or(rest).rsplit('_').next()?;
+    matches!(side, "l" | "r").then_some((view, side, glass.is_some()))
+}
+
+fn reject_inactive_variant<'a>(
+    name: &str,
+    parts: &'a [Section],
+    selected: Result<&'a Section, &'static str>,
+    has_mesh: impl Fn(&str) -> bool,
+) -> Result<&'a Section, &'static str> {
+    let part = selected?;
+    if !car_parts::is_switched(part)
+        || !part
+            .get("Predicate")
+            .is_some_and(|p| p.eq_ignore_ascii_case("NotUsed"))
+    {
+        return Ok(part);
+    }
+    let mirror = mirror_family(name);
+    if name != "e_wing" && mirror.is_none() {
+        return Ok(part);
+    }
+    let alternative = |candidate: &str| {
+        if name == "e_wing" {
+            candidate.starts_with("e_wing_evo")
+        } else {
+            mirror_family(candidate) == mirror
+                || (matches!(name, "e_mirror_l" | "e_mirror_r")
+                    && matches!(candidate, "e_racingmirror" | "e_stockmirror"))
+        }
+    };
+    if parts.iter().any(|other| {
+        other.name != name
+            && alternative(&other.name)
+            && has_mesh(&other.name)
+            && other
+                .get("Switch")
+                .is_some_and(|s| s.eq_ignore_ascii_case("false"))
+            && other
+                .get("Predicate")
+                .is_some_and(|p| p.eq_ignore_ascii_case("NotUsed"))
+            && !car_parts::face_blocks(other).is_empty()
+    }) {
+        return Err("alternate part selected by original INI");
+    }
+    Ok(part)
+}
+
 /// Body panels and fixtures that RBR itself treats as part of the car (damage panels, glass,
 /// mirrors, exhaust, roof intake). Community tools write `Switch = true` on them in some cars
 /// (BMW M3 E30) without meaning "disabled", so their flag never hides them.
 pub fn is_structural_panel(name: &str) -> bool {
     name.starts_with("e_door_")
-        || name.starts_with("e_bonnet")
-        || name.starts_with("e_bumper_")
+        || (name.starts_with("e_bonnet") && !name.starts_with("e_bonnet_ramp"))
+        || (name.starts_with("e_bumper_") && !name.starts_with("e_bumper_ramp_"))
         || name == "e_bumpervents"
         || name == "e_wing"
         || name.starts_with("e_mirror_")

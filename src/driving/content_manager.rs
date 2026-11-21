@@ -474,7 +474,7 @@ impl Catalog {
             );
         }
         catalog.index_vehicle_aliases();
-        catalog.index_numbered_vehicle_copies(&rbr_root);
+        catalog.index_numbered_vehicle_copies(root, &selection.vehicle.id);
         catalog.index_numbered_pack_copies(&rbr_root);
         catalog
     }
@@ -514,7 +514,8 @@ impl Catalog {
         }
     }
 
-    fn index_numbered_vehicle_copies(&mut self, root: &Path) {
+    fn index_numbered_vehicle_copies(&mut self, documents: &Path, selected_id: &str) {
+        let root = documents.join("RBR");
         let mut by_model = BTreeMap::new();
         for index in 0..self.vehicles.len() {
             let entry = &self.vehicles[index];
@@ -530,14 +531,40 @@ impl Catalog {
                     if let Some(&first) = by_model.get(&original) {
                         let first = *self.vehicle_aliases.get(&first).unwrap_or(&first);
                         let original = &self.vehicles[first].descriptor;
-                        if let Some(copy) = compare_visual_copy(root, original, d) {
+                        if let Some(copy) = compare_visual_copy(&root, original, d) {
                             if copy == VisualCopy::CompleteCopy {
                                 let selected = d.clone();
-                                let original = &mut self.vehicles[first].descriptor;
+                                let entry = &mut self.vehicles[first];
+                                let original = &mut entry.descriptor;
                                 original.model = selected.model;
                                 original.parts = selected.parts;
                                 original.shaders = selected.shaders;
                                 original.shader_settings = selected.shader_settings;
+                                // CompleteCopy already checked each declared basename
+                                // against the new directory without a competing DDS.
+                                let (directory, _) =
+                                    original.model.rsplit_once('/').expect("model directory");
+                                for texture in &mut original.required_textures {
+                                    let filename = texture
+                                        .rsplit(['/', '\\'])
+                                        .next()
+                                        .expect("texture filename");
+                                    *texture = format!("{directory}/textures/{filename}");
+                                }
+                                let mut files = audit_vehicle(documents, original);
+                                for missing in entry
+                                    .files
+                                    .missing
+                                    .iter()
+                                    .filter(|path| path.starts_with("rsfdata/cars/"))
+                                {
+                                    files.missing.push(missing.clone());
+                                    files.total += 1;
+                                }
+                                if entry.state == EntryState::MissingFiles {
+                                    entry.state = state_of(&original.id, selected_id, true, &files);
+                                }
+                                entry.files = files;
                             }
                             self.vehicle_aliases.insert(index, first);
                         }
@@ -989,6 +1016,9 @@ pub fn audit_vehicle(root: &Path, vehicle: &VehicleDescriptor) -> FileAudit {
     let install = root.join("RBR");
     let paths = vehicle
         .required_paths()
+        .filter(|path| {
+            !vehicle.is_ngp_experimental_car() || !rerbr_content::same_path(path, &vehicle.index)
+        })
         .map(str::to_owned)
         .chain(vehicle.optional_textures.iter().cloned())
         .collect::<Vec<_>>();
