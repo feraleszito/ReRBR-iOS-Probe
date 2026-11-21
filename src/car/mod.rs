@@ -403,22 +403,62 @@ fn log_unresolved_faces(vehicle: &rerbr_content::VehicleDescriptor, geometry: &m
 }
 
 #[cfg(any(feature = "physics-drive", test))]
-fn read_showroom_texture(
-    root: &Path,
-    model_dir: &str,
-    request: &str,
-) -> Result<(String, Vec<u8>), String> {
-    rerbr_content::validate_relative_path(request)?;
-    let path = request.replace('\\', "/");
-    let basename = path.rsplit('/').next().unwrap_or(&path);
-    let local_path = format!("{model_dir}/textures/{basename}");
-    const LIMIT: u64 = 64 * 1024 * 1024;
-    if let Ok(bytes) = read_showroom_file(root, model_dir, &path, LIMIT) {
-        return Ok((path, bytes));
+struct ShowroomTextures<'a> {
+    root: &'a Path,
+    model_dir: &'a str,
+    model: (&'a str, &'a [u8]),
+    shaders: (&'a str, &'a [u8]),
+    aliases: BTreeMap<String, bool>,
+}
+
+#[cfg(any(feature = "physics-drive", test))]
+impl ShowroomTextures<'_> {
+    fn read(&mut self, request: &str) -> Result<(String, Vec<u8>), String> {
+        rerbr_content::validate_relative_path(request)?;
+        let path = request.replace('\\', "/");
+        let basename = path.rsplit('/').next().unwrap_or(&path);
+        let Self {
+            root,
+            model_dir,
+            model,
+            shaders,
+            aliases,
+        } = self;
+        const LIMIT: u64 = 64 * 1024 * 1024;
+        if let Ok(bytes) = read_showroom_file(root, model_dir, &path, LIMIT) {
+            return Ok((path, bytes));
+        }
+        if let [cars, folder, textures, _] = path.split('/').collect::<Vec<_>>().as_slice() {
+            if cars.eq_ignore_ascii_case("cars") && textures.eq_ignore_ascii_case("textures") {
+                let dir = format!("{cars}/{folder}");
+                if !dir.eq_ignore_ascii_case(model_dir) {
+                    let verified = *aliases.entry(dir.clone()).or_insert_with(|| {
+                        let matches = |(path, expected): (&str, &[u8])| {
+                            let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+                            read_showroom_file(
+                                root,
+                                &dir,
+                                &format!("{dir}/{basename}"),
+                                expected.len() as u64,
+                            )
+                            .is_ok_and(|bytes| bytes == expected)
+                        };
+                        // A renamed copy of the same model may still declare
+                        // its original directory in an identical shader map.
+                        matches(*shaders) && matches(*model)
+                    });
+                    if verified {
+                        let bytes = read_showroom_file(root, &dir, &path, LIMIT)?;
+                        return Ok((path, bytes));
+                    }
+                }
+            }
+        }
+        let local_path = format!("{model_dir}/textures/{basename}");
+        let bytes = read_showroom_file(root, model_dir, &local_path, LIMIT)
+            .map_err(|err| format!("SHOWROOM DDS: {request} for {model_dir}: {err}"))?;
+        Ok((local_path, bytes))
     }
-    let bytes = read_showroom_file(root, model_dir, &local_path, LIMIT)
-        .map_err(|err| format!("SHOWROOM DDS: {request} for {model_dir}: {err}"))?;
-    Ok((local_path, bytes))
 }
 
 /// Loads any installed RBR or RallySimFans 3D exterior car model (`.sgc`, `.ini`, `_shaders.ini`,
@@ -467,13 +507,20 @@ pub fn load_showroom_model(
         vehicle.shaders.clone(),
         settings_path,
     ];
+    let mut texture_source = ShowroomTextures {
+        root,
+        model_dir,
+        model: (&vehicle.model, &sgc_bytes),
+        shaders: (&vehicle.shaders, &shaders_bytes),
+        aliases: BTreeMap::new(),
+    };
     for path in geometry
         .materials
         .iter()
         .filter_map(|m| m.path.clone())
         .collect::<BTreeSet<_>>()
     {
-        let (resolved, bytes) = read_showroom_texture(root, model_dir, &path)?;
+        let (resolved, bytes) = texture_source.read(&path)?;
         let texture = prepare_texture(&path, &resolved, bytes)?;
         files.push(resolved);
         textures.insert(path, texture);

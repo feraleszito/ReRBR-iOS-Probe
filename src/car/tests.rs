@@ -177,7 +177,7 @@ fn merged_face_uses_first_slot_only_when_surplus_slots_agree_on_material() {
 }
 
 #[test]
-fn showroom_texture_uses_only_the_selected_car_directory() {
+fn showroom_texture_preserves_isolation_and_verified_aliases() {
     let root = std::env::temp_dir().join(format!("rerbr-showroom-texture-{}", std::process::id()));
     std::fs::create_dir_all(root.join("Cars/Selected/textures")).unwrap();
     std::fs::create_dir_all(root.join("Cars/Other/textures")).unwrap();
@@ -186,13 +186,40 @@ fn showroom_texture_uses_only_the_selected_car_directory() {
     std::fs::write(root.join("Cars/Other/textures/paint.dds"), b"other").unwrap();
 
     let foreign = "Cars/Other/textures/paint.dds";
-    let (resolved, bytes) = read_showroom_texture(&root, "Cars/Selected", foreign).unwrap();
+    let mut source = ShowroomTextures {
+        root: &root,
+        model_dir: "Cars/Selected",
+        model: ("Cars/Selected/car.sgc", b"selected model"),
+        shaders: ("Cars/Selected/car_shaders.ini", b"selected shader mapping"),
+        aliases: BTreeMap::new(),
+    };
+    let (resolved, bytes) = source.read(foreign).unwrap();
     assert_eq!(resolved, "Cars/Selected/textures/paint.dds");
     assert_eq!(bytes, b"selected");
     assert!(read_showroom_file(&root, "Cars/Selected", foreign, 128).is_err());
-    std::fs::remove_file(local).unwrap();
-    assert!(read_showroom_texture(&root, "Cars/Selected", foreign).is_err());
-    assert!(read_showroom_texture(&root, "Cars/Selected", "../paint.dds").is_err());
+    std::fs::remove_file(&local).unwrap();
+    assert!(source.read(foreign).is_err());
+    assert!(source.read("../paint.dds").is_err());
+
+    // A same-named model alone does not establish that its texture belongs here.
+    std::fs::write(root.join("Cars/Other/car.sgc"), source.model.1).unwrap();
+    std::fs::write(
+        root.join("Cars/Other/car_shaders.ini"),
+        b"unrelated mapping",
+    )
+    .unwrap();
+    source.aliases.clear();
+    assert!(source.read(foreign).is_err());
+
+    // The exact declared DDS wins over a local texture with different bytes.
+    std::fs::write(root.join("Cars/Other/car_shaders.ini"), source.shaders.1).unwrap();
+    std::fs::write(local, b"local skin").unwrap();
+    source.aliases.clear();
+    assert_eq!(
+        source.read(foreign).unwrap(),
+        (foreign.into(), b"other".to_vec())
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 pub(super) fn path_fixture(slope: f32) -> placement::ChasePath {
     let p = [[-20.0, -30.0], [-20.0, 130.0], [20.0, 130.0], [20.0, -30.0]]

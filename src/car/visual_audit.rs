@@ -131,18 +131,26 @@ fn inspect_interior(root: &Path, d: &VehicleDescriptor) -> Result<super::mesh::G
             .map_or(Err(err), |s| read_ini(&format!("{s}_overcast.ini")))
     })?;
     let parts = read_ini(&d.parts)?;
-    let shaders = read_ini(&d.shaders)?;
+    let shader_bytes = super::read_showroom_file(root, dir, &d.shaders, 2 * 1024 * 1024)?;
+    let shaders = ini::parse(&String::from_utf8_lossy(&shader_bytes)).map_err(|e| e.to_string())?;
     let g = super::mesh::convert_interior_for_mode(&elements, &parts, &shaders, &settings, true)?;
     if !g.draws.iter().any(|d| d.slot == 5) {
         return Err("COCKPIT: no steering wheel draw".into());
     }
+    let mut texture_source = super::ShowroomTextures {
+        root,
+        model_dir: dir,
+        model: (&d.model, &bytes),
+        shaders: (&d.shaders, &shader_bytes),
+        aliases: Default::default(),
+    };
     for path in g
         .materials
         .iter()
         .filter_map(|m| m.path.as_deref())
         .collect::<BTreeSet<_>>()
     {
-        let (resolved, bytes) = super::read_showroom_texture(root, dir, path)?;
+        let (resolved, bytes) = texture_source.read(path)?;
         let tex = super::prepare_texture(path, &resolved, bytes)?;
         record(
             "interior-dds",
@@ -296,6 +304,30 @@ fn bmw_and_ds3_original_face_block_regressions() {
         next_bmw.geometry.unresolved_faces
     );
     assert!(!next_bmw.textures.contains_key(wheels));
+}
+
+#[test]
+#[ignore = "requires both original Lancer Evo X V1.21 directories"]
+fn lancer_evo_x_showroom_uses_the_declared_atlas() {
+    let docs = std::env::var_os("VEHICLE_AUDIT_DOCUMENTS").expect("set VEHICLE_AUDIT_DOCUMENTS");
+    let docs = Path::new(&docs);
+    let root = docs.join("RBR");
+    let catalog = Catalog::scan_root(docs, &Selection::default());
+    let load = |id| {
+        let vehicle = catalog.vehicle(id).expect("Lancer Evo X in catalog");
+        load_showroom_model(&root, &vehicle.descriptor).expect("original Lancer Evo X assets")
+    };
+    let alias = load("rsf-lancer-evo-x");
+    let declared = load("rsf-mitsubishi-lancer-evo-x-r4");
+    assert_eq!(alias.textures.len(), 6);
+    assert_eq!(alias.textures.len(), declared.textures.len());
+    for (path, texture) in &alias.textures {
+        assert!(path.starts_with("cars\\lancer_evo_x_v1_21\\textures\\"));
+        assert!(rerbr_content::same_path(path, &texture.info.resolved));
+        assert_eq!(texture.bytes, declared.textures[path].bytes);
+    }
+    assert_eq!(alias.geometry.indices, declared.geometry.indices);
+    assert_ne!(alias.vehicle.id, declared.vehicle.id);
 }
 
 #[test]
