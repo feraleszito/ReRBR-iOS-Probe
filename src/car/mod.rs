@@ -497,3 +497,5 @@ pub fn load_showroom_model(
 mod part_audit;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "physics-stage"))]
+mod visual_audit;
