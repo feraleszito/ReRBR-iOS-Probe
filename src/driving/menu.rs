@@ -1472,14 +1472,24 @@ impl Menu {
                             entry.setup_file.into()
                         };
                         rows.push(Row::info("REGLAS", rule_summary));
+                        let profile_progress = ctx
+                            .career
+                            .and_then(|career| career.profile.as_ref())
+                            .map(|profile| &profile.school_progress);
+                        let grade = profile_progress.map_or_else(
+                            || entry.grade_label(),
+                            |progress| {
+                                super::school::medal_label(progress.grades[sch.selected]).into()
+                            },
+                        );
                         rows.push(Row::info(
                             "NOTA / ARCHIVOS",
                             if entry.assets_present {
-                                format!("{} · ARCHIVOS OK", entry.grade_label())
+                                format!("{grade} · ARCHIVOS OK")
                             } else {
                                 format!(
                                     "{} · FALTA {}",
-                                    entry.grade_label(),
+                                    grade,
                                     entry
                                         .missing_files
                                         .first()
@@ -1487,6 +1497,22 @@ impl Menu {
                                 )
                             },
                         ));
+                        if let Some(last) = profile_progress.and_then(|progress| {
+                            progress
+                                .recent
+                                .iter()
+                                .rev()
+                                .find(|attempt| attempt.lesson == sch.selected)
+                        }) {
+                            let time = last.elapsed_ms.map_or_else(
+                                || "SIN CRONO".into(),
+                                |elapsed| format_stage_time(f64::from(elapsed) / 1000.0),
+                            );
+                            rows.push(Row::info(
+                                "ÚLTIMO INTENTO",
+                                format!("{} · {time}", super::school::medal_label(last.grade)),
+                            ));
+                        }
                         rows.push(Row::info("TEXTOS / VOZ", sch.audio.status.label()));
                         rows.push(Row {
                             label: "ABRIR LECCIÓN (VER INSTRUCCIONES)".into(),
@@ -2616,12 +2642,28 @@ impl Menu {
                 "CAMPEONATO ORIGINAL RBR (SEASON.DAT · 6 RALLIES)".into(),
                 "TIEMPOS, PENALIZACIONES Y PROGRESO GUARDADOS".into(),
             ],
-            Page::RallySchool => vec![
-                "17 LECCIONES ORIGINALES (MAPS 73..89 / PHYSICS/SCHOOL)".into(),
-                ctx.school
-                    .map(|s| s.strings_status.clone())
-                    .unwrap_or_else(|| "SIN STRINGS.RBZ".into()),
-            ],
+            Page::RallySchool => {
+                let summary = ctx
+                    .career
+                    .and_then(|career| career.profile.as_ref())
+                    .map(|profile| {
+                        let [bronze, silver, gold] = profile.school_progress.medals();
+                        let summary = format!(
+                            "{} · {bronze} BRONCE / {silver} PLATA / {gold} ORO",
+                            profile.pilot_name
+                        );
+                        match profile.school_progress.achievement() {
+                            Some(award) => format!("{summary} · {award}"),
+                            None => summary,
+                        }
+                    })
+                    .unwrap_or_else(|| "17 LECCIONES ORIGINALES".into());
+                vec![
+                    summary,
+                    ctx.school
+                        .map_or_else(|| "SIN STRINGS.RBZ".into(), |s| s.strings_status.clone()),
+                ]
+            }
             Page::SchoolBriefing => {
                 if let Some((idx, sch)) = ctx.active_school_lesson.zip(ctx.school) {
                     if let Some(entry) = sch.entries.get(idx as usize) {
@@ -3407,12 +3449,12 @@ impl Menu {
         let verdict_color = if res.verdict > 0 { GOOD } else { BAD };
         lines.push((
             format!(
-                "CALIFICACIÓN: {}/4 · TIEMPO: {} · MEJOR: {} -> {} ({}/17)",
+                "{} · {}/4 · TIEMPO: {} · MEJOR: {} -> {}",
+                super::school::medal_label(res.verdict),
                 res.verdict,
                 format_stage_time(f64::from(res.elapsed_seconds)),
                 res.previous_best,
                 res.new_best,
-                res.unlocked_count
             ),
             verdict_color,
         ));
@@ -3437,7 +3479,10 @@ impl Menu {
                 }
             }
         } else {
-            lines.push(("PROGRESO GUARDADO EN SCHOOL_PROFILE.TXT".into(), TEXT));
+            lines.push((
+                format!("PROGRESO: {}/17 LECCIONES", res.unlocked_count),
+                TEXT,
+            ));
         }
         for (i, (line, color)) in lines.into_iter().take(9).enumerate() {
             ui::text_clipped(

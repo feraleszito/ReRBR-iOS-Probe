@@ -19,13 +19,13 @@ pub fn collision_triangles_for(
         .flat_map(|c| c.tree.triangles.iter().map(|t| t.vertices.map(|i| c.vertices[i as usize])))
         .collect())
 }
+pub use rbr_gameplay::race_options::DamageLevel;
 use rbr_gameplay::{
     car_damage::{level as damage_level, reset_damage, CarriedDamage, Rules as DamageRules},
     mode::{ModeEnd, ModeRules, StepView},
     stage::{Stage, State, NGP_LOAD_SUBSTEPS},
     weather::{self, Draws, Preset, Season},
 };
-pub use rbr_gameplay::race_options::DamageLevel;
 use rbr_hybrid::pure::{self, Playback};
 use rbr_physics::rigid_body::layout as body;
 use rbr_school::{lesson::Lesson, step::SchoolEvent, SchoolRun};

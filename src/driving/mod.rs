@@ -1002,7 +1002,17 @@ impl Runtime {
                                 .set_mode(crate::car::showroom::ShowroomMode::Garage);
                             self.menu.open(menu::Page::Dealership);
                         }
-                        menu::MainSection::RallySchool => self.menu.open(menu::Page::RallySchool),
+                        menu::MainSection::RallySchool => {
+                            let grades = self
+                                .career
+                                .profile
+                                .as_ref()
+                                .map_or_else(school::SchoolCatalog::load_results, |profile| {
+                                    profile.school_progress.grades
+                                });
+                            self.school.set_results(grades);
+                            self.menu.open(menu::Page::RallySchool);
+                        }
                         menu::MainSection::Settings => self.menu.open(menu::Page::Settings),
                         _ => {}
                     }
@@ -2095,7 +2105,9 @@ impl Runtime {
             SchoolFinishNow => {
                 if self.active_school_lesson.is_some() {
                     let st = self.worker.state.lock().unwrap().school_state.clone();
-                    if let Some(st) = st {
+                    if let Some(mut st) = st.filter(|st| st.started || st.ended.is_some()) {
+                        st.ended
+                            .get_or_insert(rerbr_sim::drive::SchoolOutcome::Finished);
                         self.finalize_school_completion(&st);
                     }
                 }
@@ -3124,13 +3136,26 @@ impl Runtime {
         audio::set_paused(true);
         audio::clear_speech_queue();
         audio::set_codriver_active(true);
-        let result = self.school.record_verdict_result(st);
+        let result = self.school.record_verdict_result(
+            st,
+            self.career
+                .profile
+                .as_mut()
+                .map(|profile| &mut profile.school_progress),
+        );
         self.saved_replay = self.replay_recorder.finish();
         self.controls.clear();
         self.active_school_result = Some(result);
         self.school_incident_banner = None;
         self.menu.show(menu::Page::SchoolResult);
-        self.message = None;
+        self.message = if self.career.profile.is_some() {
+            self.career
+                .save()
+                .err()
+                .map(|err| format!("ACADEMIA: ERROR AL GUARDAR · {err}"))
+        } else {
+            None
+        };
         audio::set_menu_music_active(true);
     }
     fn sync_race_state(

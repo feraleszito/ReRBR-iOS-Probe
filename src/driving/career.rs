@@ -5,8 +5,12 @@
 //! Never touches `personal_bests.json`, `championship_save.txt`, or `school_profile.txt`.
 
 use super::content_manager::{DriveCapability, VehicleEntry};
+use super::school::{SchoolAttempt, SchoolProgress, LESSON_COUNT, RECENT_ATTEMPTS};
 use rerbr_content::StageDescriptor;
-use rerbr_sim::{drive::{summarize_carried_damage, DamageGroup}, rbr_gameplay::car_damage::CarriedDamage};
+use rerbr_sim::{
+    drive::{summarize_carried_damage, DamageGroup},
+    rbr_gameplay::car_damage::CarriedDamage,
+};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1287,9 +1291,21 @@ impl VehicleCondition {
         // Older saves recorded the paid repair only in the condition percentages.
         for (stored, measured, group) in [
             (self.engine_pct, summary.engine_pct, DamageGroup::Engine),
-            (self.transmission_pct, summary.transmission_pct, DamageGroup::Transmission),
-            (self.suspension_pct, summary.suspension_pct, DamageGroup::Suspension),
-            (self.body_electrics_pct, summary.body_electrics_pct, DamageGroup::BodyElectrics),
+            (
+                self.transmission_pct,
+                summary.transmission_pct,
+                DamageGroup::Transmission,
+            ),
+            (
+                self.suspension_pct,
+                summary.suspension_pct,
+                DamageGroup::Suspension,
+            ),
+            (
+                self.body_electrics_pct,
+                summary.body_electrics_pct,
+                DamageGroup::BodyElectrics,
+            ),
         ] {
             if stored == 100 && measured < 100 {
                 group.repair(&mut carried);
@@ -1308,9 +1324,13 @@ impl VehicleCondition {
         for component in components {
             let (health, group) = match component {
                 RepairComponent::Engine => (&mut self.engine_pct, DamageGroup::Engine),
-                RepairComponent::Transmission => (&mut self.transmission_pct, DamageGroup::Transmission),
+                RepairComponent::Transmission => {
+                    (&mut self.transmission_pct, DamageGroup::Transmission)
+                }
                 RepairComponent::Suspension => (&mut self.suspension_pct, DamageGroup::Suspension),
-                RepairComponent::BodyElectrics => (&mut self.body_electrics_pct, DamageGroup::BodyElectrics),
+                RepairComponent::BodyElectrics => {
+                    (&mut self.body_electrics_pct, DamageGroup::BodyElectrics)
+                }
             };
             *health = 100;
             if let Some(damage) = damage.as_mut() {
@@ -1685,6 +1705,7 @@ pub struct CareerProfile {
     pub last_saved_unix_s: u64,
     pub transactions: Vec<Transaction>,
     pub completed_championships: Vec<CompletedChampionshipRecord>,
+    pub school_progress: SchoolProgress,
     pub active_championship: Option<ActiveChampionship>,
     pub is_dev_profile: bool,
     pub dev_unlock_all: bool,
@@ -1724,6 +1745,7 @@ impl CareerProfile {
                 timestamp_unix_s: now,
             }],
             completed_championships: Vec::new(),
+            school_progress: SchoolProgress::default(),
             active_championship: None,
             is_dev_profile: false,
             dev_unlock_all: false,
@@ -1756,6 +1778,7 @@ impl CareerProfile {
                 timestamp_unix_s: now,
             }],
             completed_championships: Vec::new(),
+            school_progress: SchoolProgress::default(),
             active_championship: None,
             is_dev_profile: true,
             dev_unlock_all: true,
@@ -3017,6 +3040,18 @@ pub fn encode_profile_json(p: &CareerProfile) -> String {
     let _ = writeln!(out, "  \"competition_number\": {},", p.competition_number);
     let _ = writeln!(out, "  \"cash_usd\": {},", p.cash_usd);
     let _ = writeln!(out, "  \"last_saved_unix_s\": {},", p.last_saved_unix_s);
+    let _ = writeln!(out, "  \"school_grades\": {:?},", p.school_progress.grades);
+    out.push_str("  \"school_attempts\": [");
+    for (i, attempt) in p.school_progress.recent.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let elapsed = attempt
+            .elapsed_ms
+            .map_or_else(|| "null".into(), |ms| ms.to_string());
+        let _ = write!(out, "[{}, {}, {elapsed}]", attempt.lesson, attempt.grade);
+    }
+    out.push_str("],\n");
     out.push_str("  \"owned_vehicle_ids\": [");
     for (i, id) in p.owned_vehicle_ids.iter().enumerate() {
         if i > 0 {
@@ -3824,6 +3859,32 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
             .and_then(JsonVal::as_bool)
             .unwrap_or(false);
 
+    let mut school_progress = SchoolProgress::default();
+    if let Some(grades) = root.field("school_grades").and_then(JsonVal::as_array) {
+        for (grade, saved) in school_progress.grades.iter_mut().zip(grades) {
+            *grade = saved.as_u64().filter(|&n| n <= 4).unwrap_or(0) as u32;
+        }
+    }
+    if let Some(attempts) = root.field("school_attempts").and_then(JsonVal::as_array) {
+        school_progress.recent = attempts
+            .iter()
+            .skip(attempts.len().saturating_sub(RECENT_ATTEMPTS))
+            .filter_map(|attempt| {
+                let [lesson, grade, elapsed] = attempt.as_array()? else {
+                    return None;
+                };
+                let lesson = lesson.as_u64().filter(|&n| n < LESSON_COUNT as u64)? as usize;
+                let grade = grade.as_u64().filter(|&n| n <= 4)? as u32;
+                let elapsed_ms = elapsed.as_u64().and_then(|ms| u32::try_from(ms).ok());
+                Some(SchoolAttempt {
+                    lesson,
+                    grade,
+                    elapsed_ms,
+                })
+            })
+            .collect();
+    }
+
     Ok(CareerProfile {
         schema_version: CAREER_SCHEMA_VERSION,
         pilot_name,
@@ -3840,6 +3901,7 @@ pub fn parse_profile_json(text: &str) -> Result<CareerProfile, String> {
         last_saved_unix_s,
         transactions,
         completed_championships,
+        school_progress,
         active_championship,
         is_dev_profile,
         dev_unlock_all,
@@ -4408,6 +4470,7 @@ mod tests {
         let parsed = parse_profile_json(v1_json).expect("v1 save must migrate cleanly");
         assert_eq!(parsed.schema_version, CAREER_SCHEMA_VERSION);
         assert_eq!(parsed.cash_usd, 4_200);
+        assert_eq!(parsed.school_progress, SchoolProgress::default());
         assert!(parsed.historics_unlocked);
         let st = parsed
             .vehicle_state("mg-zr-s1600")
@@ -4606,7 +4669,12 @@ mod tests {
     fn authentic_repairs_survive_roundtrip_and_leave_unpaid_damage_intact() {
         let mut carried = CarriedDamage::default();
         carried.set(0x3AA0, 1.0f32.to_bits());
-        for group in [DamageGroup::Engine, DamageGroup::Transmission, DamageGroup::Suspension, DamageGroup::BodyElectrics] {
+        for group in [
+            DamageGroup::Engine,
+            DamageGroup::Transmission,
+            DamageGroup::Suspension,
+            DamageGroup::BodyElectrics,
+        ] {
             group.repair(&mut carried);
         }
         carried.set(0x3AF4, 0); // Engine flag
@@ -4638,7 +4706,10 @@ mod tests {
         assert_eq!(repaired.suspension_pct, 100);
         assert_eq!(repaired.ngp_wheel_damage_levels, [0; 4]);
         assert_eq!(repaired.engine_pct, damaged.engine_pct);
-        assert_eq!(repaired.ngp_tyre_damage_levels, damaged.ngp_tyre_damage_levels);
+        assert_eq!(
+            repaired.ngp_tyre_damage_levels,
+            damaged.ngp_tyre_damage_levels
+        );
         condition.replace_tyres();
         assert_eq!(read(&condition).ngp_tyre_damage_levels, [0; 4]);
         assert_eq!(read(&condition).engine_pct, damaged.engine_pct);
@@ -4664,7 +4735,11 @@ mod tests {
         assert!(regional.total_repair_cost_usd < REGIONAL_BASE_PRIZES_USD[4]);
         assert!(historic.total_repair_cost_usd < HISTORIC_BASE_PRIZES_USD[4]);
         condition.engine_pct = 60;
-        assert!(ServiceQuote::for_condition(&condition, CareerTier::Regional, tyre).total_repair_cost_usd > regional.total_repair_cost_usd);
+        assert!(
+            ServiceQuote::for_condition(&condition, CareerTier::Regional, tyre)
+                .total_repair_cost_usd
+                > regional.total_repair_cost_usd
+        );
     }
 
     #[test]
@@ -4826,5 +4901,46 @@ mod tests {
         let loaded = parse_profile_json(&tampered).unwrap();
         assert!(!loaded.is_dev_profile);
         assert!(!loaded.dev_unlock_all);
+    }
+}
+#[test]
+fn school_progress_roundtrips_in_a_single_career_slot() {
+    let root = std::env::temp_dir().join(format!("rerbr-career-school-{}", std::process::id()));
+    let mut store = CareerStore::default();
+    let mut pilot = CareerProfile::create("School pilot").unwrap();
+    pilot.school_progress.grades[3] = 4;
+    pilot.school_progress.recent.push(SchoolAttempt {
+        lesson: 3,
+        grade: 4,
+        elapsed_ms: Some(41_100),
+    });
+    let expected = pilot.school_progress.clone();
+    store.slots[0] = Some(pilot.clone());
+    store.profile = Some(pilot);
+    store.slots[1] = Some(CareerProfile::create("Other pilot").unwrap());
+    store.save_to_root(&root).unwrap();
+    store.active_slot = 1;
+    store.profile = store.slots[1].clone();
+    store.save_to_root(&root).unwrap();
+
+    let loaded = CareerStore::load_from_root(&root);
+    assert_eq!(loaded.slots[0].as_ref().unwrap().school_progress, expected);
+    assert_eq!(
+        loaded.slots[1].as_ref().unwrap().school_progress,
+        SchoolProgress::default()
+    );
+    if DEV_MODE_ENABLED {
+        let mut dev = CareerStore::load_dev_profile_from_root(&root);
+        assert_eq!(dev.school_progress, SchoolProgress::default());
+        dev.school_progress.grades[7] = 3;
+        CareerStore::save_dev_profile_in_root(&root, &dev).unwrap();
+        assert_eq!(
+            CareerStore::load_dev_profile_from_root(&root)
+                .school_progress
+                .grades[7],
+            3
+        );
+        let normal = CareerStore::load_from_root(&root);
+        assert_eq!(normal.slots[0].as_ref().unwrap().school_progress, expected);
     }
 }

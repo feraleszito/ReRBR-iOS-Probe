@@ -16,6 +16,76 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub const LESSON_COUNT: usize = Lesson::COUNT as usize;
+pub const RECENT_ATTEMPTS: usize = 16;
+
+pub fn medal_label(grade: u32) -> &'static str {
+    match grade {
+        1 | 2 => "BRONCE",
+        3 => "PLATA",
+        4 => "ORO",
+        _ => "SIN MEDALLA",
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchoolAttempt {
+    pub lesson: usize,
+    pub grade: u32,
+    pub elapsed_ms: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SchoolProgress {
+    pub grades: [u32; LESSON_COUNT],
+    pub recent: Vec<SchoolAttempt>,
+}
+
+impl SchoolProgress {
+    fn record(&mut self, st: &rerbr_sim::drive::SchoolSessionSnapshot, grade: u32) {
+        let lesson = st.lesson_index as usize;
+        let Some(best) = self.grades.get_mut(lesson) else {
+            return;
+        };
+        *best = (*best).max(grade);
+        let elapsed_ms =
+            (!st.untimed && st.elapsed_seconds.is_finite() && st.elapsed_seconds >= 0.0)
+                .then(|| (st.elapsed_seconds * 1000.0).round() as u32);
+        if self.recent.len() == RECENT_ATTEMPTS {
+            self.recent.remove(0);
+        }
+        self.recent.push(SchoolAttempt {
+            lesson,
+            grade,
+            elapsed_ms,
+        });
+    }
+
+    pub fn medals(&self) -> [usize; 3] {
+        let mut counts = [0; 3];
+        for &grade in &self.grades {
+            match grade {
+                1 | 2 => counts[0] += 1,
+                3 => counts[1] += 1,
+                4 => counts[2] += 1,
+                _ => {}
+            }
+        }
+        counts
+    }
+
+    pub fn achievement(&self) -> Option<&'static str> {
+        let [bronze, silver, gold] = self.medals();
+        if gold == LESSON_COUNT {
+            Some("ACADEMIA · TODAS EN ORO")
+        } else if bronze + silver + gold == LESSON_COUNT {
+            Some("DIPLOMA DE RALLY SCHOOL")
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SchoolAudioStatus {
     Ready {
@@ -313,20 +383,44 @@ impl SchoolCatalog {
         let Some(lesson) = Lesson::new(index as u32) else {
             return;
         };
-        self.results = award(self.results, lesson, verdict);
+        self.set_results(award(self.results, lesson, verdict));
+        self.save_results();
+    }
+
+    pub fn set_results(&mut self, results: [u32; LESSON_COUNT]) {
+        self.results = results;
         for (i, entry) in self.entries.iter_mut().enumerate() {
             entry.grade = self.results[i];
         }
-        self.save_results();
     }
 
     pub fn record_verdict_result(
         &mut self,
         st: &rerbr_sim::drive::SchoolSessionSnapshot,
+        career: Option<&mut SchoolProgress>,
     ) -> SchoolRunResult {
         let index = st.lesson_index as usize;
-        let previous_best = self.results.get(index).copied().unwrap_or(0);
-        self.record_verdict(index, st.verdict);
+        let entry = self.entries.get(index);
+        let untimed = entry.is_some_and(|e| e.untimed);
+        let ride = entry.is_some_and(|e| e.ride);
+        let retired = matches!(st.ended, Some(rerbr_sim::drive::SchoolOutcome::Retired));
+        let final_verdict = match st.ended {
+            Some(rerbr_sim::drive::SchoolOutcome::Finished) if ride => 4,
+            Some(rerbr_sim::drive::SchoolOutcome::Finished) => st.verdict.min(4),
+            _ => 0,
+        };
+        let previous_best = career
+            .as_ref()
+            .map_or(&self.results, |p| &p.grades)
+            .get(index)
+            .copied()
+            .unwrap_or(0);
+        if let Some(progress) = career {
+            progress.record(st, final_verdict);
+            self.set_results(progress.grades);
+        } else if final_verdict > 0 {
+            self.record_verdict(index, final_verdict);
+        }
         let new_best = self.results.get(index).copied().unwrap_or(0);
         let unlocked_count = self.results.iter().filter(|&&g| g > 0).count();
         let entry = self.entries.get(index);
@@ -334,10 +428,6 @@ impl SchoolCatalog {
             .map(|e| e.display_title().to_string())
             .unwrap_or_else(|| format!("LECCIÓN {}", index + 1));
         let key = entry.map_or("SCHOOL", |e| e.key);
-        let untimed = entry.is_some_and(|e| e.untimed);
-        let ride = entry.is_some_and(|e| e.ride);
-        let retired = matches!(st.ended, Some(rerbr_sim::drive::SchoolOutcome::Retired));
-        let final_verdict = if ride { 4 } else { st.verdict };
         let failure_reasons =
             self.resolve_failure_reasons(&st.failure_reasons, retired, final_verdict);
         let headline = if retired {
@@ -660,4 +750,33 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+#[test]
+fn career_medals_use_completed_lesson_only_and_record_failed_attempts() {
+    use rerbr_sim::drive::{SchoolOutcome, SchoolSessionSnapshot};
+
+    let mut catalog = SchoolCatalog::build(None, [4; LESSON_COUNT]);
+    let mut career = SchoolProgress::default();
+    let mut state = SchoolSessionSnapshot {
+        lesson_index: 4,
+        ended: Some(SchoolOutcome::Finished),
+        verdict: 3,
+        elapsed_seconds: 53.25,
+        ..SchoolSessionSnapshot::default()
+    };
+    let result = catalog.record_verdict_result(&state, Some(&mut career));
+    assert_eq!((result.previous_best, result.new_best), (0, 3));
+    assert_eq!(career.medals(), [0, 1, 0]);
+    assert_eq!(career.achievement(), None);
+    assert_eq!(career.grades[..4], [0; 4]);
+    assert_eq!(career.recent[0].elapsed_ms, Some(53_250));
+    state.ended = Some(SchoolOutcome::Retired);
+    state.verdict = 4;
+    let result = catalog.record_verdict_result(&state, Some(&mut career));
+    assert_eq!((result.verdict, result.new_best), (0, 3));
+    assert_eq!(career.recent.last().unwrap().grade, 0);
+    career.grades.fill(2);
+    assert_eq!(career.achievement(), Some("DIPLOMA DE RALLY SCHOOL"));
+    career.grades.fill(4);
+    assert_eq!(career.achievement(), Some("ACADEMIA · TODAS EN ORO"));
 }
