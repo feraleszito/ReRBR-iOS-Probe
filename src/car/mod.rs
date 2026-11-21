@@ -425,7 +425,11 @@ impl ShowroomTextures<'_> {
             aliases,
         } = self;
         const LIMIT: u64 = 64 * 1024 * 1024;
-        if let Ok(bytes) = read_showroom_file(root, model_dir, &path, LIMIT) {
+        if path
+            .to_ascii_lowercase()
+            .starts_with(&format!("{}/", model_dir.to_ascii_lowercase()))
+        {
+            let bytes = read_showroom_file(root, model_dir, &path, LIMIT)?;
             return Ok((path, bytes));
         }
         if let [cars, folder, textures, _] = path.split('/').collect::<Vec<_>>().as_slice() {
@@ -447,17 +451,24 @@ impl ShowroomTextures<'_> {
                         // its original directory in an identical shader map.
                         matches(*shaders) && matches(*model)
                     });
-                    if verified && cars::resolve(root, &path).is_some() {
-                        let bytes = read_showroom_file(root, &dir, &path, LIMIT)?;
-                        return Ok((path, bytes));
+                    if verified {
+                        if cars::resolve(root, &path).is_some() {
+                            let bytes = read_showroom_file(root, &dir, &path, LIMIT)?;
+                            return Ok((path, bytes));
+                        }
+                        let local_path = format!("{model_dir}/textures/{basename}");
+                        let bytes = read_showroom_file(root, model_dir, &local_path, LIMIT)
+                            .map_err(|err| {
+                                format!("SHOWROOM DDS: {request} for {model_dir}: {err}")
+                            })?;
+                        return Ok((local_path, bytes));
                     }
                 }
             }
         }
-        let local_path = format!("{model_dir}/textures/{basename}");
-        let bytes = read_showroom_file(root, model_dir, &local_path, LIMIT)
-            .map_err(|err| format!("SHOWROOM DDS: {request} for {model_dir}: {err}"))?;
-        Ok((local_path, bytes))
+        Err(format!(
+            "SHOWROOM DDS: unverified source {request} for {model_dir}"
+        ))
     }
 }
 

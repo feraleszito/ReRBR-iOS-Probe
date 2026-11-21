@@ -237,9 +237,10 @@ fn showroom_texture_preserves_isolation_and_verified_aliases() {
         shaders: ("Cars/Selected/car_shaders.ini", b"selected shader mapping"),
         aliases: BTreeMap::new(),
     };
-    let (resolved, bytes) = source.read(foreign).unwrap();
-    assert_eq!(resolved, "Cars/Selected/textures/paint.dds");
-    assert_eq!(bytes, b"selected");
+    assert!(
+        source.read(foreign).is_err(),
+        "a matching basename does not establish ownership"
+    );
     assert!(read_showroom_file(&root, "Cars/Selected", foreign, 128).is_err());
     std::fs::remove_file(&local).unwrap();
     assert!(source.read(foreign).is_err());
