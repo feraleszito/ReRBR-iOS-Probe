@@ -1430,13 +1430,13 @@ impl Runtime {
                 }
             }
             NextGaragePage => {
-                let total = self.content.vehicles.len().div_ceil(9);
+                let total = self.content.browse_vehicle_count().div_ceil(9);
                 if total > 0 {
                     self.menu.garage_page = (self.menu.garage_page + 1) % total;
                 }
             }
             PrevGaragePage => {
-                let total = self.content.vehicles.len().div_ceil(9);
+                let total = self.content.browse_vehicle_count().div_ceil(9);
                 if total > 0 {
                     self.menu.garage_page = (self.menu.garage_page + total - 1) % total;
                 }

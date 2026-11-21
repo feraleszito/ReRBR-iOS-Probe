@@ -5,7 +5,10 @@
 use rerbr_content::{
     Selection, StageDescriptor, VehicleClassification, VehicleDescriptor, PHYSICS_STAGE_EXTENSIONS,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryState {
@@ -188,6 +191,7 @@ pub struct Catalog {
     pub vehicles: Vec<VehicleEntry>,
     pub stages: Vec<StageEntry>,
     pub inspected: bool,
+    vehicle_aliases: BTreeMap<usize, usize>,
 }
 impl Catalog {
     /// Descriptor-only catalog (no filesystem access). Used before an explicit scan.
@@ -292,6 +296,7 @@ impl Catalog {
             vehicles,
             stages,
             inspected: false,
+            vehicle_aliases: BTreeMap::new(),
         }
     }
     /// Builds the current catalog and performs small read-only existence checks
@@ -468,7 +473,70 @@ impl Catalog {
                 &stage.files,
             );
         }
+        catalog.index_vehicle_aliases();
         catalog
+    }
+
+    fn index_vehicle_aliases(&mut self) {
+        let mut vehicles_by_identity = BTreeMap::new();
+        self.vehicle_aliases.clear();
+        for (index, entry) in self.vehicles.iter().enumerate() {
+            if entry.using_fallback_model || entry.model_missing {
+                continue;
+            }
+            let v = &entry.descriptor;
+            let path = |s: &str| s.replace('\\', "/").to_ascii_lowercase();
+            let name: String = v
+                .name
+                .chars()
+                .flat_map(char::to_lowercase)
+                .filter(|ch| ch.is_alphanumeric())
+                .collect();
+            let key = (
+                name,
+                path(&v.model),
+                path(&v.parts),
+                path(&v.shaders),
+                path(&v.shader_settings),
+                v.rsf_pack.as_deref().map(str::to_ascii_lowercase),
+                entry.year,
+                v.tyre_type,
+                v.forward_gears,
+                path(&v.audio_index),
+                &v.category,
+            );
+            let first = *vehicles_by_identity.entry(key).or_insert(index);
+            if first != index {
+                self.vehicle_aliases.insert(index, first);
+            }
+        }
+    }
+
+    /// IDs remain available for saved vehicles. Browsing shows one entry per installed car.
+    pub fn browse_vehicle_indices(&self, prefer: impl Fn(&VehicleEntry) -> bool) -> Vec<usize> {
+        if self.vehicle_aliases.is_empty() {
+            return (0..self.vehicles.len()).collect();
+        }
+        let mut rows = Vec::with_capacity(self.browse_vehicle_count());
+        let mut positions = Vec::with_capacity(self.vehicles.len());
+        for (index, entry) in self.vehicles.iter().enumerate() {
+            if let Some(first) = self.vehicle_aliases.get(&index) {
+                let position = positions[*first];
+                let row: &mut usize = &mut rows[position];
+                if prefer(entry) && !prefer(&self.vehicles[*row]) {
+                    *row = index;
+                }
+                positions.push(position);
+            } else {
+                positions.push(rows.len());
+                rows.push(index);
+            }
+        }
+        rows
+    }
+
+    pub fn browse_vehicle_count(&self) -> usize {
+        self.vehicles.len() - self.vehicle_aliases.len()
     }
     pub fn summary(&self) -> String {
         if !self.inspected {
@@ -482,7 +550,7 @@ impl Catalog {
             .sum();
         format!(
             "SCAN: {} CARS / {} STAGES / {} MISSING FILES",
-            self.vehicles.len(),
+            self.browse_vehicle_count(),
             self.stages.len(),
             missing
         )
@@ -496,11 +564,47 @@ impl Catalog {
     /// All catalog vehicles whose own `.sgc` 3D model is present on disk and eligible for
     /// 3D Showroom / Title Screen / Garage rendering (both drivable and visual-only).
     pub fn showroom_candidates(&self) -> Vec<&VehicleEntry> {
-        self.vehicles
-            .iter()
+        self.browse_vehicle_indices(|_| false)
+            .into_iter()
+            .map(|index| &self.vehicles[index])
             .filter(|v| v.can_showroom_view())
             .collect()
     }
+}
+
+#[cfg(test)]
+#[test]
+fn catalog_collapses_aliases_but_retains_legacy_lookup_and_ngp_variants() {
+    let mut catalog = Catalog::descriptors(&Selection::default());
+    let canonical = catalog.vehicles.len();
+    let mut entry = catalog.vehicles.last().unwrap().clone();
+    entry.descriptor.id = "rsf-bmw-m3".into();
+    entry.descriptor.name = "BMW M3".into();
+    entry.descriptor.rsf_pack = Some("BMW_M3_ngp7".into());
+    catalog.vehicles.push(entry.clone());
+
+    let alias = canonical + 1;
+    entry.descriptor.id = "rsf-bmw-m3-2".into();
+    entry.descriptor.name = "BMW-M3".into();
+    entry.descriptor.model = entry
+        .descriptor
+        .model
+        .to_ascii_uppercase()
+        .replace('/', "\\");
+    catalog.vehicles.push(entry.clone());
+
+    let variant = canonical + 2;
+    entry.descriptor.id = "rsf-bmw-m3-3".into();
+    entry.descriptor.rsf_pack = Some("BMW_M3_Evo_ngp7".into());
+    catalog.vehicles.push(entry);
+    catalog.index_vehicle_aliases();
+
+    let visible = catalog.browse_vehicle_indices(|_| false);
+    assert_eq!(&visible[canonical..], &[canonical, variant]);
+    assert_eq!(catalog.browse_vehicle_count(), canonical + 2);
+    assert!(catalog.vehicle("rsf-bmw-m3-2").is_some());
+    let owned = catalog.browse_vehicle_indices(|entry| entry.descriptor.id == "rsf-bmw-m3-2");
+    assert_eq!(&owned[canonical..], &[alias, variant]);
 }
 
 fn state_of(id: &str, selected: &str, supported: bool, files: &FileAudit) -> EntryState {

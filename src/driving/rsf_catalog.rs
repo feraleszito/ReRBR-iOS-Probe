@@ -139,54 +139,61 @@ fn try_preset_or_folder_entry(
             ));
         }
     }
-    // Look for a matching folder directly under `Cars/` when `carmodels.json` is absent.
+    // Without a metadata match, only a uniquely identified car folder can supply a model.
     let cars_dir = cars::resolve(rbr_root, "Cars").filter(|p| p.is_dir())?;
-    let pack_lower = car.pack.to_ascii_lowercase();
-    let tokens: Vec<String> = car
-        .name
-        .to_ascii_lowercase()
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|t| t.len() >= 3)
-        .map(str::to_string)
-        .collect();
-    if let Ok(entries) = std::fs::read_dir(&cars_dir) {
-        for dir_entry in entries.flatten() {
-            let folder_path = dir_entry.path();
-            if !folder_path.is_dir() {
-                continue;
-            }
-            let Some(folder_name) = folder_path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            let folder_lower = folder_name.to_ascii_lowercase();
-            let folder_compact: String = folder_lower
-                .chars()
-                .filter(char::is_ascii_alphanumeric)
-                .collect();
-            let matched = pack_lower.contains(&folder_compact)
-                || (!tokens.is_empty()
-                    && tokens
-                        .iter()
-                        .filter(|t| folder_lower.contains(t.as_str()))
-                        .count()
-                        >= 2);
-            if !matched {
-                continue;
-            }
-            if let Ok(files) = std::fs::read_dir(&folder_path) {
-                for f in files.flatten() {
-                    let p = f.path();
-                    if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("sgc")) {
-                        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                            let entry = car_pack::model_entry(folder_name, stem);
-                            return Some((entry, None));
-                        }
-                    }
-                }
-            }
-        }
+    let compact = |s: &str| {
+        s.bytes()
+            .filter(u8::is_ascii_alphanumeric)
+            .map(|byte| char::from(byte.to_ascii_lowercase()))
+            .collect::<String>()
+    };
+    let pack = car.pack.to_ascii_lowercase();
+    let pack = pack
+        .strip_suffix("_ngp6")
+        .or_else(|| pack.strip_suffix("_ngp7"))
+        .unwrap_or(&pack);
+    let expected = [compact(pack), compact(&car.name)];
+    let mut folders = std::fs::read_dir(cars_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            let key = compact(name);
+            (path.is_dir() && !key.is_empty() && expected.contains(&key)).then_some(path)
+        });
+    let folder = folders.next()?;
+    if folders.next().is_some() {
+        return None;
     }
-    None
+    let folder_name = folder.file_name()?.to_str()?;
+    let mut stems = std::fs::read_dir(&folder)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_file() && path.extension()?.eq_ignore_ascii_case("sgc") {
+                Some(path.file_stem()?.to_str()?.to_owned())
+            } else {
+                None
+            }
+        });
+    let first = stems.next()?;
+    let stem = match stems.next() {
+        None => first,
+        Some(second) => {
+            let mut matches = [first, second]
+                .into_iter()
+                .chain(stems)
+                .filter(|stem| compact(stem) == compact(folder_name));
+            let matching = matches.next()?;
+            if matches.next().is_some() {
+                return None;
+            }
+            matching
+        }
+    };
+    Some((car_pack::model_entry(folder_name, &stem), None))
 }
 
 struct DescriptorMeta<'a> {

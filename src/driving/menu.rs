@@ -821,19 +821,19 @@ impl Menu {
     }
     /// Filtered indices into `ctx.content.vehicles` for the active `GarageFilter`.
     pub fn garage_indices(&self, ctx: &Context) -> Vec<usize> {
-        let filtered: Vec<usize> = ctx
+        let indices = ctx
             .content
-            .vehicles
+            .browse_vehicle_indices(|entry| entry.descriptor.id == ctx.selection.vehicle.id);
+        let filtered: Vec<usize> = indices
             .iter()
-            .enumerate()
-            .filter(|(_, e)| {
+            .copied()
+            .filter(|&index| {
                 self.garage_filter
-                    .matches(e.capability(ctx.ngp_experimental))
+                    .matches(ctx.content.vehicles[index].capability(ctx.ngp_experimental))
             })
-            .map(|(i, _)| i)
             .collect();
-        if filtered.is_empty() && !ctx.content.vehicles.is_empty() {
-            (0..ctx.content.vehicles.len()).collect()
+        if filtered.is_empty() {
+            indices
         } else {
             filtered
         }
@@ -847,12 +847,14 @@ impl Menu {
         kind: super::career::DealershipKind,
     ) -> Vec<usize> {
         let profile = ctx.career.and_then(|c| c.profile.as_ref());
-        let mut indices: Vec<usize> = ctx
-            .content
-            .vehicles
+        let candidates = ctx.content.browse_vehicle_indices(|entry| {
+            profile.is_some_and(|profile| profile.owns_vehicle(&entry.descriptor.id))
+        });
+        let mut indices: Vec<usize> = candidates
             .iter()
-            .enumerate()
-            .filter(|(_, e)| {
+            .copied()
+            .filter(|&index| {
+                let e = &ctx.content.vehicles[index];
                 let cap = e.capability(ctx.ngp_experimental);
                 let spec = super::career::vehicle_market_spec(e);
                 match self.dealership_filter {
@@ -869,16 +871,14 @@ impl Menu {
                     }
                 }
             })
-            .map(|(i, _)| i)
             .collect();
         if indices.is_empty() {
-            indices = ctx
-                .content
-                .vehicles
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| super::career::vehicle_market_spec(e).offered_in(kind))
-                .map(|(i, _)| i)
+            indices = candidates
+                .into_iter()
+                .filter(|&index| {
+                    super::career::vehicle_market_spec(&ctx.content.vehicles[index])
+                        .offered_in(kind)
+                })
                 .collect();
         }
         indices.sort_by_key(|&i| {
@@ -989,17 +989,19 @@ impl Menu {
             }
             Page::Garage => {
                 const PER_PAGE: usize = 9;
-                let total_vehicles = ctx.content.vehicles.len();
+                let indices = ctx.content.browse_vehicle_indices(|entry| {
+                    entry.descriptor.id == ctx.selection.vehicle.id
+                });
+                let total_vehicles = indices.len();
                 let total_pages = total_vehicles.div_ceil(PER_PAGE);
                 let page_idx = self.garage_page.min(total_pages.saturating_sub(1));
                 let start = page_idx * PER_PAGE;
                 let end = (start + PER_PAGE).min(total_vehicles);
 
-                let mut rows: Vec<Row> = ctx.content.vehicles[start..end]
+                let mut rows: Vec<Row> = indices[start..end]
                     .iter()
-                    .enumerate()
-                    .map(|(offset, entry)| {
-                        let index = start + offset;
+                    .map(|&index| {
+                        let entry = &ctx.content.vehicles[index];
                         let class_tag = entry.classification.badge();
                         let cat_tag = entry
                             .descriptor
