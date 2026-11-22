@@ -325,6 +325,27 @@ impl Default for DrivingLayout {
     }
 }
 impl DrivingLayout {
+    pub fn engine_start_rect(&self) -> Option<Rect> {
+        (0..4)
+            .map(|i| {
+                Rect::new(
+                    self.fps.x - 0.062 - i as f32 * 0.06,
+                    self.fps.y,
+                    0.052,
+                    0.055,
+                )
+            })
+            .find(|r| {
+                r.x > self.diag.right()
+                    && EditableControl::ALL.into_iter().all(|control| {
+                        let pedal = self.control_rect(control);
+                        r.right() < pedal.x
+                            || pedal.right() < r.x
+                            || r.bottom() < pedal.y
+                            || pedal.bottom() < r.y
+                    })
+            })
+    }
     pub fn control_rect(&self, control: EditableControl) -> Rect {
         match control {
             EditableControl::Handbrake => self.handbrake,

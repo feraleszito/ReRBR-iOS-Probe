@@ -47,6 +47,7 @@ fn pressure(y: f64, rect: super::layout::Rect, invert_pedals: bool) -> f32 {
 
 pub struct Controls {
     touches: BTreeMap<u64, (Pedal, f64)>,
+    starter_touch: Option<u64>,
     pub centre: f64,
     pub sensitivity: f64,
     pub dead_zone: f64,
@@ -60,6 +61,7 @@ impl Default for Controls {
     fn default() -> Self {
         Self {
             touches: BTreeMap::new(),
+            starter_touch: None,
             centre: 0.0,
             sensitivity: 2.0,
             dead_zone: 0.03,
@@ -87,7 +89,11 @@ impl Controls {
     }
     pub fn clear(&mut self) {
         self.touches.clear();
+        self.starter_touch = None;
         self.filtered = 0.0;
+    }
+    pub fn starter_held(&self) -> bool {
+        self.starter_touch.is_some()
     }
     /// Uses the default side-cluster layout; runtime code passes its safe-area layout.
     pub fn touch(&mut self, id: u64, x: f64, y: f64, started: bool, ended: bool) {
@@ -104,9 +110,16 @@ impl Controls {
     ) {
         if ended {
             self.touches.remove(&id);
+            if self.starter_touch == Some(id) {
+                self.starter_touch = None;
+            }
             return;
         }
         if started {
+            if layout.engine_start_rect().is_some_and(|r| r.contains(x, y)) {
+                self.starter_touch.get_or_insert(id);
+                return;
+            }
             use super::layout::EditableControl;
             let hit = EditableControl::ALL
                 .into_iter()
@@ -186,13 +199,63 @@ impl Controls {
             handbrake: levels.handbrake,
             brake: levels.brake,
             throttle: levels.throttle,
-            ..Default::default()
+            // NGP polls the ignition level in the low bit of Control::aux.
+            aux: u32::from(self.starter_held()),
         }
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn starter_touch_holds_the_ngp_input_bit_without_capturing_a_pedal() {
+        let layout = DrivingLayout::default();
+        let start = layout.engine_start_rect().unwrap();
+        let px = f64::from(layout.brake.center_x());
+        let py = f64::from(layout.brake.bottom() - 0.01);
+        let sx = f64::from(start.center_x());
+        let sy = f64::from(start.y + start.h * 0.5);
+        let mut controls = Controls::new();
+        controls.touch_layout(&layout, 1, px, py, true, false);
+        controls.touch_layout(&layout, 1, sx, sy, false, false);
+        assert_eq!(controls.input_in(&layout, 0.0, 0.016).aux, 0);
+        controls.touch_layout(&layout, 1, px, py, false, false);
+        controls.touch_layout(&layout, 2, sx, sy, true, false);
+        controls.touch_layout(&layout, 2, px, py, false, false);
+        for _ in 0..65 {
+            let input = controls.input_in(&layout, 0.25, 0.016);
+            assert_eq!(pending_selection(input, 1).words()[7], Some(1));
+            assert!(input.brake > 0.95 && input.steering > 0.0);
+            assert_eq!(input.throttle, 0.0);
+        }
+        controls.touch_layout(&layout, 2, px, py, false, true);
+        let input = controls.input_in(&layout, 0.25, 0.016);
+        assert_eq!(input.aux, 0);
+        assert!(input.brake > 0.95);
+        controls.touch_layout(&layout, 3, sx, sy, true, false);
+        controls.clear();
+        assert_eq!(controls.input_in(&layout, 0.0, 0.016).words()[7], Some(0));
+    }
+
+    #[test]
+    fn starter_button_avoids_a_custom_pedal_in_the_top_bar() {
+        let mut layout = DrivingLayout::default();
+        let first = layout.engine_start_rect().unwrap();
+        layout.throttle = first;
+        assert_ne!(layout.engine_start_rect(), Some(first));
+        let mut controls = Controls::new();
+        controls.touch_layout(
+            &layout,
+            1,
+            f64::from(first.center_x()),
+            f64::from(first.bottom() - 0.001),
+            true,
+            false,
+        );
+        assert!(!controls.starter_held());
+        assert!(controls.levels_in(&layout).throttle > 0.0);
+    }
 
     #[test]
     fn overlapping_targets_follow_draw_order_and_moved_pedals_invert_together() {

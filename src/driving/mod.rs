@@ -4185,6 +4185,17 @@ impl Runtime {
         };
         ui::button(canvas, layout.camera, &camera, false, true);
         ui::button(canvas, layout.diag, "DIAG", self.diagnostics, true);
+        if let Some(rect) = layout.engine_start_rect() {
+            let held = self.controls.starter_held();
+            ui::panel(canvas, rect, PANEL_DEEP, if held { ACCENT } else { LINE });
+            let (x, y, w, h) = ui::px(rect, canvas);
+            canvas.power_symbol(
+                x + w * 0.5,
+                y + h * 0.51,
+                w.min(h) * 0.25,
+                if held { ACCENT } else { TEXT },
+            );
+        }
         if self.fps_visible {
             ui::button(
                 canvas,

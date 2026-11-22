@@ -86,6 +86,22 @@ impl Canvas {
         let k = scale.max(0.1) * 0.62;
         text.chars().map(|ch| find_glyph(ch).advance * k).sum()
     }
+    /// IEC power symbol, drawn independently of the HUD font atlas.
+    pub fn power_symbol(&mut self, cx: f32, cy: f32, radius: f32, color: [u8; 4]) {
+        let white = [
+            1.5 / WIDTH as f32,
+            1.5 / HEIGHT as f32,
+            1.5 / WIDTH as f32,
+            1.5 / HEIGHT as f32,
+        ];
+        let start = -std::f32::consts::FRAC_PI_2 + 0.60;
+        let step = (std::f32::consts::TAU - 1.20) / 16.0;
+        for i in 0..16 {
+            let a = start + i as f32 * step;
+            self.ring_segment(cx, cy, radius, 1.3, a, a + step, white, color);
+        }
+        self.rect(cx - 0.65, cy - radius - 1.0, 1.3, radius, color);
+    }
     /// Draws proportional anti-aliased sans-serif text (supporting accents and symbols) and returns the advance.
     pub fn text(&mut self, x: f32, y: f32, text: &str, scale: f32, color: [u8; 4]) -> f32 {
         let k = scale.max(0.1) * 0.62;
