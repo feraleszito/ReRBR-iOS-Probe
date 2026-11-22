@@ -837,7 +837,28 @@ fn audit_all_installed_rsf_showroom_models_if_pc_present() {
         match load_showroom_model(rbr, &desc) {
             Ok(car) => {
                 passed += 1;
-                let _ = car;
+                if car
+                    .geometry
+                    .materials
+                    .iter()
+                    .any(|m| m.pass == materials::Pass::CoplanarGlass)
+                {
+                    assert!(
+                        folder.eq_ignore_ascii_case("delta_4wd"),
+                        "unexpected coincident lens in {folder}"
+                    );
+                }
+                if car
+                    .geometry
+                    .skipped
+                    .iter()
+                    .any(|(_, why)| why.contains("complete alternate shell"))
+                {
+                    assert!(
+                        folder.eq_ignore_ascii_case("bmw_m3_e30"),
+                        "unexpected switched-out shell in {folder}"
+                    );
+                }
             }
             Err(err) => {
                 failures.push((format!("{folder}/{stem}"), err));

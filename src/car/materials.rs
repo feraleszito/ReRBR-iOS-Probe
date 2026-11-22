@@ -5,6 +5,7 @@ use rerbr_asset_formats::{car_parts, ini::Section};
 pub enum Pass {
     Opaque,
     Blended,
+    CoplanarGlass,
     Plastic,
     InteriorGlass,
     TwoSided,

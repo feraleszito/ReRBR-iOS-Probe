@@ -139,7 +139,11 @@ impl Gpu {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: Some(pass.depth_write()),
-                    depth_compare: Some(wgpu::CompareFunction::Greater),
+                    depth_compare: Some(if pass == Pass::CoplanarGlass {
+                        wgpu::CompareFunction::GreaterEqual
+                    } else {
+                        wgpu::CompareFunction::Greater
+                    }),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),

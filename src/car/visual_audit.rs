@@ -300,14 +300,7 @@ fn bmw_and_ds3_original_face_block_regressions() {
     let ds3 = descriptor("rsf-citroen-ds3-wrc");
     let load_bmw = || load_showroom_model(&root, bmw).expect("original BMW assets");
     let first_bmw = load_bmw();
-    let panels = [
-        "e_bonnet",
-        "e_door_l",
-        "e_door_r",
-        "e_door_b",
-        "e_bumper_f",
-        "e_bumper_b",
-    ];
+    let panels = ["e_body", "e_wing_evo1"];
     for panel in panels {
         assert!(
             first_bmw.geometry.drawn.iter().any(|n| n == panel),
@@ -398,6 +391,120 @@ fn lancer_evo_x_showroom_uses_the_declared_atlas() {
     }
     assert_eq!(alias.geometry.indices, declared.geometry.indices);
     assert_ne!(alias.vehicle.id, declared.vehicle.id);
+}
+
+#[test]
+#[ignore = "requires original RSF resources"]
+fn bmw_and_lancia_use_original_shell_and_rear_lens_geometry() {
+    let docs = std::env::var_os("VEHICLE_AUDIT_DOCUMENTS").expect("set VEHICLE_AUDIT_DOCUMENTS");
+    let docs = Path::new(&docs);
+    let root = docs.join("RBR");
+    let catalog = Catalog::scan_root(docs, &Selection::default());
+    let load = |id| {
+        let descriptor = &catalog.vehicle(id).unwrap().descriptor;
+        let path = cars::resolve(&root, &descriptor.model).unwrap();
+        let elements = sgc::parse(&fs::read(path).unwrap()).unwrap();
+        (load_showroom_model(&root, descriptor).unwrap(), elements)
+    };
+    let (bmw, bmw_model) = load("rsf-bmw-m3-e30-grpa");
+    for name in [
+        "e_door_l",
+        "e_door_r",
+        "e_door_b",
+        "e_bumper_f",
+        "e_bumper_b",
+        "e_bonnet",
+        "e_bonnetvents",
+        "e_bumpervents",
+    ] {
+        assert!(
+            bmw.geometry
+                .skipped
+                .iter()
+                .any(|(part, why)| part == name && why.contains("alternate shell")),
+            "{name}"
+        );
+    }
+    for (name, triangles) in [
+        ("e_body", 11402),
+        ("e_wing_evo1", 424),
+        ("e_bumperstrip_black", 82),
+    ] {
+        let render: usize = bmw
+            .geometry
+            .draws
+            .iter()
+            .filter(|draw| match &bmw_model[draw.source.0] {
+                sgc::Element::Mesh(mesh) => mesh.node.name == name,
+                _ => false,
+            })
+            .map(|draw| draw.indices.len() / 3)
+            .sum();
+        assert_eq!(render, triangles, "{name}");
+    }
+    let driving = load_vehicle_for_mode(&root, &bmw.vehicle, true).unwrap();
+    assert!(driving.cockpit.is_some(), "{:?}", driving.cockpit_error);
+    for (record, item) in bmw_model.iter().enumerate() {
+        let sgc::Element::Mesh(mesh) = item else {
+            continue;
+        };
+        if matches!(mesh.node.id, 2878 | 2882 | 2967 | 2974) {
+            let drawn = driving
+                .geometry
+                .draws
+                .iter()
+                .any(|draw| draw.interior && draw.source.0 == record);
+            assert_eq!(
+                drawn,
+                matches!(mesh.node.id, 2878 | 2882),
+                "{}",
+                mesh.node.id
+            );
+        }
+    }
+    let (lancia, lancia_model) = load("rsf-lancia-delta-hf-4wd-grpa");
+    for side in ["lb", "rb"] {
+        for (name, pass, atlas) in [
+            (
+                format!("e_lightglass_{side}"),
+                super::materials::Pass::CoplanarGlass,
+                "delta_4wd_external_transparent.dds",
+            ),
+            (
+                format!("e_light_brake_{side}"),
+                super::materials::Pass::Opaque,
+                "delta_4wd_external_dynamic.dds",
+            ),
+        ] {
+            let (record, mesh) = lancia_model
+                .iter()
+                .enumerate()
+                .find_map(|(index, item)| match item {
+                    sgc::Element::Mesh(mesh) if mesh.node.name == name => Some((index, mesh)),
+                    _ => None,
+                })
+                .unwrap();
+            let draw = lancia
+                .geometry
+                .draws
+                .iter()
+                .find(|d| d.source == (record, 0))
+                .unwrap();
+            let material = &lancia.geometry.materials[draw.material];
+            assert_eq!(material.pass, pass, "{name}");
+            assert!(material.path.as_deref().unwrap().ends_with(atlas), "{name}");
+            assert_eq!(draw.indices.len(), mesh.triangles.len() * 3);
+            for (&index, &original) in lancia.geometry.indices[draw.indices.clone()]
+                .iter()
+                .zip(mesh.triangles.iter().flatten())
+            {
+                assert_eq!(
+                    lancia.geometry.vertices[index as usize].uv,
+                    mesh.uvs[original as usize]
+                );
+            }
+        }
+    }
 }
 
 #[test]

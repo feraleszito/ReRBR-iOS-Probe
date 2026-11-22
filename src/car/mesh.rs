@@ -1,6 +1,6 @@
 //! ReRBR car/meshes.rs conversion adapted to a shared compact buffer, no damage.
 use super::{
-    materials::{self, Material},
+    materials::{self, Material, Pass},
     selection,
 };
 use rerbr_asset_formats::{car_parts, ini::Section, sgc};
@@ -102,6 +102,127 @@ fn one_declared_atlas(blocks: &[car_parts::FaceBlock], shaders: &[Section]) -> b
                     .is_some_and(|path| rerbr_content::same_path(atlas, path))
             })
         })
+}
+
+const SHELL_PANELS: [&str; 6] = [
+    "e_bonnet",
+    "e_door_l",
+    "e_door_r",
+    "e_door_b",
+    "e_bumper_f",
+    "e_bumper_b",
+];
+
+fn inactive_panel(part: &Section) -> bool {
+    car_parts::is_switched(part)
+        && part
+            .get("Predicate")
+            .is_some_and(|p| p.eq_ignore_ascii_case("NotUsed"))
+}
+
+/// A complete switched-out shell can coexist in the SGC with the car's
+/// active one-piece body. Its panels all declare a single, different atlas.
+fn has_disabled_shell(
+    parts: &[Section],
+    shaders: &[Section],
+    names: &BTreeSet<&str>,
+    body_atlas: &str,
+) -> bool {
+    if !names.contains("e_body") || car_parts::section(parts, "e_body").is_some_and(inactive_panel)
+    {
+        return false;
+    }
+    let mut shell_atlas = None;
+    SHELL_PANELS.into_iter().all(|name| {
+        let Some(part) =
+            car_parts::section(parts, name).filter(|p| names.contains(name) && inactive_panel(p))
+        else {
+            return false;
+        };
+        let blocks = car_parts::face_blocks(part);
+        let Some(atlas) = blocks
+            .first()
+            .and_then(|b| car_parts::diffuse_path(shaders, &b.material))
+        else {
+            return false;
+        };
+        let expected = shell_atlas.get_or_insert(atlas);
+        !rerbr_content::same_path(body_atlas, atlas)
+            && rerbr_content::same_path(expected, atlas)
+            && one_declared_atlas(&blocks, shaders)
+    })
+}
+
+fn disabled_shell_tree(elements: &[sgc::Element]) -> BTreeSet<i32> {
+    let mut roots = BTreeSet::new();
+    let mut parents = HashMap::new();
+    for element in elements {
+        let node = match element {
+            sgc::Element::Mesh(mesh) => {
+                if SHELL_PANELS.contains(&mesh.node.name.as_str()) {
+                    roots.insert(mesh.node.id);
+                }
+                &mesh.node
+            }
+            sgc::Element::Node(node) => node,
+            _ => continue,
+        };
+        parents.insert(node.id, node.parent);
+    }
+    // The hierarchy has already passed checked_worlds.
+    parents
+        .keys()
+        .copied()
+        .filter(|&id| {
+            std::iter::successors(Some(id), |id| {
+                parents.get(id).copied().filter(|parent| parent != id)
+            })
+            .any(|ancestor| roots.contains(&ancestor))
+        })
+        .collect()
+}
+
+fn glass_over_brake(
+    mesh: &sgc::Mesh,
+    elements: &[sgc::Element],
+    parts: &[Section],
+    shaders: &[Section],
+    worlds: &HashMap<i32, [[f32; 4]; 3]>,
+    material: &Material,
+) -> bool {
+    let Some(side @ ("lb" | "rb" | "lb_lit" | "rb_lit")) =
+        mesh.node.name.strip_prefix("e_lightglass_")
+    else {
+        return false;
+    };
+    let brake_name = format!("e_light_brake_{side}");
+    let Ok(brake_part) = selection::exterior(&brake_name, parts) else {
+        return false;
+    };
+    if !matches!(car_parts::face_blocks(brake_part).as_slice(), [block]
+        if block.shader == "CarLight" && car_parts::diffuse_path(shaders, &block.material)
+            .is_some_and(|path| material.path.as_deref().is_some_and(|glass| !rerbr_content::same_path(glass, path))))
+    {
+        return false;
+    }
+    elements.iter().any(|element| {
+        let sgc::Element::Mesh(brake) = element else {
+            return false;
+        };
+        brake.node.name == brake_name
+            && worlds[&brake.node.id] == worlds[&mesh.node.id]
+            && brake.node.transform == mesh.node.transform
+            && matches!((&brake.faces[..], &mesh.faces[..]), ([brake], [glass])
+                if brake.prim_count == glass.prim_count && brake.start_index == glass.start_index)
+            && brake.triangles == mesh.triangles
+            && brake.uvs == mesh.uvs
+            && brake.vertices.len() == mesh.vertices.len()
+            && brake
+                .vertices
+                .iter()
+                .zip(&mesh.vertices)
+                .all(|(a, b)| a.position == b.position)
+    })
 }
 pub fn convert(
     elements: &[sgc::Element],
@@ -259,15 +380,27 @@ fn convert_set(
             _ => None,
         })
         .collect();
-    let body_atlas = (!interior && allow_material_override)
+    let primary_atlas = allow_material_override
         .then(|| exterior_paint_atlas(parts, shaders))
         .flatten();
+    let body_atlas = primary_atlas.filter(|_| !interior);
+    let disabled_shell = primary_atlas
+        .filter(|atlas| has_disabled_shell(parts, shaders, &mesh_names, atlas))
+        .map(|_| disabled_shell_tree(elements))
+        .unwrap_or_default();
     // The audit uses the original SGC record index, before draw sorting.
     #[allow(clippy::unused_enumerate_index)]
     for (_record_index, element) in elements.iter().enumerate() {
         let sgc::Element::Mesh(mesh) = element else {
             continue;
         };
+        if disabled_shell.contains(&mesh.node.id) {
+            result.skipped.push((
+                mesh.node.name.clone(),
+                "complete alternate shell switched off in original INI".into(),
+            ));
+            continue;
+        }
         let selected = if interior {
             selection::interior_with_variants(&mesh.node.name, parts, |name| {
                 mesh_names.contains(name)
@@ -424,7 +557,7 @@ fn convert_set(
                 }
                 materials::resolve(shaders, settings, &block.shader, &block.material)
             };
-            let resolved = match resolved {
+            let mut resolved = match resolved {
                 Ok(material) => material,
                 Err(err) if allow_material_override => {
                     result.unresolved_faces.push(format!(
@@ -435,6 +568,14 @@ fn convert_set(
                 }
                 Err(err) => return Err(err),
             };
+            // The lens can share the brake mesh's exact depth. Its own alpha
+            // atlas must still be composited after the opaque reflector.
+            if resolved.shader == "CarGlass"
+                && resolved.pass == Pass::Blended
+                && glass_over_brake(mesh, elements, parts, shaders, &worlds, &resolved)
+            {
+                resolved.pass = Pass::CoplanarGlass;
+            }
             let material = result
                 .materials
                 .iter()

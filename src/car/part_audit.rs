@@ -210,17 +210,8 @@ fn bmw_m3_e30_draws_one_variant_per_group_if_pc_present() {
     };
     let parts = ini::parse(&String::from_utf8_lossy(&std::fs::read(ini_path).unwrap())).unwrap();
     let drawn = |n: &str| selection::exterior(n, &parts).is_ok();
-    // Structural panels remain.
-    for n in [
-        "e_body",
-        "e_door_l",
-        "e_door_r",
-        "e_bonnet",
-        "e_bumper_f",
-        "e_bumper_b",
-        "e_wing",
-        "e_exhaust",
-    ] {
+    // The mesh converter applies the additional shell check against the shaders.
+    for n in ["e_body", "e_exhaust"] {
         assert!(drawn(n), "{n} must stay drawn");
     }
     // Optional variants: exactly the Switch=false member.
