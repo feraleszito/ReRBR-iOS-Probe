@@ -6,6 +6,7 @@ PROBE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROBE_ROOT"
 PROBE_MODE="${PROBE_MODE:-triangle}"
 CAREER_DEV_MODE="${CAREER_DEV_MODE:-false}"
+VEHICLE_CATALOG="${VEHICLE_CATALOG:-developer}"
 # Keep arrays nonempty for macOS's system Bash 3.2 with `set -u`.
 CARGO_FEATURE_ARGS=(--no-default-features)
 HOST_TEST_ARGS=(--test shader)
@@ -61,6 +62,21 @@ case "$CAREER_DEV_MODE" in
         exit 1
         ;;
 esac
+case "$VEHICLE_CATALOG" in
+    developer) ;;
+    beta)
+        if [[ "$PROBE_MODE" != physics-stage || "$CAREER_DEV_MODE" != false ]]; then
+            echo "The Beta catalog requires PROBE_MODE=physics-stage and CAREER_DEV_MODE=false." >&2
+            exit 1
+        fi
+        CARGO_FEATURE_ARGS+=(--features public-beta)
+        IPA_NAME="RBR-Mobile-Beta.ipa"
+        ;;
+    *)
+        echo "Unknown VEHICLE_CATALOG: $VEHICLE_CATALOG (expected developer or beta)." >&2
+        exit 1
+        ;;
+esac
 if [[ "$PROBE_MODE" != triangle && "$PROBE_MODE" != physics-probe && "$PROBE_MODE" != physics-drive && "$PROBE_MODE" != physics-stage ]]; then
     # Preserve the previous visual modes' host-test scope.
     for package in rerbr-sim rbr-physics rbr-hybrid rbr-formats rbr-gameplay rbr-recording rbr-engine rbr-tyre rbr-school; do
@@ -86,6 +102,8 @@ mkdir -p build
 {
     echo "Probe build mode: $PROBE_MODE"
     echo "Career dev mode: $CAREER_DEV_MODE"
+    echo "Vehicle catalog: $VEHICLE_CATALOG"
+    echo "Git commit: $(git rev-parse HEAD)"
     echo "Output IPA: $IPA_NAME"
     printf 'Cargo feature flags:'
     printf ' %s' "${CARGO_FEATURE_ARGS[@]}"

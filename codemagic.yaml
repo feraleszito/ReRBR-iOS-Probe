@@ -1,6 +1,6 @@
 # Codemagic CI/CD configuration for ReRBR-iOS-Probe
 # Provides two selectable workflows in Codemagic UI:
-#   1. rerbr-probe-unsigned: Public RELEASE build (career-dev-mode explicitly disabled)
+#   1. rerbr-probe-unsigned: Public Beta catalog (career-dev-mode disabled)
 #   2. rerbr-probe-dev:      Developer QA build (career-dev-mode enabled, isolated career_dev_slot.json)
 
 definitions:
@@ -45,7 +45,7 @@ definitions:
 
 workflows:
   rerbr-probe-unsigned:
-    name: RBR Mobile — RELEASE (iPadOS unsigned)
+    name: RBR Mobile — BETA PÚBLICA (iPadOS unsigned)
     instance_type: mac_mini_m2
     max_build_duration: 35
     environment:
@@ -53,6 +53,7 @@ workflows:
       vars:
         PROBE_MODE: physics-stage
         CAREER_DEV_MODE: "false"
+        VEHICLE_CATALOG: beta
         CARGO_TERM_COLOR: always
     scripts:
       - *check_layout
@@ -60,7 +61,7 @@ workflows:
       - *install_rust
       - *build_ipa
     artifacts:
-      - build/RBR-Mobile-Release.ipa
+      - build/RBR-Mobile-Beta.ipa
       - build/SHA256SUMS
       - build/*.log
       - build/*.txt
@@ -74,6 +75,7 @@ workflows:
       vars:
         PROBE_MODE: physics-stage
         CAREER_DEV_MODE: "true"
+        VEHICLE_CATALOG: developer
         CARGO_TERM_COLOR: always
     scripts:
       - *check_layout

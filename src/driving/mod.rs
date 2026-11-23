@@ -38,7 +38,7 @@ use crate::{
         Camera,
     },
 };
-use content_manager::Catalog;
+use content_manager::{Catalog, PUBLIC_BETA};
 use controls::Controls;
 use layout::{DrivingLayout, Rect};
 use rerbr_render_core::{coords, Mat4, Quat, Vec3};
@@ -107,6 +107,7 @@ pub struct Runtime {
     pub saved_replay: Option<replay::Replay>,
     pub replay_player: Option<replay::ReplayPlayer>,
     pub ngp_experimental: bool,
+    saved_ngp_preference: bool,
     pub focus_diagnostics: Option<ngp_experimental::FocusDiagnosticsReport>,
     pub experimental_visual_only: bool,
     pub experimental_physics_reason: Option<String>,
@@ -165,17 +166,22 @@ impl Default for Runtime {
 }
 impl Runtime {
     pub fn new() -> Self {
+        Self::new_for_catalog(PUBLIC_BETA)
+    }
+
+    fn new_for_catalog(public_beta: bool) -> Self {
         let settings = menu::Settings::load();
         let default_selection = rerbr_content::Selection::default();
-        let scanned = Catalog::scan(&default_selection);
+        let scanned = Catalog::scan_for_app(&default_selection, public_beta);
         let stage = restored_stage(&scanned, &settings.stage_id);
         let preferred_vehicle_id = settings
             .last_driven_vehicle_id
             .as_deref()
             .unwrap_or(&settings.vehicle_id);
-        let vehicle = restored_vehicle(&scanned, preferred_vehicle_id, settings.ngp_experimental);
+        let ngp_experimental = public_beta || settings.ngp_experimental;
+        let vehicle = restored_vehicle(&scanned, preferred_vehicle_id, ngp_experimental);
         let selection = rerbr_content::Selection { vehicle, stage };
-        let content = Catalog::scan(&selection);
+        let content = Catalog::scan_for_app(&selection, public_beta);
         let title_vehicle_order = shuffled_showroom_candidates(&content);
         let last_driven_vehicle_id = settings.last_driven_vehicle_id.clone();
         let mut controls = Controls::new();
@@ -254,7 +260,8 @@ impl Runtime {
             replay_recorder: replay::ReplayRecorder::new(),
             saved_replay: None,
             replay_player: None,
-            ngp_experimental: settings.ngp_experimental,
+            ngp_experimental,
+            saved_ngp_preference: settings.ngp_experimental,
             focus_diagnostics: None,
             experimental_visual_only: false,
             experimental_physics_reason: None,
@@ -347,8 +354,11 @@ impl Runtime {
         use crate::car::showroom::ShowroomMode;
         match self.menu.page {
             menu::Page::Title => {
-                let first = self.title_vehicle_order.first()?.clone();
-                let rest = self.title_vehicle_order.iter().skip(1).cloned().collect();
+                let mut candidates = self.title_vehicle_order.iter().filter(|car| {
+                    !self.content.is_public_beta() || self.content.vehicle(&car.id).is_some()
+                });
+                let first = candidates.next()?.clone();
+                let rest = candidates.cloned().collect();
                 Some((ShowroomMode::Title, first, rest))
             }
             menu::Page::Main => {
@@ -851,9 +861,17 @@ impl Runtime {
         if self.selection != selection && self.race.phase != race::Phase::Idle {
             return Err("RETURN TO MAIN MENU BEFORE CHANGING CONTENT".into());
         }
+        let content = Catalog::scan_for_app(&selection, self.content.is_public_beta());
+        if self.content.is_public_beta()
+            && !content
+                .vehicle(&selection.vehicle.id)
+                .is_some_and(|e| e.descriptor == selection.vehicle)
+        {
+            return Err("COCHE NO DISPONIBLE EN LA BETA".into());
+        }
         self.controls.configure_vehicle(&selection.vehicle)?;
         self.selection = selection;
-        self.content = Catalog::scan(&self.selection);
+        self.content = content;
         Ok(())
     }
     pub fn asset_error(&mut self, error: String) {
@@ -906,7 +924,11 @@ impl Runtime {
             vehicle_id: self.selection.vehicle.id.clone(),
             last_driven_vehicle_id: self.last_driven_vehicle_id.clone(),
             stage_id: self.selection.stage.id.clone(),
-            ngp_experimental: self.ngp_experimental,
+            ngp_experimental: if self.content.is_public_beta() {
+                self.saved_ngp_preference
+            } else {
+                self.ngp_experimental
+            },
         }
         .save();
     }
@@ -1039,6 +1061,9 @@ impl Runtime {
                 }
             }
             GarageFilterCycle => {
+                if self.content.is_public_beta() {
+                    return;
+                }
                 self.menu.garage_filter = self.menu.garage_filter.next();
                 let indices = {
                     let ctx = self.context();
@@ -1052,6 +1077,9 @@ impl Runtime {
             }
             Open(page) => {
                 if page == menu::Page::NgpExperimental {
+                    if self.content.is_public_beta() {
+                        return;
+                    }
                     self.refresh_focus_diagnostics();
                 } else if page == menu::Page::Garage {
                     if let Some(pos) = self
@@ -1140,7 +1168,14 @@ impl Runtime {
                     self.active_career_stage = false;
                     self.last_career_stage_outcome = None;
                 }
-                self.content = Catalog::scan(&self.selection);
+                self.content =
+                    Catalog::scan_for_app(&self.selection, self.content.is_public_beta());
+                if self.content.is_public_beta()
+                    && self.content.vehicle(&self.selection.vehicle.id).is_none()
+                {
+                    self.message = Some("COCHE NO DISPONIBLE EN LA BETA".into());
+                    return;
+                }
                 if self.selection.vehicle.is_ngp_experimental_car() {
                     if let Some(entry) = self.content.vehicle(&self.selection.vehicle.id) {
                         if !entry.using_fallback_model && entry.descriptor != self.selection.vehicle
@@ -1181,7 +1216,9 @@ impl Runtime {
                             .and_then(|r| r.boot_blocker_reason())
                             .unwrap_or_else(|| "REVISA EL DIAGNÓSTICO".into());
                         self.message = Some(format!("NGP BLOQUEADO ({reason})"));
-                        self.menu.open(menu::Page::NgpExperimental);
+                        if !self.content.is_public_beta() {
+                            self.menu.open(menu::Page::NgpExperimental);
+                        }
                     } else {
                         let pack_path = self
                             .focus_diagnostics
@@ -1191,6 +1228,11 @@ impl Runtime {
                             .focus_diagnostics
                             .as_ref()
                             .and_then(|r| r.boot_blocker_reason());
+                        if self.content.is_public_beta() && pack_path.is_none() {
+                            self.message =
+                                blocker_reason.or_else(|| Some("FÍSICA NGP NO DISPONIBLE".into()));
+                            return;
+                        }
                         audio::set_menu_music_active(false);
                         audio::set_paused(true);
                         audio::set_codriver_active(false);
@@ -1317,6 +1359,14 @@ impl Runtime {
                 }
             }
             Restart => {
+                if self.content.is_public_beta() {
+                    self.content =
+                        Catalog::scan_for_app(&self.selection, self.content.is_public_beta());
+                    if self.content.vehicle(&self.selection.vehicle.id).is_none() {
+                        self.message = Some("COCHE NO DISPONIBLE EN LA BETA".into());
+                        return;
+                    }
+                }
                 self.pause();
                 self.capture_session_snapshot(false);
                 self.worker.shutdown();
@@ -1349,6 +1399,10 @@ impl Runtime {
                             .as_ref()
                             .and_then(|r| r.boot_blocker_reason())
                             .unwrap_or_else(|| "PAQUETE NGP O BACKEND NO DISPONIBLE".into());
+                        if self.content.is_public_beta() {
+                            self.message = Some(reason);
+                            return;
+                        }
                         self.experimental_visual_only = true;
                         self.experimental_physics_reason = Some(reason);
                         self.worker = worker::Worker::idle();
@@ -1599,7 +1653,8 @@ impl Runtime {
                 ));
             }
             InspectContent => {
-                self.content = Catalog::scan(&self.selection);
+                self.content =
+                    Catalog::scan_for_app(&self.selection, self.content.is_public_beta());
                 self.message = Some(self.content.summary());
             }
             CheckPhysics => {
@@ -1611,6 +1666,9 @@ impl Runtime {
                 });
             }
             ToggleExperimentalMode => {
+                if self.content.is_public_beta() {
+                    return;
+                }
                 if self.ngp_experimental
                     && self.selection.vehicle.is_ngp_experimental_car()
                     && self.race.phase != race::Phase::Idle
@@ -1634,10 +1692,16 @@ impl Runtime {
                 }
             }
             RunFocusDiagnostics => {
+                if self.content.is_public_beta() {
+                    return;
+                }
                 self.refresh_focus_diagnostics();
                 self.menu.open(menu::Page::NgpExperimental);
             }
             StartFocusVisualInspection => {
+                if self.content.is_public_beta() {
+                    return;
+                }
                 if self.race.phase != race::Phase::Idle {
                     self.message = Some("VUELVE AL MENÚ PRINCIPAL ANTES DE PROBAR".into());
                 } else {
@@ -1656,6 +1720,9 @@ impl Runtime {
                 }
             }
             OpenVehicle(index) => {
+                if self.content.is_public_beta() && self.content.vehicles.get(index).is_none() {
+                    return;
+                }
                 self.menu.inspected_vehicle = index;
                 self.menu.open(menu::Page::GarageDetail);
             }
@@ -4892,6 +4959,13 @@ fn restored_vehicle(
     ngp_experimental: bool,
 ) -> rerbr_content::VehicleDescriptor {
     let default = rerbr_content::VehicleDescriptor::default();
+    if catalog.is_public_beta() {
+        return catalog
+            .vehicle(id)
+            .or_else(|| catalog.vehicle(&default.id))
+            .or_else(|| catalog.vehicles.first())
+            .map_or(default, |entry| entry.descriptor.clone());
+    }
     catalog
         .vehicle(id)
         .filter(|entry| {
@@ -4968,7 +5042,7 @@ mod reload_tests {
 
     #[test]
     fn main_menu_browsing_keeps_all_four_stages_and_never_starts_scene_workers() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         assert_eq!(app.menu.page, menu::Page::Title);
         app.apply_command(menu::Command::EnterMainMenu);
         assert_eq!(app.menu.page, menu::Page::Main);
@@ -5011,7 +5085,7 @@ mod reload_tests {
 
     #[test]
     fn loading_cancel_restart_and_countdown_preserve_physics_pause_and_timer() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         app.apply_command(menu::Command::StartRally);
         assert_eq!(app.menu.page, menu::Page::Loading);
         assert_eq!(app.race.phase, race::Phase::Preparing);
@@ -5095,7 +5169,7 @@ mod reload_tests {
 
     #[test]
     fn controls_editor_respects_panel_priority_and_drags_without_driving() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         app.apply_command(menu::Command::Open(menu::Page::ControlsEditor));
         assert_eq!(app.menu.page, menu::Page::ControlsEditor);
         let rows = {
@@ -5178,7 +5252,7 @@ mod reload_tests {
 
     #[test]
     fn stage_complete_triggers_only_on_forward_finish_with_checkpoints_and_resets_cleanly() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         app.apply_command(menu::Command::StartRally);
         app.worker.shutdown();
         app.worker = worker::Worker::idle();
@@ -5284,7 +5358,7 @@ mod reload_tests {
 
     #[test]
     fn menu_runtime_actions_and_replay_integration_tests() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
 
         // 1. Vehicles selection audit (all vehicles in catalog: 8 original RBR + 1 NGP candidate)
         let total_vehicles = app.content.vehicles.len();
@@ -5399,7 +5473,7 @@ mod reload_tests {
 
     #[test]
     fn ngp_experimental_toggle_isolates_focus_and_returns_to_main_cleanly() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         app.ngp_experimental = false;
         let focus = rerbr_content::VehicleDescriptor::ford_focus_2006();
 
@@ -5441,7 +5515,7 @@ mod reload_tests {
 
     #[test]
     fn school_briefing_drive_verdict_and_replay_flow_works_end_to_end() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         app.school.entries[2].assets_present = true;
         app.school.selected = 2;
 
@@ -5512,7 +5586,7 @@ mod reload_tests {
 
     #[test]
     fn diagnostics_retain_focus_session_across_reset_to_main_without_corolla_leak() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         app.ngp_experimental = true;
         let focus = rerbr_content::VehicleDescriptor::ford_focus_2006();
         app.configure_selection(rerbr_content::Selection {
@@ -5557,7 +5631,7 @@ mod reload_tests {
     #[cfg(feature = "physics-stage")]
     #[test]
     fn presentation_cinematic_never_forces_cockpit_interior_geometry() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         app.worker.shutdown();
         app.worker = worker::Worker::idle();
         app.view = cameras::View::CockpitFallback;
@@ -5594,7 +5668,7 @@ mod reload_tests {
 
     #[test]
     fn start_rally_from_ngp_page_diagnoses_selected_vehicle_and_preserves_visual_only_reason() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         app.worker.shutdown();
         app.worker = worker::Worker::idle();
         app.ngp_experimental = true;
@@ -5660,7 +5734,7 @@ mod reload_tests {
 
     #[test]
     fn title_screen_handles_missing_assets_and_transitions_cleanly_to_horizontal_main() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         assert_eq!(app.menu.page, menu::Page::Title);
         // Without private assets installed, showroom_request is None and never panics or blocks.
         app.title_vehicle_order.clear();
@@ -5705,7 +5779,7 @@ mod reload_tests {
 
     #[test]
     fn career_runtime_flow_create_buy_garage_and_championship_keeps_time_trial_free() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         app.worker.shutdown();
         app.worker = worker::Worker::idle();
         app.career = career::CareerStore::default();
@@ -5855,7 +5929,7 @@ mod reload_tests {
 
     #[test]
     fn main_menu_remembers_last_driven_car_separately_from_random_title_car() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         for v in &mut app.content.vehicles {
             v.has_3d_model = true;
         }
@@ -5885,7 +5959,7 @@ mod reload_tests {
 
     #[test]
     fn visual_only_car_is_viewable_in_garage_but_strictly_blocked_from_driving() {
-        let mut app = Runtime::new();
+        let mut app = Runtime::new_for_catalog(false);
         let mut visual_desc = rerbr_content::VehicleDescriptor::ford_focus_2006();
         visual_desc.id = "rsf-alpine-a110-2020".into();
         visual_desc.name = "Alpine A110 2020".into();
@@ -6000,5 +6074,100 @@ mod reload_tests {
             assert!(!bytes.is_empty());
             assert!(bytes.len() / 20 <= MAX_CANVAS_VERTICES);
         }
+    }
+}
+#[test]
+#[ignore = "requires real RSF Documents and the supported NGP runtime"]
+fn edition_filters_private_catalog_across_vehicle_routes() {
+    let root = std::env::var_os("RERBR_PROBE_DOCUMENTS").expect("set RERBR_PROBE_DOCUMENTS");
+    let raw = Catalog::scan_root(
+        std::path::Path::new(&root),
+        &rerbr_content::Selection::default(),
+    );
+    let visual = raw
+        .vehicles
+        .iter()
+        .find(|entry| entry.capability(true) == content_manager::DriveCapability::VisualOnly)
+        .expect("visual-only fixture")
+        .descriptor
+        .clone();
+    let mut app = Runtime::new();
+    assert_eq!(app.content.is_public_beta(), PUBLIC_BETA);
+    assert!(app.content.vehicle("rsf-citroen-ds3-wrc").is_some());
+    let mut profile = career::CareerProfile::create("Catalog QA").unwrap();
+    profile.owned_vehicle_ids = vec!["rsf-citroen-ds3-wrc".into(), visual.id.clone()];
+    app.career.profile = Some(profile);
+    let garage = app.menu.career_garage_indices(&app.context());
+    assert!(garage
+        .iter()
+        .any(|&i| app.content.vehicles[i].descriptor.id == "rsf-citroen-ds3-wrc"));
+    assert_eq!(
+        garage
+            .iter()
+            .any(|&i| app.content.vehicles[i].descriptor.id == visual.id),
+        !PUBLIC_BETA
+    );
+    let check = |entry: &content_manager::VehicleEntry| {
+        if PUBLIC_BETA {
+            assert_eq!(
+                entry.capability(true),
+                content_manager::DriveCapability::Drivable
+            );
+            assert!(entry.files.checked && entry.files.missing.is_empty());
+        }
+    };
+    for index in app.menu.garage_indices(&app.context()) {
+        check(&app.content.vehicles[index]);
+    }
+    for kind in [
+        career::DealershipKind::UsedCars,
+        career::DealershipKind::NewSalon,
+    ] {
+        for index in app.menu.dealership_indices_for(&app.context(), kind) {
+            check(&app.content.vehicles[index]);
+        }
+    }
+    for page in [menu::Page::Title, menu::Page::Main] {
+        app.menu.page = page;
+        let (_, primary, fallbacks) = app.showroom_request().expect("installed vehicles");
+        for car in std::iter::once(primary).chain(fallbacks) {
+            check(app.content.vehicle(&car.id).unwrap());
+        }
+    }
+    println!(
+        "public_beta={PUBLIC_BETA} visible={} raw={}",
+        app.content.browse_vehicle_count(),
+        raw.browse_vehicle_count()
+    );
+    if PUBLIC_BETA {
+        assert!(app.content.browse_vehicle_count() < raw.browse_vehicle_count());
+        assert!(app.content.vehicle(&visual.id).is_none());
+        app.last_driven_vehicle_id = Some(visual.id.clone());
+        assert_ne!(app.showroom_request().unwrap().1.id, visual.id);
+        let stage = app.selection.stage.clone();
+        assert!(app
+            .configure_selection(rerbr_content::Selection {
+                vehicle: visual.clone(),
+                stage
+            })
+            .is_err());
+        app.apply_command(menu::Command::StartFocusVisualInspection);
+        assert!(app.take_scene_action().is_none());
+        app.selection.vehicle = visual;
+        app.apply_command(menu::Command::StartRally);
+        assert!(app.take_scene_action().is_none());
+    } else {
+        assert_eq!(
+            app.content.browse_vehicle_count(),
+            raw.browse_vehicle_count()
+        );
+        let index = app
+            .content
+            .vehicles
+            .iter()
+            .position(|entry| entry.descriptor.id == visual.id)
+            .unwrap();
+        app.apply_command(menu::Command::OpenVehicle(index));
+        assert_eq!(app.menu.page, menu::Page::GarageDetail);
     }
 }

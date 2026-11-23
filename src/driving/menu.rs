@@ -935,7 +935,7 @@ impl Menu {
             .content
             .stage(&stage.id)
             .map_or(EntryState::Selected, |entry| entry.state);
-        match self.page {
+        let mut rows = match self.page {
             Page::Title => vec![Row::action("TOCA PARA COMENZAR", Command::EnterMainMenu)],
             Page::Main => MainSection::ALL
                 .iter()
@@ -953,13 +953,19 @@ impl Menu {
                 }
             }
             Page::Drive => {
+                let available =
+                    !ctx.content.is_public_beta() || ctx.content.vehicle(&vehicle.id).is_some();
                 let pb_text = ctx
                     .personal_best_ms
                     .map(|ms| format!(" · PB {}", super::records::format_time_ms(ms)))
                     .unwrap_or_default();
                 vec![
                     Row::action(
-                        format!("COCHE ACTIVO: {}", vehicle.name),
+                        if available {
+                            format!("COCHE ACTIVO: {}", vehicle.name)
+                        } else {
+                            "SIN COCHE DISPONIBLE".into()
+                        },
                         Command::Open(Page::Garage),
                     ),
                     Row::action(
@@ -974,7 +980,7 @@ impl Menu {
                         },
                         kind: RowKind::Action {
                             command: Command::StartRally,
-                            enabled: ctx.steering_ready,
+                            enabled: ctx.steering_ready && available,
                         },
                     },
                     Row::action(
@@ -2476,7 +2482,22 @@ impl Menu {
                 rows.push(Row::action("VOLVER", Command::Back));
                 rows
             }
+        };
+        if ctx.content.is_public_beta() {
+            rows.retain(|row| {
+                !matches!(
+                    row.kind,
+                    RowKind::Action {
+                        command: Command::ToggleExperimentalMode
+                            | Command::RunFocusDiagnostics
+                            | Command::StartFocusVisualInspection
+                            | Command::Open(Page::NgpExperimental),
+                        ..
+                    }
+                )
+            });
         }
+        rows
     }
     pub fn subtitle(&self, ctx: &Context) -> Vec<String> {
         let vehicle = &ctx.selection.vehicle;
@@ -2484,11 +2505,19 @@ impl Menu {
         match self.page {
             Page::Title | Page::Main | Page::Loading => vec![
                 "RBR MOBILE".into(),
-                format!("{} — {}", vehicle.name, stage.name),
+                if !ctx.content.is_public_beta() || ctx.content.vehicle(&vehicle.id).is_some() {
+                    format!("{} — {}", vehicle.name, stage.name)
+                } else {
+                    stage.name.clone()
+                },
             ],
             Page::Drive => vec![
                 format!("TRAMO {} ({})", stage.name, stage.stem),
-                format!("{} / MANUAL {} VEL.", vehicle.name, vehicle.forward_gears),
+                if !ctx.content.is_public_beta() || ctx.content.vehicle(&vehicle.id).is_some() {
+                    format!("{} / MANUAL {} VEL.", vehicle.name, vehicle.forward_gears)
+                } else {
+                    "SIN COCHE DISPONIBLE".into()
+                },
             ],
             Page::Garage => {
                 let audit = ctx
@@ -2884,7 +2913,7 @@ impl Menu {
                 if Self::garage_back_rect().contains(x, y) {
                     return Some(Command::Back);
                 }
-                if Self::garage_filter_rect().contains(x, y) {
+                if !ctx.content.is_public_beta() && Self::garage_filter_rect().contains(x, y) {
                     return Some(Command::GarageFilterCycle);
                 }
                 let indices = self.garage_indices(ctx);
@@ -4116,19 +4145,23 @@ impl Menu {
             .iter()
             .filter(|v| v.capability(ctx.ngp_experimental) == DriveCapability::VisualOnly)
             .count();
-        let filter_label = format!(
-            "FILTRO: {} ({}) · COND {} / VIS {}",
-            self.garage_filter.label(),
-            indices.len(),
-            drivable_count,
-            visual_count
-        );
+        let filter_label = if ctx.content.is_public_beta() {
+            format!("COCHES DISPONIBLES ({})", indices.len())
+        } else {
+            format!(
+                "FILTRO: {} ({}) · COND {} / VIS {}",
+                self.garage_filter.label(),
+                indices.len(),
+                drivable_count,
+                visual_count
+            )
+        };
         ui::button(
             canvas,
             Self::garage_filter_rect(),
             &filter_label,
             false,
-            true,
+            !ctx.content.is_public_beta(),
         );
         ui::button(
             canvas,

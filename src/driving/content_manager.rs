@@ -10,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const PUBLIC_BETA: bool = cfg!(feature = "public-beta");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryState {
     Selected,
@@ -191,6 +193,7 @@ pub struct Catalog {
     pub vehicles: Vec<VehicleEntry>,
     pub stages: Vec<StageEntry>,
     pub inspected: bool,
+    public_beta: bool,
     vehicle_aliases: BTreeMap<usize, usize>,
 }
 impl Catalog {
@@ -296,6 +299,7 @@ impl Catalog {
             vehicles,
             stages,
             inspected: false,
+            public_beta: false,
             vehicle_aliases: BTreeMap::new(),
         }
     }
@@ -306,6 +310,73 @@ impl Catalog {
             return Self::descriptors(selection);
         };
         Self::scan_root(&root, selection)
+    }
+    pub fn scan_for_app(selection: &Selection, public_beta: bool) -> Self {
+        let catalog = Self::scan(selection);
+        if public_beta {
+            catalog.public_beta()
+        } else {
+            catalog
+        }
+    }
+
+    pub fn is_public_beta(&self) -> bool {
+        self.public_beta
+    }
+
+    fn public_beta(self) -> Self {
+        use super::ngp_experimental::{inspect_pack_state, PackAuditState};
+        use rerbr_asset_formats::cars;
+        use rerbr_sim::ngp_candidate::{inspect_runtime_dir, NgpRuntimeKind};
+
+        let root = self.root.as_ref().map(|documents| documents.join("RBR"));
+        let Some(root) = root else {
+            return self.restrict_drivable(|_| false);
+        };
+        let has_physics = cars::resolve(&root, "physics.rbz").is_some_and(|file| file.is_file());
+        let ngp_ready =
+            has_physics && inspect_runtime_dir(&root).kind == NgpRuntimeKind::Verified74;
+        let retail = cars::resolve(&root, &VehicleDescriptor::default().index)
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| cars::parse(&String::from_utf8_lossy(&bytes)).ok())
+            .unwrap_or_default();
+        self.restrict_drivable(|vehicle| {
+            if vehicle.is_ngp_experimental_car() {
+                ngp_ready
+                    && matches!(
+                        inspect_pack_state(&root, vehicle),
+                        PackAuditState::Ready { .. }
+                    )
+            } else {
+                has_physics && crate::car::retail_car_entry(&retail, vehicle).is_ok()
+            }
+        })
+    }
+
+    /// Project the already classified catalog onto the public selection list.
+    /// Existing alias groups are retained with indices into the filtered list.
+    fn restrict_drivable(mut self, backend_ready: impl Fn(&VehicleDescriptor) -> bool) -> Self {
+        self.public_beta = true;
+        let previous = std::mem::take(&mut self.vehicle_aliases);
+        let mut groups = Vec::with_capacity(self.vehicles.len());
+        let mut retained = BTreeMap::new();
+        for (old, entry) in std::mem::take(&mut self.vehicles).into_iter().enumerate() {
+            let group = previous.get(&old).map_or(old, |&parent| groups[parent]);
+            groups.push(group);
+            if entry.files.checked
+                && entry.can_showroom_view()
+                && entry.capability(true) == DriveCapability::Drivable
+                && backend_ready(&entry.descriptor)
+            {
+                let index = self.vehicles.len();
+                let first = *retained.entry(group).or_insert(index);
+                if first != index {
+                    self.vehicle_aliases.insert(index, first);
+                }
+                self.vehicles.push(entry);
+            }
+        }
+        self
     }
     pub fn scan_root(root: &Path, selection: &Selection) -> Self {
         let mut catalog = Self::descriptors(selection);
@@ -672,6 +743,52 @@ impl Catalog {
 fn unnumbered_model_path(model: &str) -> Option<String> {
     let (directory, file) = model.rsplit_once('/')?;
     Some(format!("{}/{file}", numbered_copy_base(directory)?))
+}
+
+#[test]
+fn public_catalog_projects_existing_alias_groups_and_preserves_valid_ids() {
+    let mut catalog = Catalog::descriptors(&Selection::default());
+    let install = |entry: &mut VehicleEntry| {
+        entry.has_3d_model = true;
+        entry.files.checked = true;
+    };
+    for entry in &mut catalog.vehicles[0..4] {
+        install(entry);
+    }
+    let mut rsf = VehicleDescriptor::ford_focus_2006();
+    rsf.id = "rsf-saved-model".into();
+    rsf.rsf_pack = Some("Ford_Focus_Mk_II_RS_WRC_2006_ngp6".into());
+    catalog.vehicles[0].descriptor = rsf;
+    catalog.vehicles[0].classification = VehicleClassification::RsfNgpPartial;
+    let mut alias = catalog.vehicles[0].clone();
+    alias.descriptor.id = "rsf-saved-model-2".into();
+    let alias_index = catalog.vehicles.len();
+    catalog.vehicles.push(alias);
+    catalog.vehicle_aliases.insert(alias_index, 0);
+    catalog.vehicles[2].files.missing.push("missing.dds".into());
+    catalog.vehicles[3].classification = VehicleClassification::VisualInspectionOnly;
+    let original_rows = catalog.browse_vehicle_indices(|_| false);
+    let projection = catalog.clone().restrict_drivable(|_| true);
+    assert_eq!(projection.browse_vehicle_count(), 2);
+    assert!(projection.vehicle("rsf-saved-model-2").is_some());
+    let preferred = projection.browse_vehicle_indices(|e| e.descriptor.id == "rsf-saved-model-2");
+    assert_eq!(
+        projection.vehicles[preferred[0]].descriptor.id,
+        "rsf-saved-model-2"
+    );
+    assert_eq!(catalog.browse_vehicle_indices(|_| false), original_rows);
+    assert!(catalog
+        .clone()
+        .restrict_drivable(|_| false)
+        .vehicles
+        .is_empty());
+    catalog.vehicles[0]
+        .files
+        .missing
+        .push("incomplete-canonical.dds".into());
+    let projection = catalog.restrict_drivable(|_| true);
+    assert_eq!(projection.browse_vehicle_count(), 2);
+    assert!(projection.vehicle("rsf-saved-model-2").is_some());
 }
 
 fn numbered_copy_base(name: &str) -> Option<&str> {

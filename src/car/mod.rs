@@ -203,6 +203,30 @@ pub fn load_vehicle(
 ) -> Result<Car, String> {
     load_vehicle_for_mode(root, vehicle, false)
 }
+pub(crate) fn retail_car_entry<'a>(
+    entries: &'a [cars::CarEntry],
+    vehicle: &rerbr_content::VehicleDescriptor,
+) -> Result<&'a cars::CarEntry, String> {
+    let entry = entries
+        .iter()
+        .find(|entry| entry.index == vehicle.original_slot as usize)
+        .ok_or_else(|| format!("CAR: [Car{:02}] missing", vehicle.original_slot))?;
+    if !rerbr_content::same_path(&entry.file_name, &vehicle.model) {
+        return Err(format!("CAR: selected model mismatch for {}", vehicle.id));
+    }
+    let clear = format!("{}_clear.ini", entry.shader_settings);
+    if !rerbr_content::same_path(&entry.ini_file, &vehicle.parts)
+        || !rerbr_content::same_path(&entry.shader_file, &vehicle.shaders)
+        || !rerbr_content::same_path(&clear, &vehicle.shader_settings)
+    {
+        return Err(format!(
+            "CAR: configuration dependencies disagree with selected vehicle {}",
+            vehicle.id
+        ));
+    }
+    Ok(entry)
+}
+
 pub fn load_vehicle_for_mode(
     root: &Path,
     vehicle: &rerbr_content::VehicleDescriptor,
@@ -242,24 +266,8 @@ pub fn load_vehicle_for_mode(
     } else {
         let index = read(root, vehicle, &vehicle.index, 1024 * 1024)?;
         let entries = cars::parse(&String::from_utf8_lossy(&index)).map_err(|e| e.to_string())?;
-        let entry = entries
-            .iter()
-            .find(|e| e.index == vehicle.original_slot as usize)
-            .cloned()
-            .ok_or_else(|| format!("CAR: [Car{:02}] missing", vehicle.original_slot))?;
-        if !rerbr_content::same_path(&entry.file_name, &vehicle.model) {
-            return Err(format!("CAR: selected model mismatch for {}", vehicle.id));
-        }
+        let entry = retail_car_entry(&entries, vehicle)?.clone();
         let clear = format!("{}_clear.ini", entry.shader_settings);
-        if !rerbr_content::same_path(&entry.ini_file, &vehicle.parts)
-            || !rerbr_content::same_path(&entry.shader_file, &vehicle.shaders)
-            || !rerbr_content::same_path(&clear, &vehicle.shader_settings)
-        {
-            return Err(format!(
-                "CAR: configuration dependencies disagree with selected vehicle {}",
-                vehicle.id
-            ));
-        }
         let files = vec![
             vehicle.index.clone(),
             entry.file_name.clone(),

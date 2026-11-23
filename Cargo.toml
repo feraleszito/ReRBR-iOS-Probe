@@ -29,6 +29,8 @@ physics-drive = ["car-chase-benchmark", "dep:rerbr-sim"]
 physics-stage = ["physics-drive"]
 # Internal developer economy/progression testing mode (never enabled in public release builds).
 career-dev-mode = []
+# Public iPad catalog, independent of the Developer economy and diagnostics.
+public-beta = ["physics-stage"]
 
 [lib]
 name = "rerbr_probe"
