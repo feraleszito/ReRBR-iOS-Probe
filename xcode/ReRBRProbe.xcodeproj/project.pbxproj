@@ -107,7 +107,7 @@
                 PRODUCT_NAME = ReRBRProbe;
                 SUPPORTED_PLATFORMS = iphoneos;
                 SUPPORTS_MACCATALYST = NO;
-                TARGETED_DEVICE_FAMILY = 2;
+                TARGETED_DEVICE_FAMILY = "1,2";
                 ENABLE_BITCODE = NO;
                 DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
                 STRIP_INSTALLED_PRODUCT = NO;

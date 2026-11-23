@@ -25,16 +25,31 @@ fn find_glyph(ch: char) -> &'static font_metrics::GlyphMetric {
 pub struct Canvas {
     size: (u32, u32),
     height: f32,
+    ndc_scale: [f32; 2],
+    ndc_origin: [f32; 2],
     out: Vec<u8>,
 }
 #[cfg(feature = "physics-drive")]
 impl Canvas {
     pub fn new(size: (u32, u32)) -> Self {
+        Self::in_viewport(size, [0.0, 0.0, 1.0, 1.0])
+    }
+    /// The viewport is normalized to the drawable, with a top-left origin.
+    pub fn in_viewport(size: (u32, u32), [x, y, w, h]: [f32; 4]) -> Self {
+        let height = 640.0 * (h * size.1.max(1) as f32) / (w * size.0.max(1) as f32);
         Self {
             size,
-            height: 640.0 * size.1.max(1) as f32 / size.0.max(1) as f32,
+            height,
+            ndc_scale: [w / 320.0, -2.0 * h / height],
+            ndc_origin: [2.0 * x - 1.0, 1.0 - 2.0 * y],
             out: Vec::with_capacity(32768),
         }
+    }
+    fn ndc(&self, x: f32, y: f32) -> [f32; 2] {
+        [
+            self.ndc_origin[0] + x * self.ndc_scale[0],
+            self.ndc_origin[1] + y * self.ndc_scale[1],
+        ]
     }
     pub fn height(&self) -> f32 {
         self.height
@@ -51,9 +66,10 @@ impl Canvas {
             (1.0, 0.0),
             (1.0, 1.0),
         ] {
+            let [nx, ny] = self.ndc(x + dx * w, y + dy * h);
             for value in [
-                (x + dx * w) / 320.0 - 1.0,
-                1.0 - (y + dy * h) * 2.0 / self.height,
+                nx,
+                ny,
                 uv[0] + dx * (uv[2] - uv[0]),
                 uv[1] + dy * (uv[3] - uv[1]),
             ] {
@@ -180,7 +196,8 @@ impl Canvas {
         let p10 = (cx + c1 * r_in, cy + s1 * r_in);
         let p11 = (cx + c1 * r_out, cy + s1 * r_out);
         for (px, py) in [p00, p01, p10, p10, p01, p11] {
-            for value in [px / 320.0 - 1.0, 1.0 - py * 2.0 / self.height, uv[0], uv[1]] {
+            let [nx, ny] = self.ndc(px, py);
+            for value in [nx, ny, uv[0], uv[1]] {
                 self.out.extend(value.to_ne_bytes());
             }
             self.out.extend(color);

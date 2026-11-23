@@ -657,8 +657,8 @@ impl Runtime {
     pub fn camera_fov_degrees(&self) -> f32 {
         self.effective_fov
     }
-    fn effective_layout(&self, size: (u32, u32)) -> DrivingLayout {
-        self.controls_layout.apply(DrivingLayout::for_size(size))
+    fn effective_layout(&self, window: layout::WindowLayout) -> DrivingLayout {
+        self.controls_layout.apply(window.driving())
     }
     fn stage_elapsed_secs(&self) -> Option<f64> {
         self.race.seconds()
@@ -2987,8 +2987,13 @@ impl Runtime {
         }
         let x = t.location.x / f64::from(size.0.max(1));
         let y = t.location.y / f64::from(size.1.max(1));
+        let window = layout::WindowLayout::query();
+        if t.phase == TouchPhase::Started && !window.accepts_touch_start(x, y) {
+            return;
+        }
+        let (x, y) = window.point(x, y);
         if self.menu.page == menu::Page::ControlsEditor {
-            let base = DrivingLayout::for_size(size);
+            let base = window.driving();
             if t.phase == TouchPhase::Started {
                 let rows = {
                     let context = self.context();
@@ -3087,7 +3092,7 @@ impl Runtime {
             }
             return;
         }
-        let layout = self.effective_layout(size);
+        let layout = self.effective_layout(window);
         if t.phase == TouchPhase::Started {
             if layout.pause.contains(x, y) {
                 self.pause();
@@ -3488,7 +3493,7 @@ impl Runtime {
             }
         }
 
-        let layout = self.effective_layout(self.drawable_size);
+        let layout = self.effective_layout(layout::WindowLayout::query());
         let steering_ready = self.is_landscape_ready();
         let (pair, rest, paused) = self.sync_race_state(now, seconds, &layout, steering_ready);
         audio::set_paused(paused);
@@ -3842,7 +3847,7 @@ impl Runtime {
             return "LOADING PRIVATE STAGE / CAR / PHYSICS".into();
         }
         if !self.experimental_visual_only && !self.is_landscape_ready() {
-            return "STEERING UNAVAILABLE - HOLD IPAD IN LANDSCAPE".into();
+            return "STEERING UNAVAILABLE - HOLD DEVICE IN LANDSCAPE".into();
         }
         if let Some(message) = &self.message {
             return message.clone();
@@ -3876,8 +3881,11 @@ impl Runtime {
             self.poll_gamepad();
         }
         let state = self.worker.state.lock().unwrap().clone();
-        let mut canvas = Canvas::new(size);
-        let layout = self.effective_layout(size);
+        let window = layout::WindowLayout::query();
+        let r = window.viewport();
+        let viewport = [r.x, r.y, r.w, r.h];
+        let mut canvas = Canvas::in_viewport(size, viewport);
+        let layout = self.effective_layout(window);
         if self.menu.page == menu::Page::ControlsEditor {
             self.draw_controls_editor(&mut canvas, &layout);
             let status = self.status(&state);
@@ -3912,9 +3920,10 @@ impl Runtime {
                 if let Some(p) = self.career.profile.as_ref() {
                     let badge = format!("#{}", p.competition_number);
                     for &(nx, ny) in &self.showroom_dorsal_positions {
+                        let (nx, ny) = window.point(f64::from(nx), f64::from(ny));
                         let r = Rect::new(
-                            (nx - 0.024).clamp(0.02, 0.94),
-                            (ny - 0.022).clamp(0.12, 0.68),
+                            (nx as f32 - 0.024).clamp(0.02, 0.94),
+                            (ny as f32 - 0.022).clamp(0.12, 0.68),
                             0.048,
                             0.044,
                         );
@@ -3947,7 +3956,7 @@ impl Runtime {
             self.draw_telemetry(&mut canvas, &layout, &state);
         }
         self.draw_banners(&mut canvas, &layout, &state);
-        let mut sprite_canvas = Canvas::new(size);
+        let mut sprite_canvas = Canvas::in_viewport(size, viewport);
         self.draw_pacenote_visual_hud(&mut canvas, &mut sprite_canvas);
         hud.draw_bytes_and_sprites(
             queue,
@@ -4405,7 +4414,7 @@ impl Runtime {
             && !self.tilt.is_finite()
             && !self.gamepad.connected
         {
-            banners.push(("HOLD IPAD IN LANDSCAPE TO STEER".into(), WARN));
+            banners.push(("HOLD DEVICE IN LANDSCAPE TO STEER".into(), WARN));
         }
         if !self.cockpit_ready && self.camera_label() == "COCKPIT" {
             banners.push(("COCKPIT ASSETS MISSING - EXTERIOR VIEW".into(), WARN));

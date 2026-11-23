@@ -45,7 +45,7 @@ definitions:
 
 workflows:
   rerbr-probe-unsigned:
-    name: RBR Mobile — BETA PÚBLICA (iPadOS unsigned)
+    name: RBR Mobile — BETA PÚBLICA (iOS/iPadOS unsigned)
     instance_type: mac_mini_m2
     max_build_duration: 35
     environment:

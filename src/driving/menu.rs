@@ -5742,14 +5742,18 @@ mod tests {
             Page::CareerService,
         ];
 
-        // Verify both iPad mini A17 Pro (1024x768) and iPhone 15 wide landscape (2556x1179).
-        for size in [(1024, 768), (2556, 1179)] {
+        let side = 59.0 / 852.0;
+        let bottom = 21.0 / 393.0;
+        for (size, viewport) in [
+            ((1024, 768), [0.0, 0.0, 1.0, 1.0]),
+            ((2556, 1179), [side, 0.0, 1.0 - 2.0 * side, 1.0 - bottom]),
+        ] {
             for page in all_pages {
                 let menu = Menu {
                     page,
                     ..Menu::default()
                 };
-                let mut canvas = Canvas::new(size);
+                let mut canvas = Canvas::in_viewport(size, viewport);
                 menu.draw(&mut canvas, &ctx, "PRUEBA ESTADO HUD");
                 let bytes = canvas.finish();
                 assert!(

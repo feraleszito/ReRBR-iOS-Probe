@@ -288,19 +288,72 @@ impl Insets {
             bottom: part(values[3]),
         }
     }
-    /// Reads UIKit safe-area insets. Non-iOS builds and unavailable views use zero.
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct WindowLayout {
+    insets: Insets,
+    phone: bool,
+}
+
+impl WindowLayout {
+    /// Reads UIKit safe-area insets. The iPad retains its existing layout.
     pub fn query() -> Self {
         #[cfg(target_os = "ios")]
         {
             unsafe extern "C" {
-                fn rerbr_drive_safe_area(out: *mut f64);
+                fn rerbr_drive_safe_area(out: *mut f64) -> i32;
             }
             let mut values = [0.0; 4];
-            unsafe { rerbr_drive_safe_area(values.as_mut_ptr()) };
-            Self::sanitize(values)
+            let phone = unsafe { rerbr_drive_safe_area(values.as_mut_ptr()) } != 0;
+            Self {
+                insets: Insets::sanitize(values),
+                phone,
+            }
         }
         #[cfg(not(target_os = "ios"))]
-        Self::ZERO
+        Self::default()
+    }
+
+    pub fn viewport(self) -> Rect {
+        if !self.phone {
+            return Rect::new(0.0, 0.0, 1.0, 1.0);
+        }
+        let i = self.insets;
+        Rect::new(
+            i.left,
+            i.top,
+            1.0 - i.left - i.right,
+            1.0 - i.top - i.bottom,
+        )
+    }
+
+    pub fn point(self, x: f64, y: f64) -> (f64, f64) {
+        let r = self.viewport();
+        (
+            (x - f64::from(r.x)) / f64::from(r.w),
+            (y - f64::from(r.y)) / f64::from(r.h),
+        )
+    }
+
+    pub fn accepts_touch_start(self, x: f64, y: f64) -> bool {
+        !self.phone || self.viewport().contains(x, y)
+    }
+
+    pub fn driving(self) -> DrivingLayout {
+        if !self.phone {
+            return DrivingLayout::with_insets(self.insets);
+        }
+        // The whole phone HUD is already inset by the shared viewport.
+        let mut layout = DrivingLayout::default();
+        layout.pause.h = 0.12;
+        layout.camera.h = layout.pause.h;
+        layout.diag.h = layout.pause.h;
+        layout.fps.h = layout.pause.h;
+        let telemetry_bottom = layout.telemetry.bottom();
+        layout.telemetry.y = layout.pause.bottom() + 0.020;
+        layout.telemetry.h = telemetry_bottom - layout.telemetry.y;
+        layout
     }
 }
 
@@ -332,7 +385,7 @@ impl DrivingLayout {
                     self.fps.x - 0.062 - i as f32 * 0.06,
                     self.fps.y,
                     0.052,
-                    0.055,
+                    self.pause.h,
                 )
             })
             .find(|r| {
@@ -357,7 +410,7 @@ impl DrivingLayout {
         }
     }
     pub fn for_size(_size: (u32, u32)) -> Self {
-        Self::with_insets(Insets::query())
+        WindowLayout::query().driving()
     }
     /// Hit and draw rectangles shared by the runtime, controls and HUD.
     /// Side clusters keep the centre of the road clear.
@@ -411,6 +464,77 @@ impl ReplayLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phone_safe_area_aligns_hud_and_touches_in_both_landscape_directions() {
+        use crate::{driving::controls::Controls, harwood::benchmark::hud::Canvas};
+
+        for (left, right) in [(59.0, 47.0), (47.0, 59.0)] {
+            let window = WindowLayout {
+                phone: true,
+                insets: Insets::sanitize([left / 852.0, 0.0, right / 852.0, 21.0 / 393.0]),
+            };
+            let r = window.viewport();
+            let layout = window.driving();
+            assert!(!window.accepts_touch_start(0.0, 0.5));
+            assert!(!window.accepts_touch_start(0.5, 0.99));
+            assert!(layout.pause.bottom() <= layout.telemetry.y);
+            assert!(layout.telemetry.bottom() < layout.handbrake.y);
+
+            let (width, height) = (2556, 1179);
+            let mut canvas = Canvas::in_viewport((width, height), [r.x, r.y, r.w, r.h]);
+            let expected_height = 640.0 * (393.0 - 21.0) / (852.0 - left - right) as f32;
+            assert!((canvas.height() - expected_height).abs() < 1e-4);
+            canvas.rect(0.0, 0.0, 640.0, canvas.height(), [255; 4]);
+            let bytes = canvas.finish();
+            for (vertex, expected) in [(0, (r.x, r.y)), (5, (r.right(), r.bottom()))] {
+                let offset = vertex * 20;
+                let x = f32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
+                let y = f32::from_ne_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+                assert!(((x + 1.0) / 2.0 - expected.0).abs() < 1e-6);
+                assert!(((1.0 - y) / 2.0 - expected.1).abs() < 1e-6);
+            }
+
+            let mut controls = Controls::new();
+            let start = layout.engine_start_rect().unwrap();
+            let tap = |button: Rect, y| {
+                let x = f64::from(r.x + button.center_x() * r.w);
+                let y = f64::from(r.y + y * r.h);
+                assert!(window.accepts_touch_start(x, y));
+                window.point(x, y)
+            };
+            let (x, y) = tap(layout.brake, layout.brake.bottom() - 0.01);
+            controls.touch_layout(&layout, 1, x, y, true, false);
+            let (x, y) = tap(start, start.y + start.h * 0.5);
+            controls.touch_layout(&layout, 2, x, y, true, false);
+            assert_ne!(controls.input_in(&layout, 0.0, 0.016).aux, 0);
+            let (x, y) = window.point(0.0, 0.99);
+            controls.touch_layout(&layout, 2, x, y, false, true);
+            let input = controls.input_in(&layout, 0.0, 0.016);
+            assert_eq!(input.aux, 0);
+            assert!(input.brake > 0.95);
+        }
+    }
+
+    #[test]
+    fn ipad_keeps_the_full_canvas_and_original_driving_insets() {
+        let insets = Insets::sanitize([0.03, 0.02, 0.04, 0.03]);
+        let window = WindowLayout {
+            insets,
+            phone: false,
+        };
+        assert_eq!(window.viewport(), Rect::new(0.0, 0.0, 1.0, 1.0));
+        assert_eq!(window.point(0.27, 0.81), (0.27, 0.81));
+        let layout = window.driving();
+        let previous = DrivingLayout::with_insets(insets);
+        assert_eq!(layout.pause, previous.pause);
+        assert_eq!(layout.cluster, previous.cluster);
+        assert_eq!(layout.telemetry, previous.telemetry);
+        assert_eq!(layout.engine_start_rect(), previous.engine_start_rect());
+        for control in EditableControl::ALL {
+            assert_eq!(layout.control_rect(control), previous.control_rect(control));
+        }
+    }
 
     #[test]
     fn moved_and_resized_controls_restore_the_same_hit_regions() {

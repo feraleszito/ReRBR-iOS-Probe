@@ -176,7 +176,8 @@ grep -Eq 'platform[[:space:]]+IOS$' build/macho-build.txt
 
 # A directory called .ipa is not sufficient: this must be a zip with Payload/*.app.
 # Refuse a leftover package so a failed rerun cannot upload an old IPA.
-if [[ -e build/Payload || -e "build/$IPA_NAME" ]]; then
+STAGED_IPA=".pending-$IPA_NAME"
+if [[ -e build/Payload || -e "build/$STAGED_IPA" || -e "build/$IPA_NAME" ]]; then
     echo "Old package exists. Use a fresh checkout or move $PROBE_ROOT/build aside before retrying." >&2
     exit 1
 fi
@@ -184,9 +185,10 @@ mkdir build/Payload
 ditto "$APP" build/Payload/ReRBRProbe.app
 (
     cd build
-    /usr/bin/zip -qry "$IPA_NAME" Payload
+    /usr/bin/zip -qry "$STAGED_IPA" Payload
 )
-python3 scripts/verify.py --ipa "build/$IPA_NAME"
+python3 scripts/verify.py --app "$APP" --ipa "build/$STAGED_IPA" 2>&1 | tee build/package-verification.log
+mv "build/$STAGED_IPA" "build/$IPA_NAME"
 (
     cd build
     shasum -a 256 "$IPA_NAME" > SHA256SUMS

@@ -205,19 +205,21 @@ static UIWindow *rerbr_key_window(void) {
     return keyWindow;
 }
 
-// Normalized safe-area insets: left, top, right, bottom. Zero when unavailable.
-void rerbr_drive_safe_area(double out[4]) {
+// Normalized safe-area insets: left, top, right, bottom. Returns the phone idiom.
+int rerbr_drive_safe_area(double out[4]) {
     for (int i = 0; i < 4; i++) out[i] = 0.0;
+    int phone = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone;
     UIWindow *keyWindow = rerbr_key_window();
     UIView *view = keyWindow.rootViewController.view;
-    if (view == nil) return;
+    if (view == nil) return phone;
     CGSize bounds = view.bounds.size;
-    if (bounds.width <= 0 || bounds.height <= 0) return;
+    if (bounds.width <= 0 || bounds.height <= 0) return phone;
     UIEdgeInsets insets = view.safeAreaInsets;
     out[0] = insets.left / bounds.width;
     out[1] = insets.top / bounds.height;
     out[2] = insets.right / bounds.width;
     out[3] = insets.bottom / bounds.height;
+    return phone;
 }
 
 // Polled only on the UIKit thread. No callbacks into Rust or physics writes.

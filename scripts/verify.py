@@ -161,10 +161,14 @@ def verify_sources():
     with (ROOT / "xcode/ReRBRProbe/Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
     require(info["CFBundlePackageType"] == "APPL", "application package type")
+    require("UIDeviceFamily" not in info, "Xcode must generate UIDeviceFamily")
+    verify_orientation(info)
     require("UIApplicationSceneManifest" not in info, "winit owns the application lifecycle")
     require(info.get("UIFileSharingEnabled") is True and info.get("LSSupportsOpeningDocumentsInPlace") is True,
             "private Documents transfer must remain enabled")
     project = (ROOT / "xcode/ReRBRProbe.xcodeproj/project.pbxproj").read_text()
+    require(re.findall(r"\bTARGETED_DEVICE_FAMILY\s*=\s*([^;]+);", project) == ['"1,2"'],
+            "Xcode application target must include iPhone and iPad")
     require(re.findall(r"PRODUCT_BUNDLE_IDENTIFIER\s*=\s*([^;]+);", project) == ["org.rerbr.probe"],
             "preserve installed app bundle identity")
     require("../assets/fonts/UFL.txt" in project and "../assets/fonts/NOTICE.md" in project, "font notices must ship in the app")
@@ -192,7 +196,27 @@ def verify_sources():
     print("PASS: independent manifest, optional libraries, upstream hashes, no game resources, locked versions, Xcode references, plist and XML")
 
 
-def verify_ipa(path):
+def verify_orientation(info):
+    landscape = ["UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"]
+    require(info.get("UISupportedInterfaceOrientations") == landscape, "iPhone must support both landscape orientations")
+    require(info.get("UISupportedInterfaceOrientations~ipad") == [
+        "UIInterfaceOrientationPortrait", "UIInterfaceOrientationPortraitUpsideDown", *landscape,
+    ], "preserve the four iPad orientations")
+
+
+def verify_app_info(data, label):
+    info = plistlib.loads(data)
+    require(info["CFBundleIdentifier"] == "org.rerbr.probe", "bundle ID must be expanded")
+    require(info["CFBundleExecutable"] == "ReRBRProbe", "executable name must be expanded")
+    family = info.get("UIDeviceFamily")
+    require(family == [1, 2] and all(type(item) is int for item in family),
+            f"{label}: expected UIDeviceFamily [1, 2] (iPhone and iPad), found {family!r}")
+    require(info["MinimumOSVersion"] == "18.0", "deployment target must be iOS/iPadOS 18.0")
+    verify_orientation(info)
+    print(f"PASS: {label} UIDeviceFamily={family}; iPhone landscape; four iPad orientations")
+
+
+def verify_ipa(path, app_info=None):
     with zipfile.ZipFile(path) as archive:
         require(archive.testzip() is None, "corrupt IPA zip")
         names = set(archive.namelist())
@@ -201,11 +225,10 @@ def verify_ipa(path):
         require(all(name.startswith("Payload/") for name in names), "IPA contains files outside Payload")
         require(not any("_CodeSignature/" in name or name.endswith("embedded.mobileprovision") for name in names),
                 "experimental IPA must have no signing profile/signature resources")
-        info = plistlib.loads(archive.read(prefix + "Info.plist"))
-        require(info["CFBundleIdentifier"] == "org.rerbr.probe", "bundle ID must be expanded")
-        require(info["CFBundleExecutable"] == "ReRBRProbe", "executable name must be expanded")
-        require(info["UIDeviceFamily"] == [2], "iPad-only device family")
-        require(info["MinimumOSVersion"] == "18.0", "deployment target must be iPadOS 18.0")
+        packed_info = archive.read(prefix + "Info.plist")
+        verify_app_info(packed_info, f"{path.name} Payload/ReRBRProbe.app")
+        if app_info is not None:
+            require(app_info == packed_info, "packaging changed the built application's Info.plist")
         require(any(name.startswith(prefix + "LaunchScreen.storyboardc/") for name in names), "compiled launch screen missing")
         binary = archive.read(prefix + "ReRBRProbe")
         require(len(binary) >= 32, "truncated executable")
@@ -228,8 +251,13 @@ def verify_ipa(path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--app", type=Path)
     parser.add_argument("--ipa", type=Path)
     args = parser.parse_args()
     verify_sources()
+    app_info = None
+    if args.app:
+        app_info = (args.app / "Info.plist").read_bytes()
+        verify_app_info(app_info, str(args.app))
     if args.ipa:
-        verify_ipa(args.ipa)
+        verify_ipa(args.ipa, app_info)
