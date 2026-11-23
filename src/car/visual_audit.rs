@@ -300,6 +300,14 @@ fn bmw_and_ds3_original_face_block_regressions() {
     let ds3 = descriptor("rsf-citroen-ds3-wrc");
     let load_bmw = || load_showroom_model(&root, bmw).expect("original BMW assets");
     let first_bmw = load_bmw();
+    assert!(
+        first_bmw
+            .geometry
+            .skipped
+            .iter()
+            .any(|(name, why)| name == "e_intakeroof"
+                && why == "intake belongs to switched-off shell")
+    );
     let panels = ["e_body", "e_wing_evo1"];
     for panel in panels {
         assert!(
@@ -343,6 +351,26 @@ fn bmw_and_ds3_original_face_block_regressions() {
 
     let wheels = "cars\\ds3_wrc\\textures\\ds3_wrc_external_dynamic.dds";
     let ds3 = load_showroom_model(&root, ds3).expect("original DS3 assets");
+    assert_eq!(
+        ds3.geometry
+            .drawn
+            .iter()
+            .filter(|name| *name == "e_bonnetvents")
+            .count(),
+        1
+    );
+    assert!(ds3
+        .geometry
+        .skipped
+        .iter()
+        .any(|(name, why)| name == "e_bonnetvents"
+            && why == "identical exterior mesh in the same SGC"));
+    assert!(ds3.geometry.drawn.iter().any(|name| name == "e_intakeroof"));
+    assert!(ds3
+        .geometry
+        .unresolved_faces
+        .iter()
+        .all(|face| !face.starts_with("e_antena ")));
     assert!(ds3.textures.contains_key(wheels));
     for slot in 1..=4 {
         assert!(

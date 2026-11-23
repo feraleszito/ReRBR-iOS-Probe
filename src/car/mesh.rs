@@ -122,18 +122,18 @@ fn inactive_panel(part: &Section) -> bool {
 
 /// A complete switched-out shell can coexist in the SGC with the car's
 /// active one-piece body. Its panels all declare a single, different atlas.
-fn has_disabled_shell(
+fn disabled_shell_atlas<'a>(
     parts: &[Section],
-    shaders: &[Section],
+    shaders: &'a [Section],
     names: &BTreeSet<&str>,
     body_atlas: &str,
-) -> bool {
+) -> Option<&'a str> {
     if !names.contains("e_body") || car_parts::section(parts, "e_body").is_some_and(inactive_panel)
     {
-        return false;
+        return None;
     }
     let mut shell_atlas = None;
-    SHELL_PANELS.into_iter().all(|name| {
+    let complete = SHELL_PANELS.into_iter().all(|name| {
         let Some(part) =
             car_parts::section(parts, name).filter(|p| names.contains(name) && inactive_panel(p))
         else {
@@ -150,7 +150,8 @@ fn has_disabled_shell(
         !rerbr_content::same_path(body_atlas, atlas)
             && rerbr_content::same_path(expected, atlas)
             && one_declared_atlas(&blocks, shaders)
-    })
+    });
+    shell_atlas.filter(|_| complete)
 }
 
 fn disabled_shell_tree(elements: &[sgc::Element]) -> BTreeSet<i32> {
@@ -384,10 +385,12 @@ fn convert_set(
         .then(|| exterior_paint_atlas(parts, shaders))
         .flatten();
     let body_atlas = primary_atlas.filter(|_| !interior);
-    let disabled_shell = primary_atlas
-        .filter(|atlas| has_disabled_shell(parts, shaders, &mesh_names, atlas))
+    let shell_atlas =
+        primary_atlas.and_then(|atlas| disabled_shell_atlas(parts, shaders, &mesh_names, atlas));
+    let disabled_shell = shell_atlas
         .map(|_| disabled_shell_tree(elements))
         .unwrap_or_default();
+    let mut drawn_meshes: HashMap<&str, &sgc::Mesh> = HashMap::new();
     // The audit uses the original SGC record index, before draw sorting.
     #[allow(clippy::unused_enumerate_index)]
     for (_record_index, element) in elements.iter().enumerate() {
@@ -421,6 +424,36 @@ fn convert_set(
         }
         let normals = matrix.inverse().transpose();
         let blocks = car_parts::face_blocks(part);
+        if !interior
+            && mesh.node.name == "e_intakeroof"
+            && inactive_panel(part)
+            && matches!(blocks.as_slice(), [block] if car_parts::diffuse_path(shaders, &block.material)
+                .zip(shell_atlas).is_some_and(|(a,b)| rerbr_content::same_path(a,b)))
+        {
+            result.skipped.push((
+                mesh.node.name.clone(),
+                "intake belongs to switched-off shell".into(),
+            ));
+            continue;
+        }
+        if !interior {
+            let prior = drawn_meshes.entry(&mesh.node.name).or_insert(mesh);
+            if prior.node.id != mesh.node.id
+                && prior.node.parent == mesh.node.parent
+                && prior.node.world == mesh.node.world
+                && prior.node.transform == mesh.node.transform
+                && prior.faces == mesh.faces
+                && prior.triangles == mesh.triangles
+                && prior.vertices == mesh.vertices
+                && prior.uvs == mesh.uvs
+            {
+                result.skipped.push((
+                    mesh.node.name.clone(),
+                    "identical exterior mesh in the same SGC".into(),
+                ));
+                continue;
+            }
+        }
         // Some exports merge every triangle into one SGC face but retain the
         // old INI slots. When all slots still name the same material, FaceBlock0
         // provides its shader without borrowing a material from another face.
@@ -544,6 +577,13 @@ fn convert_set(
                     materials::resolve(shaders, settings, &block.shader, &block.material).or_else(
                         |_| materials::resolve(shaders, settings, &block.shader, &face.name),
                     )
+                } else if mesh.node.name == "e_antena"
+                    && face.name == "external_parts::carpaint"
+                    && matches!(blocks.as_slice(), [block] if block.shader == "CarPaint"
+                        && block.material == mesh.faces[0].name)
+                    && car_parts::diffuse_path(shaders, &face.name).is_some()
+                {
+                    materials::resolve(shaders, settings, "CarPaint", &face.name)
                 } else {
                     Err("no corresponding FaceBlock".into())
                 }
