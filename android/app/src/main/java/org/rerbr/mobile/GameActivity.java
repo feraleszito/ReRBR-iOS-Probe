@@ -223,7 +223,7 @@ private void reportInsets(View view, WindowInsets windowInsets) {
     @Override protected void onResume() {
         super.onResume();
         hideSystemBars();
-        f (gravity != null) sensors.registerListener(this, gravity, SensorManager.SENSOR_DELAY_GAME);
+        if (gravity != null) sensors.registerListener(this, gravity, SensorManager.SENSOR_DELAY_GAME);
         if (safImporter != null) safImporter.syncPersistedState();
         audio.resume();
     }
