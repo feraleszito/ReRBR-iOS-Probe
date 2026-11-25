@@ -63,12 +63,24 @@ decor.setOnApplyWindowInsetsListener((v, insets) -> {
     }
 
     private void hideSystemBars() {
-        android.view.WindowInsetsController controller = getWindow().getInsetsController();
+    if (android.os.Build.VERSION.SDK_INT >= 30) {
+        android.view.WindowInsetsController controller =
+                getWindow().getInsetsController();
+
         if (controller != null) {
             controller.hide(WindowInsets.Type.systemBars());
         }
+    } else {
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        );
     }
-
+}
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
@@ -176,19 +188,42 @@ decor.setOnApplyWindowInsetsListener((v, insets) -> {
         WindowInsets insets = view.getRootWindowInsets();
         if (insets != null) reportInsets(view, insets);
     }
+private void reportInsets(View view, WindowInsets windowInsets) {
+    int width = view.getWidth(), height = view.getHeight();
+    if (width == 0 || height == 0) return;
 
-    private void reportInsets(View view, WindowInsets windowInsets) {
-        int width = view.getWidth(), height = view.getHeight();
-        if (width == 0 || height == 0) return;
-        android.graphics.Insets i = windowInsets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-        boolean phone = getResources().getConfiguration().smallestScreenWidthDp < 600;
-        safeArea((double)i.left / width, (double)i.top / height, (double)i.right / width, (double)i.bottom / height, phone);
+    android.graphics.Insets i;
+
+    if (android.os.Build.VERSION.SDK_INT >= 30) {
+        i = windowInsets.getInsets(
+                WindowInsets.Type.systemBars()
+                | WindowInsets.Type.displayCutout()
+        );
+    } else {
+        i = android.graphics.Insets.of(
+                windowInsets.getSystemWindowInsetLeft(),
+                windowInsets.getSystemWindowInsetTop(),
+                windowInsets.getSystemWindowInsetRight(),
+                windowInsets.getSystemWindowInsetBottom()
+        );
     }
+
+    boolean phone = getResources().getConfiguration().smallestScreenWidthDp < 600;
+
+    safeArea(
+            (double) i.left / width,
+            (double) i.top / height,
+            (double) i.right / width,
+            (double) i.bottom / height,
+            phone
+    );
+}
+    
 
     @Override protected void onResume() {
         super.onResume();
         hideSystemBars();
-        if (gravity != null) sensors.registerListener(this, gravity, SensorManager.SENSOR_DELAY_GAME);
+        f (gravity != null) sensors.registerListener(this, gravity, SensorManager.SENSOR_DELAY_GAME);
         if (safImporter != null) safImporter.syncPersistedState();
         audio.resume();
     }
