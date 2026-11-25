@@ -24,6 +24,7 @@ def buildRust = tasks.register('buildRust', Exec) {
     commandLine providers.environmentVariable('PYTHON').getOrElse('python3'), 'android/build-native.py'
 }
 def notices = tasks.register('copyNotices', Copy) {
+    from('../../mobile/leaderboard') { into 'leaderboard' }
     from('../../assets/fonts') { include 'UFL.txt', 'NOTICE.md' }
     from('../../vendor/rerbr-sim/LICENSE')
     into layout.buildDirectory.dir('notices')

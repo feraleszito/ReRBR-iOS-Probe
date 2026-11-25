@@ -14,6 +14,8 @@ import android.view.View;
 import android.view.WindowInsets;
 
 public final class GameActivity extends NativeActivity implements SensorEventListener {
+    private OnlineBoard board;
+    public void showOnlineBoard() { runOnUiThread(() -> board.show()); }
     static { System.loadLibrary("rerbr_probe"); }
 
     private static final int REQ_OPEN_RBR_TREE = 4101;
@@ -34,6 +36,7 @@ public final class GameActivity extends NativeActivity implements SensorEventLis
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        board = new OnlineBoard(this);
         getWindow().setDecorFitsSystemWindows(false);
         hideSystemBars();
         View decor = getWindow().getDecorView();
@@ -196,6 +199,7 @@ public final class GameActivity extends NativeActivity implements SensorEventLis
     }
 
     @Override protected void onDestroy() {
+        board.destroy();
         audio.close();
         super.onDestroy();
     }

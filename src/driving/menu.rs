@@ -450,10 +450,9 @@ pub enum Command {
     UninstallInspectedStage,
     UninstallInspectedVehicle,
     LeaderboardPrevStage,
+    LeaderboardOnline,
     LeaderboardNextStage,
     LeaderboardCycleFilter,
-    LeaderboardPrevPage,
-    LeaderboardNextPage,
 }
 
 pub const MAX_VISIBLE_ROWS: usize = 10;
@@ -630,6 +629,65 @@ pub struct Context<'a> {
     pub last_leaderboard_result: Option<&'a super::leaderboard::LeaderboardSubmitResult>,
 }
 
+#[derive(Debug, Default)]
+pub struct BoardScroll {
+    offset: f32,
+    velocity: f32,
+    sample: Option<std::time::Instant>,
+    finger: Option<(u64, f32, f32, bool)>,
+}
+impl BoardScroll {
+    fn position(&self, rows: usize) -> f32 {
+        let t = self.sample.map_or(0.0, |at| at.elapsed().as_secs_f32());
+        let glide = if self.finger.is_none() {
+            self.velocity * (1.0 - (-6.0 * t).exp()) / 6.0
+        } else {
+            0.0
+        };
+        (self.offset + glide).clamp(0.0, rows.saturating_sub(MAX_VISIBLE_ROWS) as f32)
+    }
+    pub fn touch(&mut self, phase: winit::event::TouchPhase, id: u64, y: f32, rows: usize) -> bool {
+        use winit::event::TouchPhase;
+        let now = std::time::Instant::now();
+        if phase == TouchPhase::Started && self.finger.is_none() {
+            self.offset = self.position(rows);
+            self.velocity = 0.0;
+            self.sample = Some(now);
+            self.finger = Some((id, y, y, false));
+        } else if let Some((owner, start, last, dragged)) = self.finger {
+            if id != owner {
+                return false;
+            }
+            let elapsed = self
+                .sample
+                .map_or(0.0, |at| now.duration_since(at).as_secs_f32());
+            match phase {
+                TouchPhase::Moved => {
+                    let moving = dragged || (start - y).abs() > 0.12;
+                    if moving {
+                        let delta = if dragged { last - y } else { start - y };
+                        self.offset = (self.offset + delta)
+                            .clamp(0.0, rows.saturating_sub(MAX_VISIBLE_ROWS) as f32);
+                        self.velocity = (delta / elapsed.max(0.008)).clamp(-40.0, 40.0);
+                    }
+                    self.sample = Some(now);
+                    self.finger = Some((id, start, y, moving));
+                }
+                TouchPhase::Ended | TouchPhase::Cancelled => {
+                    if elapsed > 0.12 || phase == TouchPhase::Cancelled {
+                        self.velocity = 0.0;
+                    }
+                    self.sample = Some(now);
+                    self.finger = None;
+                    return phase == TouchPhase::Ended && !dragged && (start - y).abs() <= 0.12;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+}
+
 #[derive(Debug)]
 pub struct Menu {
     pub page: Page,
@@ -646,7 +704,7 @@ pub struct Menu {
     pub stage_page: usize,
     pub leaderboard_stage: usize,
     pub leaderboard_filter: super::leaderboard::LeaderboardFilter,
-    pub leaderboard_page: usize,
+    pub board_scroll: BoardScroll,
     pub row_scroll: usize,
     pub focused_row: usize,
     pub gamepad_focus_active: bool,
@@ -668,7 +726,7 @@ impl Default for Menu {
             stage_page: 0,
             leaderboard_stage: 0,
             leaderboard_filter: super::leaderboard::LeaderboardFilter::StageAllCars,
-            leaderboard_page: 0,
+            board_scroll: BoardScroll::default(),
             row_scroll: 0,
             focused_row: 0,
             gamepad_focus_active: false,
@@ -718,6 +776,13 @@ impl Menu {
     }
 
     pub fn visible_row_window(&self, total_rows: usize) -> (usize, usize) {
+        if self.page == Page::Leaderboards {
+            let pos = self.board_scroll.position(total_rows);
+            return (
+                pos.ceil() as usize,
+                (pos.floor() as usize + MAX_VISIBLE_ROWS).min(total_rows),
+            );
+        }
         if matches!(self.page, Page::CameraEditor | Page::ControlsEditor)
             || total_rows <= MAX_VISIBLE_ROWS
         {
@@ -766,8 +831,10 @@ impl Menu {
             None => 0,
         };
         self.focused_row = indices[next_pos];
-        if !matches!(self.page, Page::CameraEditor | Page::ControlsEditor)
-            && rows.len() > MAX_VISIBLE_ROWS
+        if !matches!(
+            self.page,
+            Page::CameraEditor | Page::ControlsEditor | Page::Leaderboards
+        ) && rows.len() > MAX_VISIBLE_ROWS
         {
             if self.focused_row < self.row_scroll {
                 self.row_scroll = self.focused_row;
@@ -1541,7 +1608,6 @@ impl Menu {
                 rows
             }
             Page::Leaderboards => {
-                const LB_PER_PAGE: usize = 5;
                 let stage_count = ctx.content.stages.len().max(1);
                 let st_idx = self.leaderboard_stage.min(stage_count - 1);
                 let target_stage = ctx
@@ -1561,6 +1627,10 @@ impl Menu {
                         format!("{} ({})", target_stage.name, target_stage.surface()),
                     ));
                 }
+                rows.push(Row::action(
+                    "CLASIFICACIÓN ONLINE",
+                    Command::LeaderboardOnline,
+                ));
                 rows.push(Row::action(
                     format!("FILTRO: {}", self.leaderboard_filter.label_es()),
                     Command::LeaderboardCycleFilter,
@@ -1593,27 +1663,14 @@ impl Menu {
                                     "COMPLETA UN TRAMO VÁLIDO PARA REGISTRAR TU TIEMPO",
                                 ));
                             } else {
-                                let total_pages = entries.len().div_ceil(LB_PER_PAGE);
-                                let p_idx =
-                                    self.leaderboard_page.min(total_pages.saturating_sub(1));
-                                let start = p_idx * LB_PER_PAGE;
-                                let end = (start + LB_PER_PAGE).min(entries.len());
                                 let leader_ms = entries[0].total_ms;
-                                for (offset, entry) in entries[start..end].iter().enumerate() {
-                                    let rank = start + offset + 1;
+                                for (offset, entry) in entries.iter().enumerate() {
+                                    let rank = offset + 1;
                                     rows.push(Row::info(
-                                        format!("#{rank} · {}", entry.verification.ui_badge()),
+                                        format!("#{rank} · {}", entry.local_badge()),
                                         super::leaderboard::format_leaderboard_row(
                                             rank, entry, leader_ms,
                                         ),
-                                    ));
-                                }
-                                if total_pages > 1 {
-                                    rows.push(Row::stepper(
-                                        "PÁGINA",
-                                        Command::LeaderboardPrevPage,
-                                        Command::LeaderboardNextPage,
-                                        format!("{}/{}", p_idx + 1, total_pages),
                                     ));
                                 }
                             }
@@ -1630,12 +1687,7 @@ impl Menu {
                                     "AÚN NO HAY TIEMPOS REGISTRADOS EN NINGÚN TRAMO",
                                 ));
                             } else {
-                                let total_pages = bests.len().div_ceil(LB_PER_PAGE);
-                                let p_idx =
-                                    self.leaderboard_page.min(total_pages.saturating_sub(1));
-                                let start = p_idx * LB_PER_PAGE;
-                                let end = (start + LB_PER_PAGE).min(bests.len());
-                                for entry in &bests[start..end] {
+                                for entry in bests {
                                     rows.push(Row::info(
                                         entry.stage_name.clone(),
                                         format!(
@@ -1645,14 +1697,6 @@ impl Menu {
                                             entry.physics_badge(),
                                             entry.verification.ui_badge()
                                         ),
-                                    ));
-                                }
-                                if total_pages > 1 {
-                                    rows.push(Row::stepper(
-                                        "PÁGINA",
-                                        Command::LeaderboardPrevPage,
-                                        Command::LeaderboardNextPage,
-                                        format!("{}/{}", p_idx + 1, total_pages),
                                     ));
                                 }
                             }
@@ -3175,6 +3219,11 @@ impl Menu {
         if rows == 0 {
             return Rect::default();
         }
+        if self.page == Page::Leaderboards {
+            let h = self.board_row_height();
+            let y = top + (index as f32 - self.board_scroll.position(rows)) * h;
+            return Rect::new(rx, y, rw, h * 0.85);
+        }
         let (start, end) = self.visible_row_window(rows);
         if index < start || index >= end {
             return Rect::default();
@@ -3184,6 +3233,10 @@ impl Menu {
         let h = ((bottom - top) / visible_rows as f32).min(0.078);
         let gap = (h * 0.16).min(0.010);
         Rect::new(rx, top + slot as f32 * h, rw, (h - gap).max(0.02))
+    }
+    pub fn board_row_height(&self) -> f32 {
+        let (_, _, top, bottom) = self.row_bounds();
+        ((bottom - top) / MAX_VISIBLE_ROWS as f32).min(0.078)
     }
     fn stepper_split_for(&self, value: &str) -> f32 {
         let (rx, rw, _, _) = self.row_bounds();
@@ -3515,8 +3568,10 @@ impl Menu {
                 return Some(Command::ResetToMain);
             }
         }
-        if !matches!(self.page, Page::CameraEditor | Page::ControlsEditor)
-            && rows.len() > MAX_VISIBLE_ROWS
+        if !matches!(
+            self.page,
+            Page::CameraEditor | Page::ControlsEditor | Page::Leaderboards
+        ) && rows.len() > MAX_VISIBLE_ROWS
         {
             if Self::scroll_up_rect().contains(x, y) {
                 return Some(Command::ScrollRowsUp);
@@ -3703,7 +3758,7 @@ impl Menu {
         let rows = self.rows(ctx);
         let (vis_start, vis_end) = self.visible_row_window(rows.len());
         let visible_count = (vis_end - vis_start).max(1);
-        if !compact && rows.len() > MAX_VISIBLE_ROWS {
+        if self.page != Page::Leaderboards && !compact && rows.len() > MAX_VISIBLE_ROWS {
             ui::button(
                 canvas,
                 Self::scroll_up_rect(),

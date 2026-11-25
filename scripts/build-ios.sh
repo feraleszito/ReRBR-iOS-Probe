@@ -169,6 +169,7 @@ xcodebuild "${XCODE_ARGS[@]}" -showBuildSettings > build/xcode-settings.txt
 xcodebuild "${XCODE_ARGS[@]}" build 2>&1 | tee build/xcode-build.log
 
 APP="$PROBE_ROOT/build/DerivedData/Build/Products/Release-iphoneos/ReRBRProbe.app"
+cp -R "$PROBE_ROOT/mobile/leaderboard" "$APP/"
 test -f "$APP/ReRBRProbe"
 test "$(xcrun lipo -archs "$APP/ReRBRProbe")" = arm64
 xcrun vtool -show-build "$APP/ReRBRProbe" | tee build/macho-build.txt

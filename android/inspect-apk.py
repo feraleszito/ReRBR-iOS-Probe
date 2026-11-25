@@ -23,7 +23,8 @@ with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory() as tmp:
         if is_private_asset(name):
             sys.exit(f"Unexpected resource: {name}")
     assets = {n for n in names if n.startswith("assets/")}
-    if assets != {"assets/UFL.txt", "assets/NOTICE.md", "assets/LICENSE"}:
+    board = {"assets/leaderboard/" + n for n in ("index.html", "board.css", "board.js", "config.js")}
+    if assets != {"assets/UFL.txt", "assets/NOTICE.md", "assets/LICENSE"} | board:
         sys.exit(f"Unexpected game assets: {assets}")
     for name in ("classes.dex", "AndroidManifest.xml"):
         archive.getinfo(name)

@@ -95,6 +95,39 @@ pub struct LeaderboardEntry {
 }
 
 impl LeaderboardEntry {
+    pub fn local_badge(&self) -> &'static str {
+        use std::{
+            cell::RefCell,
+            collections::HashSet,
+            time::{Duration, Instant},
+        };
+        thread_local! { static RECEIPTS: RefCell<Option<(Instant, HashSet<String>)>> = const { RefCell::new(None) }; }
+        RECEIPTS.with_borrow_mut(|cache| {
+            if cache
+                .as_ref()
+                .is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(5))
+            {
+                let receipts = std::env::var_os("RERBR_PROBE_DOCUMENTS")
+                    .and_then(|p| {
+                        std::fs::read_dir(PathBuf::from(p).join("RBR/online-board/sent")).ok()
+                    })
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter_map(|f| f.path().file_stem()?.to_str().map(str::to_owned))
+                    .collect();
+                *cache = Some((Instant::now(), receipts));
+            }
+            if cache
+                .as_ref()
+                .is_some_and(|(_, ids)| ids.contains(&self.entry_id))
+            {
+                "ENVIADO"
+            } else {
+                "LOCAL"
+            }
+        })
+    }
     pub fn canonical_vehicle_id(&self) -> String {
         format!("{}@{}", self.key.car_id, self.key.physics_version)
     }
@@ -360,6 +393,25 @@ impl LeaderboardStore {
         };
 
         if !self.entries.iter().any(|e| e.entry_id == entry_id) {
+            #[cfg(any(target_os = "ios", target_os = "android"))]
+            if entry.sim_steps > 0 {
+                let payload = format!(
+                    r#"{{"entry_id":"{}","stage_id":"{}","vehicle_id":"{}","driving_ms":{},"penalty_ms":{},"total_ms":{},"sim_steps":{},"splits_ms":{:?},"finished":true,"finish_crossed_forward":true}}"#,
+                    entry.entry_id,
+                    json_escape(&entry.key.stage_id),
+                    json_escape(&entry.key.car_id),
+                    entry.driving_ms,
+                    entry.penalty_ms,
+                    entry.total_ms,
+                    entry.sim_steps,
+                    entry.splits_ms
+                );
+                if let Err(error) =
+                    write_board_file(&format!("pending/{}.json", entry.entry_id), &payload)
+                {
+                    eprintln!("leaderboard outbox: {error}");
+                }
+            }
             self.entries.push(entry);
             self.sort_and_trim();
         }
@@ -434,7 +486,11 @@ impl LeaderboardStore {
         self.entries
             .iter()
             .filter(|e| {
-                matches!(e.verification, VerificationStatus::LocalOnly) && e.verify_integrity()
+                matches!(e.verification, VerificationStatus::LocalOnly)
+                    && e.sim_steps > 0
+                    && e.splits_passed == e.splits_total
+                    && e.splits_ms.len() == e.splits_total
+                    && e.verify_integrity()
             })
             .map(|e| OnlineSubmissionPayload {
                 payload_version: ONLINE_PAYLOAD_SCHEMA_VERSION,
@@ -760,8 +816,37 @@ pub fn format_leaderboard_row(rank: usize, entry: &LeaderboardEntry, leader_ms: 
         entry.car_name,
         entry.pilot_name,
         entry.physics_badge(),
-        entry.verification.ui_badge()
+        entry.local_badge()
     )
+}
+
+fn write_board_file(relative: &str, contents: &str) -> std::io::Result<()> {
+    let docs = std::env::var_os("RERBR_PROBE_DOCUMENTS").ok_or(std::io::ErrorKind::NotFound)?;
+    let file = PathBuf::from(docs).join("RBR/online-board").join(relative);
+    std::fs::create_dir_all(file.parent().unwrap())?;
+    let tmp = file.with_extension("tmp");
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(tmp, file)
+}
+
+pub(super) fn show_online(stage: &str, vehicle: &str) {
+    let json = format!(
+        r#"{{"stage_id":"{}","vehicle_id":"{}"}}"#,
+        json_escape(stage),
+        json_escape(vehicle)
+    );
+    if let Err(e) = write_board_file("selection.json", &json) {
+        eprintln!("leaderboard: {e}");
+    }
+    #[cfg(target_os = "android")]
+    crate::android::show_board();
+    #[cfg(target_os = "ios")]
+    unsafe {
+        unsafe extern "C" {
+            fn rerbr_show_board();
+        }
+        rerbr_show_board();
+    }
 }
 
 fn json_escape(s: &str) -> String {
@@ -1133,13 +1218,13 @@ mod tests {
         assert_eq!(lb.migrate_from_personal_bests(&pb_store), 1);
         assert_eq!(lb.migrate_from_personal_bests(&pb_store), 0); // idempotente
 
-        let pending = lb.pending_online_submissions();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].payload_version, ONLINE_PAYLOAD_SCHEMA_VERSION);
+        // Imported PBs have no simulation evidence. Keep them visible offline.
+        assert!(lb.pending_online_submissions().is_empty());
+        let saved = &lb.entries()[0];
         assert_eq!(
-            pending[0].canonical_vehicle_id,
+            saved.canonical_vehicle_id(),
             "toyota-corolla-wrc@rbr-retail-1.02"
         );
-        assert!(pending[0].canonical_stage_id.starts_with("chirdonhead|"));
+        assert!(saved.canonical_stage_id().starts_with("chirdonhead|"));
     }
 }

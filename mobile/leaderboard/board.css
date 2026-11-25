@@ -1,0 +1,5 @@
+:root{color-scheme:dark;font:16px system-ui;background:#111820;color:#eef2f3}
+body{margin:0 auto;max-width:56rem;padding:1rem max(1rem,env(safe-area-inset-right)) 2rem max(1rem,env(safe-area-inset-left))}
+header,section{display:flex;flex-wrap:wrap;align-items:center;gap:.6rem}
+h1{font-size:1.45rem}button,input{font:inherit;padding:.5rem;border:1px solid #596774;border-radius:.3rem;background:#24303a;color:inherit}
+ol{list-style:none;padding:0}li{border-top:1px solid #394651;padding:.75rem 0}#mine{color:#face79}

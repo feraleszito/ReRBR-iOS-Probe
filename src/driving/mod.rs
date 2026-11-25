@@ -1193,7 +1193,7 @@ impl Runtime {
                     self.showroom_camera
                         .set_mode(crate::car::showroom::ShowroomMode::Garage);
                 } else if page == menu::Page::Leaderboards {
-                    self.menu.leaderboard_page = 0;
+                    self.menu.board_scroll = Default::default();
                     if self.menu.page == menu::Page::StageDetail {
                         self.menu.leaderboard_stage = self.menu.inspected_stage;
                     } else if let Some(pos) = self
@@ -3195,22 +3195,24 @@ impl Runtime {
             LeaderboardPrevStage => {
                 let len = self.content.stages.len().max(1);
                 self.menu.leaderboard_stage = (self.menu.leaderboard_stage + len - 1) % len;
-                self.menu.leaderboard_page = 0;
+                self.menu.board_scroll = Default::default();
+            }
+            LeaderboardOnline => {
+                let stage = self
+                    .content
+                    .stages
+                    .get(self.menu.leaderboard_stage)
+                    .map_or(&self.selection.stage, |e| &e.descriptor);
+                leaderboard::show_online(&stage.id, &self.selection.vehicle.id);
             }
             LeaderboardNextStage => {
                 let len = self.content.stages.len().max(1);
                 self.menu.leaderboard_stage = (self.menu.leaderboard_stage + 1) % len;
-                self.menu.leaderboard_page = 0;
+                self.menu.board_scroll = Default::default();
             }
             LeaderboardCycleFilter => {
                 self.menu.leaderboard_filter = self.menu.leaderboard_filter.next();
-                self.menu.leaderboard_page = 0;
-            }
-            LeaderboardPrevPage => {
-                self.menu.leaderboard_page = self.menu.leaderboard_page.saturating_sub(1);
-            }
-            LeaderboardNextPage => {
-                self.menu.leaderboard_page = self.menu.leaderboard_page.saturating_add(1);
+                self.menu.board_scroll = Default::default();
             }
         }
     }
@@ -3239,6 +3241,20 @@ impl Runtime {
             return;
         }
         let (x, y) = window.point(x, y);
+        if self.menu.page == menu::Page::Leaderboards {
+            let rows = self.menu.rows(&self.context());
+            let height = self.menu.board_row_height();
+            if self
+                .menu
+                .board_scroll
+                .touch(t.phase, t.id, y as f32 / height, rows.len())
+            {
+                if let Some(command) = self.menu.press(x, y, &rows) {
+                    self.menu_command(command);
+                }
+            }
+            return;
+        }
         if self.menu.page == menu::Page::ControlsEditor {
             let base = window.driving();
             if t.phase == TouchPhase::Started {

@@ -1,0 +1,5 @@
+project_id = "rbr-mobile-leaderboards"
+
+[functions.submit-stage-time]
+# Auth validates the bearer against the project's signing keys inside the function.
+verify_jwt = false

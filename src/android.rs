@@ -97,6 +97,9 @@ pub(crate) fn reimport_persisted_rbr_tree() -> bool {
     invoke_activity_method(c"requestReimportRbrTree")
 }
 
+pub(crate) fn show_board() {
+    invoke_activity_method(c"showOnlineBoard");
+}
 fn invoke_activity_method(method_name: &CStr) -> bool {
     let Some(&handles) = HANDLES.get() else {
         return false;

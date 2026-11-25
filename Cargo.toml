@@ -55,6 +55,10 @@ naga = { version = "=30.0.1", features = ["wgsl-in"] }
 wgpu = { version = "=30.0.1", default-features = false, features = ["noop"] }
 
 [[example]]
+name = "leaderboard-catalog"
+required-features = ["public-beta"]
+
+[[example]]
 name = "harwood-diagnostic"
 required-features = ["rerbr-3d"]
 

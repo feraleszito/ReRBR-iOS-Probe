@@ -618,6 +618,7 @@ int rerbr_ios_reimport_persisted_folder(void) {
     return 1;
 }
 
+#include "OnlineBoard.inc"
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
@@ -641,6 +642,7 @@ int main(int argc, char *argv[]) {
         // Do not call UIApplicationMain here: winit invokes it and owns the UIKit loop.
         [[RerbrDocumentPickerCoordinator shared] syncSavedBookmarkState];
         rerbr_probe_audio_setup();
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){ rbr_online_board(); }];
         return rerbr_probe_main();
     }
 }

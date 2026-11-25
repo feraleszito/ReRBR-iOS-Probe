@@ -13,6 +13,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  leaderboard_contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify migration, authenticated roles, retries, limits and ranking
+        run: |
+          sudo systemctl start postgresql
+          cat supabase/tests/base.sql supabase/migrations/*.sql supabase/tests/ranking.sql | sudo -u postgres psql -X -v ON_ERROR_STOP=1
+          node --check mobile/leaderboard/board.js
   ios_experimental_ipa:
     name: iOS/iPadOS Experimental ARM64 IPA
     runs-on: macos-15-intel
