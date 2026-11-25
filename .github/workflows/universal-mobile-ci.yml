@@ -13,6 +13,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  leaderboard_edge_e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Run anonymous clients against an isolated Supabase stack
+        shell: bash
+        run: |
+          testroot=$(mktemp -d)
+          cp -R supabase "$testroot/"
+          cd "$testroot"
+          sed -n '/^create table public.players/,$p' supabase/tests/base.sql > supabase/migrations/202611240000_ci_existing_tables.sql
+          printf '\n[auth]\nenable_anonymous_sign_ins = true\n' >> supabase/config.toml
+          supabase start -x studio,imgproxy,logflare,vector,realtime,storage-api,supavisor
+          supabase status -o env > "$testroot/local.env"
+          set -a
+          source "$testroot/local.env"
+          set +a
+          supabase functions serve submit-stage-time --no-verify-jwt > "$testroot/edge.log" 2>&1 &
+          for attempt in {1..60}; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X OPTIONS "$API_URL/functions/v1/submit-stage-time" || true)
+            if [[ "$code" == 204 ]]; then break; fi
+            sleep 2
+          done
+          python3 supabase/tests/edge-e2e.py
   leaderboard_contract:
     runs-on: ubuntu-24.04
     steps:
@@ -21,7 +49,7 @@ jobs:
         run: |
           sudo systemctl start postgresql
           cat supabase/tests/base.sql supabase/migrations/*.sql supabase/tests/ranking.sql | sudo -u postgres psql -X -v ON_ERROR_STOP=1
-          node --check mobile/leaderboard/board.js
+          node --test supabase/tests/board.test.cjs
   ios_experimental_ipa:
     name: iOS/iPadOS Experimental ARM64 IPA
     runs-on: macos-15-intel

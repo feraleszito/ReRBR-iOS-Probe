@@ -5,7 +5,7 @@ async function bridge(op, value = "") {
   return window.webkit.messageHandlers.board.postMessage({op, value});
 }
 let session, stage, vehicle, filtered = false, offset = 0, total = 0, generation = 0;
-let busy = false, active = false, loading = false;
+let busy = false, active = false, loading = false, refreshQueued = false, authentication;
 async function post(path, body, access) {
   const headers = {"Content-Type":"application/json", apikey:apiKey};
   if (access) headers.Authorization = "Bearer " + access;
@@ -14,7 +14,7 @@ async function post(path, body, access) {
   if (!response.ok) throw Object.assign(new Error("HTTP " + response.status), {status:response.status});
   return response.json();
 }
-async function authenticate() {
+async function refreshSession() {
   if (!session) session = JSON.parse(await bridge("session") || "null");
   if (session && session.expires > Date.now() + 60000) return;
   const data = session ? await post("/auth/v1/token?grant_type=refresh_token",{refresh_token:session.refresh})
@@ -23,6 +23,10 @@ async function authenticate() {
   if (!next.access || !next.refresh || await bridge("persist", JSON.stringify(next)) !== "ok")
     throw new Error("No se pudo guardar la sesión segura");
   session = next;
+}
+function authenticate() {
+  if (!authentication) authentication = refreshSession().finally(()=>{authentication=undefined;});
+  return authentication;
 }
 const rpc = (name, body) => post("/rest/v1/rpc/"+name, body, session.access);
 function time(ms) {
@@ -47,7 +51,7 @@ async function page(reset = false) {
   } finally { if (gen === generation) loading=false; }
 }
 async function update(force = false) {
-  if (busy) return;
+  if (busy) { refreshQueued ||= force; return; }
   busy=true;
   try {
     const settings = JSON.parse(await bridge("selection") || "{}");
@@ -60,22 +64,25 @@ async function update(force = false) {
     await authenticate();
     const name = await rpc("leaderboard_profile",{});
     if (document.activeElement !== el("pilot")) el("pilot").value=name;
-    let sent=0, rejected=0;
+    let sent=0, rejected=0, limited=false;
     for (const run of pending) {
+      if(sent >= 6) break;
       try {
         const result = await post("/functions/v1/submit-stage-time",run,session.access);
         if (result.id && await bridge("ack",run.entry_id) === "ok") sent++;
       } catch (e) {
+        if (e.status === 429) { limited=true; break; }
         if (e.status !== 422 && e.status !== 409) throw e;
         rejected++;
       }
     }
     if (active && (force || changed || sent || !offset)) await page(true);
-    el("status").textContent = rejected ? "Resultados locales pendientes de revisión: "+rejected : "Conectado · tiempos enviados provisionales";
+    el("status").textContent = limited ? "Límite temporal · reintento automático" :
+      rejected ? "Resultados locales pendientes de revisión: "+rejected : "Conectado · tiempos enviados provisionales";
   } catch (e) {
     if (e.status === 401 && session) session.expires=0;
     el("status").textContent="Sin sincronizar · "+e.message+". Tus tiempos siguen en el dispositivo.";
-  } finally { busy=false; }
+  } finally { busy=false; if(refreshQueued){refreshQueued=false; void update(true);} }
 }
 window.boardOpened = () => {active=true; update(true);};
 el("close").onclick=()=>{active=false; bridge("close");};
