@@ -37,14 +37,16 @@ public final class GameActivity extends NativeActivity implements SensorEventLis
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         board = new OnlineBoard(this);
-        getWindow().setDecorFitsSystemWindows(false);
-        hideSystemBars();
-        View decor = getWindow().getDecorView();
-        decor.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> updateInsets(v));
-        decor.setOnApplyWindowInsetsListener((v, insets) -> {
-            reportInsets(v, insets);
-            return v.onApplyWindowInsets(insets);
-        });
+    if (android.os.Build.VERSION.SDK_INT >= 30) {
+    getWindow().setDecorFitsSystemWindows(false);
+}
+hideSystemBars();
+View decor = getWindow().getDecorView();
+decor.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> updateInsets(v));
+decor.setOnApplyWindowInsetsListener((v, insets) -> {
+    reportInsets(v, insets);
+    return v.onApplyWindowInsets(insets);
+});
         sensors = getSystemService(SensorManager.class);
         gravity = sensors.getDefaultSensor(Sensor.TYPE_GRAVITY);
         if (gravity == null) gravity = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
