@@ -424,7 +424,7 @@ static NSString *const kRerbrFolderLabelKey = @"org.rerbr.probe.rbr_folder_label
         self.pickingFolder = folder;
         NSArray<UTType *> *types = folder
             ? @[UTTypeFolder]
-            : @[UTTypeZip, UTTypeArchive];
+            : @[UTTypeZIP, UTTypeArchive];
         UIDocumentPickerViewController *picker =
             [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types];
         picker.delegate = self;
