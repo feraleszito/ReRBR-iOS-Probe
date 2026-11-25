@@ -4900,6 +4900,10 @@ pub fn wheel_heading(axle: Vec3) -> f32 {
     -axle.y.atan2(axle.x)
 }
 fn motion(enabled: bool) -> f64 {
+    #[cfg(target_os = "android")]
+    {
+        crate::android::tilt(enabled)
+    }
     #[cfg(target_os = "ios")]
     {
         unsafe extern "C" {
@@ -4907,7 +4911,7 @@ fn motion(enabled: bool) -> f64 {
         }
         unsafe { rerbr_drive_tilt(i32::from(enabled)) }
     }
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     {
         let _ = enabled;
         f64::NAN

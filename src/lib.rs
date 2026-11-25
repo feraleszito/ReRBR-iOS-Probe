@@ -4,6 +4,8 @@
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
 pub use rerbr_content as content;
+#[cfg(target_os = "android")]
+mod android;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -52,6 +54,7 @@ const FRAME_PERIOD: Duration = Duration::from_nanos(16_666_667);
 /// Called once by xcode/ReRBRProbe/main.m on the process's main thread.
 /// On iOS run_app takes over the process; a normal return is not expected.
 #[no_mangle]
+#[cfg(not(target_os = "android"))]
 pub extern "C" fn rerbr_probe_main() -> i32 {
     eprintln!("ReRBRProbe 0.1.0: starting winit 0.30.13 / wgpu 30.0.1 (Metal only)");
     let event_loop = match EventLoop::new() {
@@ -97,6 +100,17 @@ impl ApplicationHandler for Probe {
         self.active = true;
         self.occluded = false;
         let renderer = self.renderer.as_mut().expect("renderer initialized");
+        #[cfg(target_os = "android")]
+        if renderer.surface.is_none() {
+            match renderer.instance.create_surface(renderer.window.clone()) {
+                Ok(surface) => renderer.surface = Some(surface),
+                Err(error) => {
+                    eprintln!("Cannot restore Vulkan surface: {error}");
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
         renderer.resize(renderer.window.inner_size());
         self.next_frame = Some(Instant::now());
         renderer.window.request_redraw();
@@ -114,6 +128,12 @@ impl ApplicationHandler for Probe {
         }
         #[cfg(feature = "physics-drive")]
         driving::audio::set_paused(true);
+        #[cfg(target_os = "android")]
+        if let Some(renderer) = &mut self.renderer {
+            #[cfg(feature = "physics-drive")]
+            renderer.harwood.pause_driving();
+            renderer.surface.take();
+        }
         self.active = false;
         self.next_frame = None;
         event_loop.set_control_flow(ControlFlow::Wait);
@@ -127,6 +147,15 @@ impl ApplicationHandler for Probe {
             return;
         }
         match event {
+            #[cfg(all(target_os = "android", feature = "physics-drive"))]
+            WindowEvent::Focused(focused) => {
+                self.occluded = !focused;
+                if focused {
+                    renderer.window.request_redraw();
+                } else {
+                    renderer.harwood.pause_driving();
+                }
+            }
             WindowEvent::Resized(size) => {
                 renderer.resize(size);
                 #[cfg(feature = "physics-drive")]
@@ -212,7 +241,7 @@ impl ApplicationHandler for Probe {
 struct Renderer {
     #[cfg(all(feature = "physics-probe", not(feature = "physics-drive")))]
     physics: physics_probe::Scene,
-    surface: wgpu::Surface<'static>,
+    surface: Option<wgpu::Surface<'static>>,
     window: Arc<Window>,
     instance: wgpu::Instance,
     device: wgpu::Device,
@@ -258,7 +287,12 @@ struct Renderer {
 impl Renderer {
     async fn new(window: Arc<Window>) -> Result<Self, Box<dyn std::error::Error>> {
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-        descriptor.backends = wgpu::Backends::METAL;
+        let (backends, backend) = if cfg!(target_os = "android") {
+            (wgpu::Backends::VULKAN, wgpu::Backend::Vulkan)
+        } else {
+            (wgpu::Backends::METAL, wgpu::Backend::Metal)
+        };
+        descriptor.backends = backends;
         let instance = wgpu::Instance::new(descriptor);
         let surface = instance.create_surface(window.clone())?;
         let adapter = instance
@@ -268,8 +302,8 @@ impl Renderer {
             })
             .await?;
         let info = adapter.get_info();
-        if info.backend != wgpu::Backend::Metal {
-            return Err("the probe requires a Metal adapter".into());
+        if info.backend != backend {
+            return Err(format!("expected {backend:?}, got {:?}", info.backend).into());
         }
         eprintln!("GPU: {} / {:?}", info.name, info.backend);
         eprintln!(
@@ -282,7 +316,7 @@ impl Renderer {
         // No BC textures or other optional features are needed to draw the triangle.
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("ReRBRProbe Metal device"),
+                label: Some("RBR Mobile GPU"),
                 #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
                 required_features: adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC,
                 ..Default::default()
@@ -380,7 +414,7 @@ impl Renderer {
         Ok(Self {
             #[cfg(all(feature = "physics-probe", not(feature = "physics-drive")))]
             physics: physics_probe::Scene::new(),
-            surface,
+            surface: Some(surface),
             window,
             instance,
             device,
@@ -440,11 +474,14 @@ impl Renderer {
         if self.size.width == 0 || self.size.height == 0 {
             return;
         }
+        let Some(surface) = &self.surface else {
+            return;
+        };
         if self.reconfigure {
-            self.surface.configure(&self.device, &self.config);
+            surface.configure(&self.device, &self.config);
             self.reconfigure = false;
         }
-        let frame = match self.surface.get_current_texture() {
+        let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
                 self.reconfigure = true;
@@ -464,10 +501,11 @@ impl Renderer {
                 #[cfg(feature = "harwood-benchmark")]
                 self.harwood.interrupt_benchmark("SURFACE LOST");
                 eprintln!("surface lost; recreating it");
-                self.surface = self
-                    .instance
-                    .create_surface(self.window.clone())
-                    .expect("recreate Metal surface");
+                self.surface = Some(
+                    self.instance
+                        .create_surface(self.window.clone())
+                        .expect("recreate surface"),
+                );
                 self.resize(self.window.inner_size());
                 return;
             }

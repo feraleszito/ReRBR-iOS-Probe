@@ -45,6 +45,11 @@ rerbr-sim = { path = "vendor/rerbr-sim", optional = true }
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "metal", "wgsl"] }
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["vulkan"] }
+winit = { version = "=0.30.13", default-features = false, features = ["android-native-activity"] }
+jni-sys = "=0.3.1"
+
 [dev-dependencies]
 naga = { version = "=30.0.1", features = ["wgsl-in"] }
 wgpu = { version = "=30.0.1", default-features = false, features = ["noop"] }

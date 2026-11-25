@@ -311,7 +311,15 @@ impl WindowLayout {
                 phone,
             }
         }
-        #[cfg(not(target_os = "ios"))]
+        #[cfg(target_os = "android")]
+        {
+            let (values, phone) = crate::android::layout();
+            Self {
+                insets: Insets::sanitize(values),
+                phone,
+            }
+        }
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
         Self::default()
     }
 

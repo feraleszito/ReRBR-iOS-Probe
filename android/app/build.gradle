@@ -1,0 +1,31 @@
+plugins {
+    id 'com.android.application' version '8.7.3'
+}
+
+android {
+    namespace 'org.rerbr.mobile'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'org.rerbr.mobile'
+        minSdk 30
+        targetSdk 35
+        versionCode 1
+        versionName '0.1-experimental'
+        ndk { abiFilters 'arm64-v8a' }
+    }
+
+    sourceSets.main.jniLibs.srcDir layout.buildDirectory.dir('rust-jni')
+    sourceSets.main.assets.srcDir layout.buildDirectory.dir('notices')
+}
+
+def buildRust = tasks.register('buildRust', Exec) {
+    workingDir rootProject.projectDir.parentFile
+    commandLine providers.environmentVariable('PYTHON').getOrElse('python3'), 'android/build-native.py'
+}
+def notices = tasks.register('copyNotices', Copy) {
+    from('../../assets/fonts') { include 'UFL.txt', 'NOTICE.md' }
+    from('../../vendor/rerbr-sim/LICENSE')
+    into layout.buildDirectory.dir('notices')
+}
+tasks.named('preBuild') { dependsOn(buildRust, notices) }

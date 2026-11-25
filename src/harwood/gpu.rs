@@ -142,6 +142,10 @@ impl Scene {
     pub fn interrupt_benchmark(&mut self, reason: &'static str) {
         self.benchmark.interrupt(reason);
     }
+    #[cfg(all(target_os = "android", feature = "physics-drive"))]
+    pub fn pause_driving(&mut self) {
+        self.benchmark.driving.pause();
+    }
     #[cfg(feature = "harwood-benchmark")]
     pub fn benchmark_submitted(&mut self, cpu: std::time::Duration) {
         self.benchmark.submitted(cpu);
