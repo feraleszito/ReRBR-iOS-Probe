@@ -1,5 +1,8 @@
 //! Shared block/connected-terrain Metal pass. Triangle/cube passes remain separate.
-use super::{texture::upload_plan, Camera, LoadedBlock, MODE_NAME};
+use super::{
+    texture::{upload_plan, DECODE_BAND_ROWS},
+    Camera, LoadedBlock, MODE_NAME,
+};
 use crate::asset_probe::TextureData;
 use rerbr_asset_formats::dds;
 use rerbr_render_core::coords;
@@ -40,8 +43,8 @@ impl Scene {
     pub fn driving_touch(&mut self, touch: winit::event::Touch, size: (u32, u32)) {
         self.benchmark.driving.touch(touch, size);
     }
-    pub fn new(bc_enabled: bool) -> Self {
-        let mut scene = Self {
+    pub fn new() -> Self {
+        let scene = Self {
             #[cfg(not(feature = "physics-drive"))]
             pending: None,
             #[cfg(feature = "physics-drive")]
@@ -56,16 +59,13 @@ impl Scene {
             #[cfg(feature = "harwood-benchmark")]
             benchmark: BenchmarkRuntime::new(),
         };
-        if !bc_enabled {
-            scene.fail("DEVICE: BC is unavailable; texture upload not attempted".into());
-            return scene;
-        }
         #[cfg(feature = "physics-drive")]
         {
             scene
         }
         #[cfg(not(feature = "physics-drive"))]
         {
+            let mut scene = scene;
             let Some(documents) = std::env::var_os("RERBR_PROBE_DOCUMENTS") else {
                 scene.fail("READ: native Documents path unavailable".into());
                 return scene;
@@ -481,6 +481,7 @@ impl Block {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                color_flags_layout(3),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -515,11 +516,12 @@ impl Block {
             }],
         });
         let mut textures = BTreeMap::new();
-        for (id, texture) in &data.textures {
-            textures.insert(*id, upload(device, queue, texture)?);
+        for (id, texture) in data.textures {
+            textures.insert(id, upload(device, queue, &texture)?);
         }
-        let white = solid(device, queue, [255; 4]);
-        let transparent = solid(device, queue, [0; 4]);
+        let white = (solid(device, queue, [255; 4]), false);
+        let transparent = (solid(device, queue, [0; 4]), false);
+        let color_flags = color_flags_buffers::<4>(device);
         let make_sampler = |label, address| {
             device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some(label),
@@ -543,8 +545,8 @@ impl Block {
                 _ => &wrap_sampler,
             };
             let get = |id: Option<u32>,
-                       fallback: &wgpu::TextureView|
-             -> Result<wgpu::TextureView, String> {
+                       fallback: &(wgpu::TextureView, bool)|
+             -> Result<(wgpu::TextureView, bool), String> {
                 match id {
                     Some(id) => textures
                         .get(&id)
@@ -561,15 +563,20 @@ impl Block {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&t0),
+                        resource: wgpu::BindingResource::TextureView(&t0.0),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&t1),
+                        resource: wgpu::BindingResource::TextureView(&t1.0),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: color_flags[usize::from(t0.1) | (usize::from(t1.1) << 1)]
+                            .as_entire_binding(),
                     },
                 ],
             });
@@ -791,22 +798,23 @@ pub(crate) fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     data: &TextureData,
-) -> Result<wgpu::TextureView, String> {
-    let plan = upload_plan(&data.bytes, device.limits().max_texture_dimension_2d)?;
+) -> Result<(wgpu::TextureView, bool), String> {
+    let plan = upload_plan(&data.bytes, device.limits().max_texture_dimension_2d)
+        .map_err(|err| format!("{}: {err}", data.info.resolved))?;
     let first = plan.mips.first().ok_or("DDS without mips")?;
-    let format = match plan.format {
-        dds::Format::Dxt1 => wgpu::TextureFormat::Bc1RgbaUnorm,
-        dds::Format::Dxt3 => wgpu::TextureFormat::Bc2RgbaUnorm,
-        dds::Format::Dxt5 => wgpu::TextureFormat::Bc3RgbaUnorm,
-        dds::Format::Bc7 => wgpu::TextureFormat::Bc7RgbaUnorm,
-        dds::Format::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
-    };
+    let bc_enabled = device
+        .features()
+        .contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
+    let decode = plan.needs_decode(bc_enabled);
+    let format = plan.gpu_format(bc_enabled);
     eprintln!(
-        "{MODE_NAME} UPLOAD: {} | {format:?} {}x{} mips={}",
+        "{MODE_NAME} UPLOAD: {} | {:?} -> {format:?} {}x{} mips={} CPU decode={decode} texture bytes={}",
         data.info.resolved,
+        plan.format,
         first.width,
         first.height,
-        plan.mips.len()
+        plan.mips.len(),
+        plan.resident_bytes(bc_enabled)
     );
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(&data.info.resolved),
@@ -822,28 +830,129 @@ pub(crate) fn upload(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    for (level, mip) in plan.mips.iter().enumerate() {
+    let write_rows = |level, y, bytes: &[u8], stride, rows, width, height| {
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
-                mip_level: level as u32,
-                origin: wgpu::Origin3d::ZERO,
+                mip_level: level,
+                origin: wgpu::Origin3d { x: 0, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &data.bytes[mip.offset..mip.offset + mip.len],
+            bytes,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(mip.bytes_per_row),
-                rows_per_image: Some(mip.block_rows),
+                bytes_per_row: Some(stride),
+                rows_per_image: Some(rows),
             },
             wgpu::Extent3d {
-                width: mip.copy_width,
-                height: mip.copy_height,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
         );
+    };
+    let mut scratch = Vec::new();
+    for (level, mip) in plan.mips.iter().enumerate() {
+        let bytes = &data.bytes[mip.offset..mip.offset + mip.len];
+        if decode {
+            let source = dds::Level {
+                width: mip.width,
+                height: mip.height,
+                data: bytes,
+            };
+            let stride = mip.width * 4;
+            for y in (0..mip.height).step_by(DECODE_BAND_ROWS as usize) {
+                let rows = (mip.height - y).min(DECODE_BAND_ROWS);
+                scratch.resize(stride as usize * rows as usize, 0);
+                dds::decode_rgba_rows(plan.format, source, y, rows, &mut scratch)
+                    .map_err(|err| format!("{} mip {level}: {err}", data.info.resolved))?;
+                write_rows(level as u32, y, &scratch, stride, rows, mip.width, rows);
+            }
+        } else {
+            write_rows(
+                level as u32,
+                0,
+                bytes,
+                mip.bytes_per_row,
+                mip.block_rows,
+                mip.copy_width,
+                mip.copy_height,
+            );
+        }
     }
-    Ok(texture.create_view(&Default::default()))
+    if decode {
+        // Kick the queue after each expanded texture so a scene's fallback uploads
+        // can start retiring before the worker has decoded the rest of its textures.
+        queue.submit([]);
+    }
+    Ok((
+        texture.create_view(&Default::default()),
+        plan.color_space != dds::ColorSpace::Legacy,
+    ))
+}
+
+pub(crate) fn color_flags_layout(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: wgpu::BufferSize::new(4),
+        },
+        count: None,
+    }
+}
+
+pub(crate) fn color_flags_buffers<const N: usize>(device: &wgpu::Device) -> [wgpu::Buffer; N] {
+    std::array::from_fn(|mask| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("DDS linear sampling flags"),
+            contents: &(mask as u32).to_ne_bytes(),
+            usage: wgpu::BufferUsages::UNIFORM,
+        })
+    })
+}
+
+#[cfg(all(test, feature = "physics-stage"))]
+#[test]
+#[ignore = "requires private stage DDS archives and geometry"]
+fn dds_no_bc_real_stage_uploads() {
+    let root = std::env::var_os("RBR_DDS_PC_ROOT")
+        .map_or_else(|| PathBuf::from(r"C:\Richard Burns Rally"), PathBuf::from);
+    let maps = root.join("Maps");
+    let (device, queue) = wgpu::Device::noop(&Default::default());
+    for stage in rerbr_content::StageDescriptor::presets()
+        .into_iter()
+        .filter(|stage| {
+            matches!(
+                stage.id.as_str(),
+                "harwood-forest" | "diamond-creek" | "joux-verte"
+            )
+        })
+    {
+        let prepared = super::stage::load_selected(&maps, &stage).unwrap();
+        let mut fallback_bytes = 0;
+        let mut native_bytes = 0;
+        for texture in prepared.render.textures.values() {
+            let plan =
+                upload_plan(&texture.bytes, device.limits().max_texture_dimension_2d).unwrap();
+            fallback_bytes += plan.resident_bytes(false);
+            native_bytes += plan.resident_bytes(true);
+        }
+        let _block = Block::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            prepared.render,
+        )
+        .unwrap();
+        queue.submit([]);
+        eprintln!(
+            "STAGE DDS NO BC {}: {native_bytes} -> {fallback_bytes} texture bytes",
+            stage.id
+        );
+    }
 }
 
 pub(crate) fn solid(

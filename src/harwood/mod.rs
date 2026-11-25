@@ -25,10 +25,10 @@ pub const MODE_NAME: &str = "harwood-neighbors";
 #[cfg(not(feature = "harwood-neighbors"))]
 pub const MODE_NAME: &str = "harwood-block";
 #[cfg(feature = "car-chase-benchmark")]
-pub(crate) use gpu::solid;
-#[cfg(feature = "car-chase-benchmark")]
 pub(crate) use gpu::upload;
 pub(crate) use gpu::Scene;
+#[cfg(feature = "car-chase-benchmark")]
+pub(crate) use gpu::{color_flags_buffers, color_flags_layout, solid};
 
 use crate::asset_probe::{self, TextureData};
 use mesh::{Bounds, Mesh};

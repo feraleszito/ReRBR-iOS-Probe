@@ -791,7 +791,109 @@ fn real_pc_toyota_models_and_cockpits_load_without_fallback() {
 
 #[test]
 fn audit_all_installed_rsf_showroom_models_if_pc_present() {
-    let rbr = std::path::Path::new(r"C:\Richard Burns Rally");
+    audit_showroom(std::path::Path::new(r"C:\Richard Burns Rally"), None);
+}
+
+#[test]
+#[ignore = "requires local RBR/RSF models; enables no-BC GPU validation for the entire inventory"]
+fn dds_no_bc_showroom_inventory() {
+    let rbr = std::env::var_os("RBR_DDS_PC_ROOT")
+        .map_or_else(|| PathBuf::from(r"C:\Richard Burns Rally"), PathBuf::from);
+    assert!(
+        rbr.join("Cars").is_dir(),
+        "set RBR_DDS_PC_ROOT to an installation with Cars/"
+    );
+    let (device, queue) = wgpu::Device::noop(&Default::default());
+    audit_showroom(&rbr, Some((&device, &queue)));
+}
+
+fn validate_no_bc_car(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    car: Car,
+) -> Result<usize, String> {
+    assert!(!device
+        .features()
+        .contains(wgpu::Features::TEXTURE_COMPRESSION_BC));
+    let mut uncompressed = 0;
+    let mut compressed = 0;
+    for texture in car.textures.values() {
+        let plan = upload_plan(&texture.bytes, device.limits().max_texture_dimension_2d)?;
+        uncompressed += plan.resident_bytes(false);
+        compressed += plan.resident_bytes(true);
+    }
+    let id = car.vehicle.id.clone();
+    let count = car.textures.len();
+    let _gpu = gpu::Gpu::new(device, queue, wgpu::TextureFormat::Bgra8UnormSrgb, car)?;
+    queue.submit([]);
+    eprintln!(
+        "DDS NO BC {}: {} textures, {compressed} -> {uncompressed} texture bytes",
+        id, count
+    );
+    Ok(uncompressed)
+}
+
+#[cfg(feature = "physics-stage")]
+#[test]
+#[ignore = "requires a complete Beta Documents root in RERBR_PROBE_DOCUMENTS"]
+fn dds_no_bc_beta_driving_inventory() {
+    use crate::driving::content_manager::Catalog;
+    let documents = PathBuf::from(
+        std::env::var_os("RERBR_PROBE_DOCUMENTS").expect("set the Beta Documents root"),
+    );
+    let root = private_root(&documents);
+    let catalog = Catalog::scan_for_app(&rerbr_content::Selection::default(), true);
+    assert!(
+        !catalog.vehicles.is_empty(),
+        "no installed Beta vehicles in {}",
+        root.display()
+    );
+    let (device, queue) = wgpu::Device::noop(&Default::default());
+    let mut peak = 0;
+    let mut failures = Vec::new();
+    for entry in &catalog.vehicles {
+        let result = load_vehicle_for_mode(&root, &entry.descriptor, true)
+            .and_then(|car| validate_no_bc_car(&device, &queue, car));
+        match result {
+            Ok(bytes) => peak = peak.max(bytes),
+            Err(error) => failures.push(format!("{}: {error}", entry.descriptor.id)),
+        }
+    }
+    eprintln!(
+        "BETA DDS NO BC {} / {} vehicles, peak texture bytes {peak}",
+        catalog.vehicles.len() - failures.len(),
+        catalog.vehicles.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+#[ignore = "reads the user's private Impreza 2003 and Fiesta R5 DDS fixtures"]
+fn dds_no_bc_impreza_and_fiesta_regression() {
+    let root = std::env::var_os("RBR_DDS_PC_ROOT")
+        .map_or_else(|| PathBuf::from(r"C:\Richard Burns Rally"), PathBuf::from);
+    let (device, queue) = wgpu::Device::noop(&Default::default());
+    for alternatives in [
+        [
+            "Cars/Textures/impreza03_external.dds",
+            "Cars/Impreza03/Textures/impreza03_external.dds",
+        ],
+        ["Cars/F_Fiesta_R5/Textures/Ford_R5_External_Carpaint.dds"; 2],
+    ] {
+        let file = alternatives
+            .iter()
+            .find_map(|path| cars::resolve(&root, path))
+            .expect("missing regression DDS");
+        let creation = std::fs::read(&file).unwrap();
+        let data = prepare_texture(alternatives[0], &file.to_string_lossy(), creation).unwrap();
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _material = crate::harwood::upload(&device, &queue, &data).unwrap();
+        let error = futures_executor::block_on(scope.pop());
+        assert!(error.is_none(), "{error:?}");
+    }
+}
+
+fn audit_showroom(rbr: &Path, gpu: Option<(&wgpu::Device, &wgpu::Queue)>) {
     let cars_dir = rbr.join("Cars");
     if !cars_dir.is_dir() {
         return;
@@ -807,6 +909,7 @@ fn audit_all_installed_rsf_showroom_models_if_pc_present() {
     let mut total_with_sgc = 0usize;
     let mut passed = 0usize;
     let mut failures: Vec<(String, String)> = Vec::new();
+    let mut peak_bytes = 0;
     for dir in dirs {
         let Some(folder) = dir.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -836,7 +939,6 @@ fn audit_all_installed_rsf_showroom_models_if_pc_present() {
         desc.optional_textures.clear();
         match load_showroom_model(rbr, &desc) {
             Ok(car) => {
-                passed += 1;
                 if car
                     .geometry
                     .materials
@@ -859,6 +961,16 @@ fn audit_all_installed_rsf_showroom_models_if_pc_present() {
                         "unexpected switched-out shell in {folder}"
                     );
                 }
+                if let Some((device, queue)) = gpu {
+                    match validate_no_bc_car(device, queue, car) {
+                        Ok(bytes) => peak_bytes = peak_bytes.max(bytes),
+                        Err(error) => {
+                            failures.push((format!("{folder}/{stem}"), error));
+                            continue;
+                        }
+                    }
+                }
+                passed += 1;
             }
             Err(err) => {
                 failures.push((format!("{folder}/{stem}"), err));
@@ -868,6 +980,13 @@ fn audit_all_installed_rsf_showroom_models_if_pc_present() {
     eprintln!("=== 3D SHOWROOM AUDIT: {passed}/{total_with_sgc} SGC models loaded cleanly ===");
     for (name, err) in &failures {
         eprintln!("  FAIL {name}: {err}");
+    }
+    if gpu.is_some() {
+        eprintln!("SHOWROOM DDS NO BC: peak texture bytes {peak_bytes}");
+        assert!(
+            failures.is_empty(),
+            "no-BC showroom inventory errors: {failures:?}"
+        );
     }
     assert!(
         passed >= 80,

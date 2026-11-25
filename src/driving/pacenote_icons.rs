@@ -4,7 +4,8 @@
 //! and decodes the sprite page `.dds` (DXT1/DXT3/DXT5) dynamically at runtime.
 //! Never ships copyrighted sprites or substitutes hand-drawn fake icons.
 
-use rerbr_sim::rbr_formats::{bnk, cars, dds, markers};
+use rerbr_asset_formats::dds;
+use rerbr_sim::rbr_formats::{bnk, cars, markers};
 use std::path::{Path, PathBuf};
 
 /// Primary page-0 curve/straight arrow band (`PC_*_01.dds`) and page-4 hazard/overlay band (`PC_*_05.dds`).
@@ -356,149 +357,34 @@ pub fn sprite_indices_for_callout(
     (main, modifier)
 }
 
-fn decode_rgb565(c: u16) -> [u8; 3] {
-    let r = ((c >> 11) & 0x1f) as u8;
-    let g = ((c >> 5) & 0x3f) as u8;
-    let b = (c & 0x1f) as u8;
-    [
-        (r << 3) | (r >> 2),
-        (g << 2) | (g >> 4),
-        (b << 3) | (b >> 2),
-    ]
-}
-
-fn lerp_rgb(c0: [u8; 3], c1: [u8; 3], w0: u16, w1: u16, div: u16) -> [u8; 3] {
-    [
-        ((u16::from(c0[0]) * w0 + u16::from(c1[0]) * w1) / div) as u8,
-        ((u16::from(c0[1]) * w0 + u16::from(c1[1]) * w1) / div) as u8,
-        ((u16::from(c0[2]) * w0 + u16::from(c1[2]) * w1) / div) as u8,
-    ]
-}
-
-/// Decodes the top mip level of a DXT1, DXT3, or DXT5 `.dds` image into tightly packed RGBA8 pixels.
+/// Decode a DDS page for the CPU-assembled UI atlas (the original HUD uses its top level).
 pub fn decode_dds_top_rgba8(img: &dds::Dds<'_>) -> Result<Vec<u8>, String> {
-    let mip = img.data;
-    let w = img.width as usize;
-    let h = img.height as usize;
-    if w == 0 || h == 0 {
-        return Err("DDS has zero dimensions".into());
-    }
-    let mut out = vec![0u8; w * h * 4];
-    let bx_count = w.div_ceil(4);
-    let by_count = h.div_ceil(4);
-
-    match img.format {
-        dds::Format::Dxt1 => {
-            if mip.len() < bx_count * by_count * 8 {
-                return Err("truncated DXT1 mip".into());
+    let level = dds::Level {
+        width: img.width,
+        height: img.height,
+        data: img.data,
+    };
+    let mut rgba = vec![0; img.width as usize * img.height as usize * 4];
+    dds::decode_rgba_rows(img.format, level, 0, img.height, &mut rgba)?;
+    if img.color_space == dds::ColorSpace::Srgb {
+        // The atlas can combine pages with different tags. Store explicit sRGB
+        // RGB channels in linear form for the existing unorm HUD sampler.
+        let linear = std::array::from_fn::<_, 256, _>(|byte| {
+            let value = byte as f32 / 255.0;
+            let value = if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            };
+            (value * 255.0).round() as u8
+        });
+        for pixel in rgba.chunks_exact_mut(4) {
+            for channel in &mut pixel[..3] {
+                *channel = linear[usize::from(*channel)];
             }
-            for by in 0..by_count {
-                for bx in 0..bx_count {
-                    let blk = &mip[(by * bx_count + bx) * 8..];
-                    let c0v = u16::from_le_bytes([blk[0], blk[1]]);
-                    let c1v = u16::from_le_bytes([blk[2], blk[3]]);
-                    let idx = u32::from_le_bytes([blk[4], blk[5], blk[6], blk[7]]);
-                    let c0 = decode_rgb565(c0v);
-                    let c1 = decode_rgb565(c1v);
-                    let palette = if c0v > c1v {
-                        [
-                            [c0[0], c0[1], c0[2], 255],
-                            [c1[0], c1[1], c1[2], 255],
-                            {
-                                let c = lerp_rgb(c0, c1, 2, 1, 3);
-                                [c[0], c[1], c[2], 255]
-                            },
-                            {
-                                let c = lerp_rgb(c0, c1, 1, 2, 3);
-                                [c[0], c[1], c[2], 255]
-                            },
-                        ]
-                    } else {
-                        [
-                            [c0[0], c0[1], c0[2], 255],
-                            [c1[0], c1[1], c1[2], 255],
-                            {
-                                let c = lerp_rgb(c0, c1, 1, 1, 2);
-                                [c[0], c[1], c[2], 255]
-                            },
-                            [0, 0, 0, 0],
-                        ]
-                    };
-                    for py in 0..4 {
-                        for px in 0..4 {
-                            let x = bx * 4 + px;
-                            let y = by * 4 + py;
-                            if x < w && y < h {
-                                let code = ((idx >> ((py * 4 + px) * 2)) & 3) as usize;
-                                let dst = (y * w + x) * 4;
-                                out[dst..dst + 4].copy_from_slice(&palette[code]);
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(out)
-        }
-        dds::Format::Dxt3 | dds::Format::Dxt5 => {
-            if mip.len() < bx_count * by_count * 16 {
-                return Err("truncated DXT3/5 mip".into());
-            }
-            let is_dxt3 = img.format == dds::Format::Dxt3;
-            for by in 0..by_count {
-                for bx in 0..bx_count {
-                    let blk = &mip[(by * bx_count + bx) * 16..];
-                    let alpha_bits = u64::from_le_bytes(blk[0..8].try_into().unwrap());
-                    let a0 = blk[0];
-                    let a1 = blk[1];
-                    let a_payload = alpha_bits >> 16;
-
-                    let c0 = decode_rgb565(u16::from_le_bytes([blk[8], blk[9]]));
-                    let c1 = decode_rgb565(u16::from_le_bytes([blk[10], blk[11]]));
-                    let idx = u32::from_le_bytes([blk[12], blk[13], blk[14], blk[15]]);
-                    let rgb = [c0, c1, lerp_rgb(c0, c1, 2, 1, 3), lerp_rgb(c0, c1, 1, 2, 3)];
-                    for py in 0..4 {
-                        for px in 0..4 {
-                            let x = bx * 4 + px;
-                            let y = by * 4 + py;
-                            if x < w && y < h {
-                                let p = py * 4 + px;
-                                let code = ((idx >> (p * 2)) & 3) as usize;
-                                let alpha = if is_dxt3 {
-                                    let n = ((alpha_bits >> (p * 4)) & 0xf) as u8;
-                                    (n << 4) | n
-                                } else {
-                                    let ac = ((a_payload >> (p * 3)) & 7) as u8;
-                                    dxt5_alpha(a0, a1, ac)
-                                };
-                                let dst = (y * w + x) * 4;
-                                out[dst] = rgb[code][0];
-                                out[dst + 1] = rgb[code][1];
-                                out[dst + 2] = rgb[code][2];
-                                out[dst + 3] = alpha;
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(out)
-        }
-        other => Err(format!("unsupported DDS format for pacenotes: {other:?}")),
-    }
-}
-
-fn dxt5_alpha(a0: u8, a1: u8, code: u8) -> u8 {
-    match code {
-        0 => a0,
-        1 => a1,
-        _ if a0 > a1 => {
-            ((u16::from(a0) * u16::from(8 - code) + u16::from(a1) * u16::from(code - 1)) / 7) as u8
-        }
-        6 => 0,
-        7 => 255,
-        _ => {
-            ((u16::from(a0) * u16::from(6 - code) + u16::from(a1) * u16::from(code - 1)) / 5) as u8
         }
     }
+    Ok(rgba)
 }
 
 #[cfg(test)]

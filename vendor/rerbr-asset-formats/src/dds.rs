@@ -40,7 +40,7 @@ const RGBA_MASKS: [u32; 4] = [0xff, 0xff00, 0xff_0000, 0xff00_0000];
 /// Texture format: block-compressed, or plain RGBA texels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
-    /// `DXT1`, BC1: colour only, 8 bytes per block.
+    /// `DXT1`, BC1: colour with optional 1-bit alpha, 8 bytes per block.
     Dxt1,
     /// `DXT3`, BC2: explicit 4-bit alpha, 16 bytes per block.
     Dxt3,
@@ -71,12 +71,23 @@ impl Format {
     }
 }
 
+/// Color metadata supplied by the DDS header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorSpace {
+    /// Legacy DDS has no transfer-function tag.
+    Legacy,
+    Linear,
+    Srgb,
+}
+
 /// A parsed DDS file: its size, format and the mip chain in one slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dds<'a> {
     pub width: u32,
     pub height: u32,
     pub format: Format,
+    pub color_space: ColorSpace,
+    pub data_offset: usize,
     /// Mip levels stored, at least one.
     pub mip_count: u32,
     /// Every mip level back to back, from the largest.
@@ -175,13 +186,16 @@ pub fn parse(bytes: &[u8]) -> Result<Dds<'_>, Error> {
     let fourcc: [u8; 4] = bytes[OFFSET_FOURCC..OFFSET_FOURCC + 4].try_into().expect("four bytes");
     let masks = std::array::from_fn(|i| u32_at(bytes, OFFSET_RGBA_MASKS + 4 * i));
     let mut start = HEADER_LEN;
+    let mut color_space = ColorSpace::Legacy;
     let format = if flags & PF_FOURCC != 0 && &fourcc == b"DX10" {
         start += DX10_LEN;
         if bytes.len() < start {
             return Err(Error::Truncated { len: bytes.len() });
         }
-        // The `_SRGB` variants read as the plain ones: the renderer samples colour textures as unorm.
-        match u32_at(bytes, HEADER_LEN) {
+        let dxgi = u32_at(bytes, HEADER_LEN);
+        color_space = if matches!(dxgi, 29 | 72 | 75 | 78 | 99) { ColorSpace::Srgb } else { ColorSpace::Linear };
+        match dxgi {
+            28 | 29 => Format::Rgba8,
             71 | 72 => Format::Dxt1,
             74 | 75 => Format::Dxt3,
             77 | 78 => Format::Dxt5,
@@ -223,7 +237,62 @@ pub fn parse(bytes: &[u8]) -> Result<Dds<'_>, Error> {
         .sum::<Option<usize>>()
         .ok_or(Error::Header { what: "dimensions" })?;
     let data = data.get(..expected).ok_or(Error::Length { expected, found: data.len() })?;
-    Ok(Dds { width, height, format, mip_count, data })
+    Ok(Dds { width, height, format, color_space, data_offset: start, mip_count, data })
+}
+
+/// Decode a block-aligned range of rows from one mip into tightly packed RGBA8.
+/// The last band can end at a partial block. Output channels remain in the encoded color space.
+pub fn decode_rgba_rows(
+    format: Format,
+    mip: Level<'_>,
+    first_row: u32,
+    rows: u32,
+    out: &mut [u8],
+) -> Result<(), &'static str> {
+    let stride = mip.width as usize * 4;
+    let last = first_row.checked_add(rows).ok_or("DDS row range overflow")?;
+    if mip.width == 0 || rows == 0 || last > mip.height || Some(out.len()) != stride.checked_mul(rows as usize) {
+        return Err("invalid DDS output row range");
+    }
+    if format == Format::Rgba8 {
+        let source = mip.data.get(first_row as usize * stride..last as usize * stride).ok_or("truncated RGBA8 mip")?;
+        out.copy_from_slice(source);
+        return Ok(());
+    }
+    if !first_row.is_multiple_of(4) || (last < mip.height && !rows.is_multiple_of(4)) {
+        return Err("DDS row range is not block aligned");
+    }
+    let decode = match format {
+        Format::Dxt1 => bcdec_rs::bc1,
+        Format::Dxt3 => bcdec_rs::bc2,
+        Format::Dxt5 => bcdec_rs::bc3,
+        Format::Bc7 => bcdec_rs::bc7,
+        Format::Rgba8 => unreachable!(),
+    };
+    let blocks_x = mip.width.div_ceil(4) as usize;
+    let block_len = format.block_len();
+    let row_bytes = blocks_x * block_len;
+    let start = first_row as usize / 4 * row_bytes;
+    let end = start + rows.div_ceil(4) as usize * row_bytes;
+    let source = mip.data.get(start..end).ok_or("truncated BC mip")?;
+    let mut tile = [0u8; 64];
+    for (by, block_row) in source.chunks_exact(row_bytes).enumerate() {
+        let height = 4.min(rows as usize - by * 4);
+        for (bx, block) in block_row.chunks_exact(block_len).enumerate() {
+            let width = 4.min(mip.width as usize - bx * 4);
+            let dst = by * 4 * stride + bx * 16;
+            if width == 4 && height == 4 {
+                decode(block, &mut out[dst..], stride);
+            } else {
+                decode(block, &mut tile, 16);
+                for y in 0..height {
+                    let start = dst + y * stride;
+                    out[start..start + width * 4].copy_from_slice(&tile[y * 16..y * 16 + width * 4]);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `DDS_PIXELFORMAT` `dwFlags` bit: the alpha mask is valid (`DDPF_ALPHAPIXELS`).

@@ -38,7 +38,7 @@ pub(crate) fn start_from_documents(bc_supported: bool, bc_enabled: bool, max_dim
             match inspect(&maps) {
                 Ok(report) => {
                     eprintln!("{report}");
-                    let issues = report.gpu_issues(bc_supported, max_dimension);
+                    let issues = report.gpu_issues(max_dimension);
                     for issue in &issues {
                         eprintln!("harwood: GPU capability warning: {issue}");
                     }
@@ -121,7 +121,7 @@ impl Report {
     }
 
     /// A capability audit, not a texture upload or proof of rendered correctness.
-    pub fn gpu_issues(&self, bc_supported: bool, max_dimension: u32) -> Vec<String> {
+    pub fn gpu_issues(&self, max_dimension: u32) -> Vec<String> {
         let images: Vec<_> = self
             .textures
             .iter()
@@ -129,9 +129,6 @@ impl Report {
             .filter_map(|t| t.result.as_ref().ok())
             .collect();
         let mut issues = Vec::new();
-        if !bc_supported && images.iter().any(|t| t.format != dds::Format::Rgba8) {
-            issues.push("required DDS images need TEXTURE_COMPRESSION_BC".into());
-        }
         for image in images {
             if image.width.max(image.height) > max_dimension {
                 issues.push(format!(
@@ -447,26 +444,29 @@ fn texture_data(
     for request in requests {
         let resolved = remap.resolve(&request);
         match archives.image(&resolved) {
-            Ok(bytes) => match dds::parse(&bytes) {
-                Ok(image) => {
-                    let info = TextureInfo {
-                        request,
-                        resolved: normalized(&resolved)?,
-                        width: image.width,
-                        height: image.height,
-                        mip_count: image.mip_count,
-                        format: image.format,
-                    };
-                    return Ok(TextureData {
-                        info,
-                        #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
-                        bytes,
-                    });
+            Ok(bytes) => {
+                let bytes = dds::to_rgba8(&bytes).unwrap_or(bytes);
+                match dds::parse(&bytes) {
+                    Ok(image) => {
+                        let info = TextureInfo {
+                            request,
+                            resolved: normalized(&resolved)?,
+                            width: image.width,
+                            height: image.height,
+                            mip_count: image.mip_count,
+                            format: image.format,
+                        };
+                        return Ok(TextureData {
+                            info,
+                            #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
+                            bytes,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = write!(errors, "{resolved}: {error}; ");
+                    }
                 }
-                Err(error) => {
-                    let _ = write!(errors, "{resolved}: {error}; ");
-                }
-            },
+            }
             Err(error) => {
                 let _ = write!(errors, "{resolved}: {error}; ");
             }

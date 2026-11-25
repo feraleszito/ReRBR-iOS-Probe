@@ -83,6 +83,7 @@ impl Gpu {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                crate::harwood::color_flags_layout(2),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -168,8 +169,8 @@ impl Gpu {
             pipelines.insert(pass, pipeline);
         }
         let mut textures = BTreeMap::new();
-        for (path, data) in &car.textures {
-            textures.insert(path, upload(device, queue, data)?);
+        for (path, data) in car.textures {
+            textures.insert(path, upload(device, queue, &data)?);
         }
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("car wrap trilinear"),
@@ -182,13 +183,17 @@ impl Gpu {
         });
         let mut groups = Vec::new();
         let mut untextured = None;
+        let color_flags = crate::harwood::color_flags_buffers::<2>(device);
         for m in &car.geometry.materials {
-            let texture = match &m.path {
+            let (texture, linear) = match &m.path {
                 Some(path) => textures
                     .get(path)
                     .ok_or("CAR GPU: required diffuse missing")?,
                 None => untextured.get_or_insert_with(|| {
-                    crate::harwood::solid(device, queue, [110, 110, 110, 255])
+                    (
+                        crate::harwood::solid(device, queue, [110, 110, 110, 255]),
+                        false,
+                    )
                 }),
             };
             groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -202,6 +207,10 @@ impl Gpu {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: color_flags[usize::from(*linear)].as_entire_binding(),
                     },
                 ],
             }));

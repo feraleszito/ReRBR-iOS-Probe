@@ -378,7 +378,11 @@ impl Hud {
         height: u32,
         rgba8: &[u8],
     ) {
-        if width == 0 || height == 0 || rgba8.len() != (width * height * 4) as usize {
+        let limit = device.limits().max_texture_dimension_2d;
+        let size = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4));
+        if width == 0 || height == 0 || width.max(height) > limit || size != Some(rgba8.len()) {
             return;
         }
         let texture = device.create_texture(&wgpu::TextureDescriptor {

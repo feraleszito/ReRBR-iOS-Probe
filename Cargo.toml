@@ -47,6 +47,7 @@ winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] 
 
 [dev-dependencies]
 naga = { version = "=30.0.1", features = ["wgsl-in"] }
+wgpu = { version = "=30.0.1", default-features = false, features = ["noop"] }
 
 [[example]]
 name = "harwood-diagnostic"

@@ -303,14 +303,15 @@ impl Renderer {
         );
         #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
         eprintln!(
-            "{} DEVICE: adapter BC={}, device BC enabled={}",
+            "{} DEVICE: adapter BC={}, device BC enabled={}, max texture 2D={}",
             harwood::MODE_NAME,
             adapter
                 .features()
                 .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
             device
                 .features()
-                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
+            device.limits().max_texture_dimension_2d
         );
         let size = window.inner_size();
         let mut config = surface
@@ -375,11 +376,7 @@ impl Renderer {
         ))]
         let scene = scene3d::Scene3d::new(&device, config.format);
         #[cfg(any(feature = "harwood-block", feature = "harwood-neighbors"))]
-        let harwood = harwood::Scene::new(
-            device
-                .features()
-                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
-        );
+        let harwood = harwood::Scene::new();
         Ok(Self {
             #[cfg(all(feature = "physics-probe", not(feature = "physics-drive")))]
             physics: physics_probe::Scene::new(),

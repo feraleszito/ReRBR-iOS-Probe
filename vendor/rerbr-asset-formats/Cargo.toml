@@ -7,4 +7,5 @@ license = "GPL-3.0-or-later"
 description = "Unmodified reRBR readers selected for a private Harwood asset diagnostic"
 
 [dependencies]
+bcdec_rs = "=0.2.0"
 zip = { version = "=9.0.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }

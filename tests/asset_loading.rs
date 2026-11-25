@@ -171,9 +171,8 @@ fn resolves_o_to_n_and_validates_dds_with_case_and_slash_differences() {
     assert_eq!(report.redirected_to_n(), 1);
     let image = report.textures[0].result.as_ref().unwrap();
     assert_eq!((image.width, image.height, image.mip_count), (4, 4, 1));
-    assert!(report.gpu_issues(true, 2048).is_empty());
-    assert_eq!(report.gpu_issues(false, 2048).len(), 1);
-    assert_eq!(report.gpu_issues(true, 2).len(), 1);
+    assert!(report.gpu_issues(2048).is_empty());
+    assert_eq!(report.gpu_issues(2).len(), 1);
 }
 
 #[test]

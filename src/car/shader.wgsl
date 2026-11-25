@@ -2,6 +2,7 @@ struct Camera { vp: mat4x4<f32>, models: array<mat4x4<f32>,6>, options: vec4<u32
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var diffuse: texture_2d<f32>;
 @group(1) @binding(1) var filtering: sampler;
+@group(1) @binding(2) var<uniform> linear_sample: u32;
 struct Out {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -37,9 +38,11 @@ fn sampled(uv:vec2<f32>, world_normal: vec3<f32>, world_pos: vec3<f32>)->vec4<f3
     if camera.options.y != 0u {
         c = vec4<f32>(apply_studio_lighting(c.rgb, world_normal, world_pos), c.a);
     }
-    // Same legacy unorm convention as the terrain; no damage-alpha multiplication.
-    if camera.options.x!=0u {
+    // Untagged DDS retain the retail renderer's encoded-color convention.
+    if linear_sample == 0u && camera.options.x != 0u {
         c=vec4<f32>(select(pow((c.rgb+0.055)/1.055,vec3<f32>(2.4)),c.rgb/12.92,c.rgb<=vec3<f32>(0.04045)),c.a);
+    } else if linear_sample != 0u && camera.options.x == 0u {
+        c = vec4<f32>(select(1.055 * pow(c.rgb, vec3<f32>(1.0 / 2.4)) - 0.055, c.rgb * 12.92, c.rgb <= vec3<f32>(0.0031308)), c.a);
     }
     return c;
 }

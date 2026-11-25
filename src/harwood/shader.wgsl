@@ -7,6 +7,7 @@ struct Camera {
 @group(1) @binding(0) var first_texture: texture_2d<f32>;
 @group(1) @binding(1) var second_texture: texture_2d<f32>;
 @group(1) @binding(2) var texture_sampler: sampler;
+@group(1) @binding(3) var<uniform> linear_samples: u32;
 
 struct Input {
     @location(0) position: vec3<f32>,
@@ -34,18 +35,36 @@ fn vs_main(v: Input) -> Output {
 fn fs_main(v: Output) -> @location(0) vec4<f32> {
     let t0 = textureSample(first_texture, texture_sampler, v.uv0);
     let t1 = textureSample(second_texture, texture_sampler, v.uv1);
-    var color = mix(v.color.rgb * t0.rgb, v.color.rgb * t1.rgb, t1.a * v.color.a);
-    if camera.options.x == 1u { color = v.color.rgb; }
+    var linear = linear_samples != 0u;
+    var base = t0.rgb;
+    var detail = t1.rgb;
+    var baked = v.color.rgb;
+    if linear {
+        if (linear_samples & 1u) == 0u { base = decode_srgb(base); }
+        if (linear_samples & 2u) == 0u { detail = decode_srgb(detail); }
+        baked = decode_srgb(baked);
+    }
+    var color = mix(baked * base, baked * detail, t1.a * v.color.a);
+    if camera.options.x == 1u { color = v.color.rgb; linear = false; }
     if camera.options.x == 2u {
         let checker = f32((u32(abs(floor(v.uv0.x * 8.0))) + u32(abs(floor(v.uv0.y * 8.0)))) % 2u);
         color = mix(vec3<f32>(0.08, 0.14, 0.2), vec3<f32>(0.8, 0.8, 0.8), checker);
+        linear = false;
     }
-    // ReRBR's legacy inputs are unorm, not sRGB decoded. Cancel an sRGB surface's
-    // automatic encoding so it displays the same baked RGB values as an unorm one.
-    if camera.options.y != 0u {
-        color = select(pow((color + 0.055) / 1.055, vec3<f32>(2.4)), color / 12.92, color <= vec3<f32>(0.04045));
+    return vec4<f32>(output_rgb(color, linear), 1.0);
+}
+
+fn decode_srgb(rgb: vec3<f32>) -> vec3<f32> {
+    return select(pow((rgb + 0.055) / 1.055, vec3<f32>(2.4)), rgb / 12.92, rgb <= vec3<f32>(0.04045));
+}
+
+fn output_rgb(rgb: vec3<f32>, linear: bool) -> vec3<f32> {
+    let srgb_target = camera.options.y != 0u;
+    if !linear && srgb_target { return decode_srgb(rgb); }
+    if linear && !srgb_target {
+        return select(1.055 * pow(rgb, vec3<f32>(1.0 / 2.4)) - 0.055, rgb * 12.92, rgb <= vec3<f32>(0.0031308));
     }
-    return vec4<f32>(color, 1.0);
+    return rgb;
 }
 
 // Original reRBR stage object state: two-sided, alpha > 60/255, depth writes.
@@ -54,14 +73,15 @@ fn fs_main(v: Output) -> @location(0) vec4<f32> {
 fn fs_object(v: Output) -> @location(0) vec4<f32> {
     let texel = textureSample(first_texture, texture_sampler, v.uv0);
     if texel.a <= 60.0 / 255.0 { discard; }
-    var color = texel.rgb * v.color.rgb;
-    if camera.options.x == 1u { color = v.color.rgb; }
+    var linear = (linear_samples & 1u) != 0u;
+    var baked = v.color.rgb;
+    if linear { baked = decode_srgb(baked); }
+    var color = texel.rgb * baked;
+    if camera.options.x == 1u { color = v.color.rgb; linear = false; }
     if camera.options.x == 2u {
         let checker = f32((u32(abs(floor(v.uv0.x * 8.0))) + u32(abs(floor(v.uv0.y * 8.0)))) % 2u);
         color = mix(vec3<f32>(0.08, 0.14, 0.2), vec3<f32>(0.8), checker);
+        linear = false;
     }
-    if camera.options.y != 0u {
-        color = select(pow((color + 0.055) / 1.055, vec3<f32>(2.4)), color / 12.92, color <= vec3<f32>(0.04045));
-    }
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(output_rgb(color, linear), 1.0);
 }
