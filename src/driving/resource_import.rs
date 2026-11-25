@@ -1,13 +1,17 @@
-//! Auditoria de recursos RBR en almacenamiento privado y puente Android SAF (Storage Access Framework).
+//! Auditoría universal de recursos RBR/RSF y adaptador multiplataforma (iOS `UIDocumentPickerViewController` + Android SAF).
 //!
-//! - Comprueba que archivos exige realmente el motor antes y despues de importar.
-//! - Expone diagnosticos claros en espanol cuando faltan archivos o el DLL de NGP es incompatible.
-//! - En Android enlaza con `SafResourceImporter` (Java) mediante JNI sin asumir rutas POSIX sobre `content://`.
+//! - Comprueba qué archivos exige realmente el motor antes y después de importar.
+//! - Expone diagnósticos claros en español (instalado, incompleto, incompatible, espacio ocupado).
+//! - En iOS/iPadOS enlaza con `UIDocumentPickerViewController` + URLs de seguridad + `NSFileCoordinator`,
+//!   ejecutando la importación incremental/ZIP en la capa compartida de Rust (`universal_importer`).
+//! - En Android enlaza con `SafResourceImporter` (Storage Access Framework) + extractor Rust por FD/JNI.
 
-use super::content_manager::{Catalog, DriveCapability};
+use super::content_manager::{Catalog, DriveCapability, UniversalCatalogSummary};
+use super::universal_importer::{self, StorageBreakdown};
 use rerbr_sim::ngp_candidate::{self, NgpRuntimeKind};
 use rerbr_sim::rbr_formats::cars;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SafPhase {
@@ -60,6 +64,8 @@ pub struct ResourceHealthReport {
     pub ready_to_drive: bool,
     pub headline: String,
     pub missing_items: Vec<String>,
+    pub catalog_summary: UniversalCatalogSummary,
+    pub storage: StorageBreakdown,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -69,6 +75,16 @@ pub struct AndroidImportView {
 }
 
 impl AndroidImportView {
+    pub fn platform_picker_tag() -> &'static str {
+        if cfg!(target_os = "ios") {
+            "ARCHIVOS DE iOS / iCLOUD"
+        } else if cfg!(target_os = "android") {
+            "ANDROID SAF"
+        } else {
+            "SISTEMA LOCAL"
+        }
+    }
+
     pub fn banner_label(&self) -> String {
         match self.saf.phase {
             SafPhase::Running => {
@@ -84,7 +100,10 @@ impl AndroidImportView {
             }
             SafPhase::Error => {
                 if self.saf.detail.is_empty() {
-                    "ERROR AL IMPORTAR — PULSA PARA SELECCIONAR CARPETA RBR".into()
+                    format!(
+                        "ERROR AL IMPORTAR — PULSA PARA ABRIR {}",
+                        Self::platform_picker_tag()
+                    )
                 } else {
                     format!("{} — PULSA PARA IMPORTAR", self.saf.detail)
                 }
@@ -95,10 +114,194 @@ impl AndroidImportView {
                 } else if let Some(first) = self.health.missing_items.first() {
                     format!("FALTAN RECURSOS ({first}) · PULSA PARA IMPORTAR")
                 } else {
-                    "SIN RECURSOS RBR — PULSA PARA SELECCIONAR CARPETA RBR (SAF)".into()
+                    format!(
+                        "SIN RECURSOS RBR — PULSA PARA IMPORTAR ({})",
+                        Self::platform_picker_tag()
+                    )
                 }
             }
         }
+    }
+}
+
+// Estado compartido en memoria para el adaptador iOS (`UIDocumentPickerViewController` + hilo GCD)
+struct IosBatchAccumulator {
+    snapshot: SafRuntimeSnapshot,
+    batch_copied: u32,
+    batch_reused: u32,
+    batch_protected: u32,
+    batch_bytes: u64,
+    had_error: bool,
+}
+
+static IOS_IMPORT: Mutex<IosBatchAccumulator> = Mutex::new(IosBatchAccumulator {
+    snapshot: SafRuntimeSnapshot {
+        phase: SafPhase::Idle,
+        files_done: 0,
+        files_total: 0,
+        bytes_done: 0,
+        detail: String::new(),
+        completion_epoch: 0,
+        has_persisted_uri: false,
+        persisted_label: String::new(),
+    },
+    batch_copied: 0,
+    batch_reused: 0,
+    batch_protected: 0,
+    batch_bytes: 0,
+    had_error: false,
+});
+
+#[cfg(target_os = "ios")]
+unsafe extern "C" {
+    fn rerbr_ios_pick_rbr_folder() -> std::ffi::c_int;
+    fn rerbr_ios_pick_rbr_zip() -> std::ffi::c_int;
+    fn rerbr_ios_reimport_persisted_folder() -> std::ffi::c_int;
+}
+
+unsafe fn cstr_to_string(ptr: *const std::ffi::c_char) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+}
+
+/// # Safety
+/// `utf8_label` debe ser nulo o apuntar a una cadena C terminada en `\0` válida durante la llamada.
+#[no_mangle]
+pub unsafe extern "C" fn rerbr_ios_set_persisted_folder_state(
+    available: std::ffi::c_int,
+    utf8_label: *const std::ffi::c_char,
+) {
+    let label = cstr_to_string(utf8_label);
+    let mut guard = IOS_IMPORT.lock().unwrap();
+    guard.snapshot.has_persisted_uri = available != 0;
+    guard.snapshot.persisted_label = label;
+}
+
+/// # Safety
+/// `utf8_label` debe ser nulo o apuntar a una cadena C terminada en `\0` válida durante la llamada.
+#[no_mangle]
+pub unsafe extern "C" fn rerbr_ios_import_begin_batch(
+    count: u32,
+    utf8_label: *const std::ffi::c_char,
+) {
+    let label = cstr_to_string(utf8_label);
+    let mut guard = IOS_IMPORT.lock().unwrap();
+    guard.snapshot.phase = SafPhase::Running;
+    guard.snapshot.files_done = 0;
+    guard.snapshot.files_total = count;
+    guard.snapshot.bytes_done = 0;
+    guard.snapshot.detail = format!("PREPARANDO ACCESO SEGURO iOS: {label}");
+    guard.batch_copied = 0;
+    guard.batch_reused = 0;
+    guard.batch_protected = 0;
+    guard.batch_bytes = 0;
+    guard.had_error = false;
+}
+
+/// # Safety
+/// `utf8_path` debe ser nulo o apuntar a una ruta POSIX terminada en `\0` válida durante la llamada.
+#[no_mangle]
+pub unsafe extern "C" fn rerbr_ios_import_process_path(
+    utf8_path: *const std::ffi::c_char,
+    is_directory: std::ffi::c_int,
+    batch_index: u32,
+    batch_total: u32,
+) {
+    let src_str = cstr_to_string(utf8_path);
+    let Some(docs_os) = std::env::var_os("RERBR_PROBE_DOCUMENTS") else {
+        let mut guard = IOS_IMPORT.lock().unwrap();
+        guard.had_error = true;
+        guard.snapshot.phase = SafPhase::Error;
+        guard.snapshot.detail = "CARPETA DOCUMENTS DE iOS NO DISPONIBLE".into();
+        return;
+    };
+    let docs_dir = PathBuf::from(docs_os);
+    let src_path = PathBuf::from(&src_str);
+    let base_bytes = IOS_IMPORT.lock().unwrap().batch_bytes;
+
+    let mut progress_cb = |prog: universal_importer::ImportProgress| {
+        let mut guard = IOS_IMPORT.lock().unwrap();
+        guard.snapshot.phase = SafPhase::Running;
+        guard.snapshot.files_done = prog.files_done;
+        guard.snapshot.files_total = prog.files_total;
+        guard.snapshot.bytes_done = base_bytes + prog.bytes_done;
+        guard.snapshot.detail = if batch_total > 1 {
+            format!("[{}/{}] {}", batch_index + 1, batch_total, prog.detail)
+        } else {
+            prog.detail
+        };
+    };
+
+    let result = if is_directory != 0 || src_path.is_dir() {
+        universal_importer::import_directory_into_documents(&src_path, &docs_dir, &mut progress_cb)
+    } else {
+        universal_importer::import_zip_into_documents(&src_path, &docs_dir, &mut progress_cb)
+    };
+
+    match result {
+        Ok(sum) => {
+            let mut guard = IOS_IMPORT.lock().unwrap();
+            guard.batch_copied += sum.files_copied;
+            guard.batch_reused += sum.files_reused;
+            guard.batch_protected += sum.files_protected;
+            guard.batch_bytes += sum.total_relevant_bytes();
+            guard.snapshot.bytes_done = guard.batch_bytes;
+            guard.snapshot.detail = sum.headline_es();
+        }
+        Err(err) => {
+            let mut guard = IOS_IMPORT.lock().unwrap();
+            guard.had_error = true;
+            guard.snapshot.phase = SafPhase::Error;
+            guard.snapshot.detail = err;
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rerbr_ios_import_finish_batch() {
+    let mut guard = IOS_IMPORT.lock().unwrap();
+    if guard.had_error {
+        return;
+    }
+    let total_files = guard.batch_copied + guard.batch_reused + guard.batch_protected;
+    let mib = guard.batch_bytes as f64 / (1024.0 * 1024.0);
+    guard.snapshot.phase = SafPhase::Done;
+    guard.snapshot.files_done = total_files;
+    guard.snapshot.files_total = total_files;
+    guard.snapshot.bytes_done = guard.batch_bytes;
+    guard.snapshot.detail = if guard.batch_protected > 0 {
+        format!(
+            "IMPORTACIÓN iOS COMPLETADA: {} NUEVOS · {} REUTILIZADOS · {} PROTEGIDOS ({:.1} MiB)",
+            guard.batch_copied, guard.batch_reused, guard.batch_protected, mib
+        )
+    } else {
+        format!(
+            "IMPORTACIÓN iOS COMPLETADA: {} NUEVOS · {} REUTILIZADOS ({:.1} MiB)",
+            guard.batch_copied, guard.batch_reused, mib
+        )
+    };
+    guard.snapshot.completion_epoch = guard.snapshot.completion_epoch.wrapping_add(1);
+}
+
+/// # Safety
+/// `utf8_message` debe ser nulo o apuntar a una cadena C terminada en `\0` válida durante la llamada.
+#[no_mangle]
+pub unsafe extern "C" fn rerbr_ios_import_cancel_or_fail(
+    is_error: std::ffi::c_int,
+    utf8_message: *const std::ffi::c_char,
+) {
+    let msg = cstr_to_string(utf8_message);
+    let mut guard = IOS_IMPORT.lock().unwrap();
+    if is_error != 0 {
+        guard.had_error = true;
+        guard.snapshot.phase = SafPhase::Error;
+    } else if guard.snapshot.phase == SafPhase::Running {
+        guard.snapshot.phase = SafPhase::Idle;
+    }
+    if !msg.is_empty() {
+        guard.snapshot.detail = msg;
     }
 }
 
@@ -117,9 +320,13 @@ pub fn query_android_saf() -> SafRuntimeSnapshot {
             persisted_label: st.persisted_label,
         }
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
     {
-        SafRuntimeSnapshot::default()
+        IOS_IMPORT.lock().unwrap().snapshot.clone()
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        IOS_IMPORT.lock().unwrap().snapshot.clone()
     }
 }
 
@@ -132,9 +339,18 @@ pub fn request_open_rbr_folder() -> Result<(), String> {
             Err("NO SE PUDO ABRIR EL SELECTOR DE CARPETAS ANDROID SAF".into())
         }
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
     {
-        Err("SELECTOR ANDROID SAF DISPONIBLE ÚNICAMENTE EN ANDROID".into())
+        // SAFETY: despacha la presentación de UIDocumentPickerViewController en el hilo principal de UIKit.
+        if unsafe { rerbr_ios_pick_rbr_folder() } != 0 {
+            Ok(())
+        } else {
+            Err("NO SE PUDO ABRIR EL SELECTOR DE CARPETAS DE iOS".into())
+        }
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        Err("SELECTOR NATIVO DISPONIBLE EN iOS/iPadOS Y ANDROID".into())
     }
 }
 
@@ -147,9 +363,18 @@ pub fn request_open_rbr_zip() -> Result<(), String> {
             Err("NO SE PUDO ABRIR EL SELECTOR DE ARCHIVOS .ZIP ANDROID SAF".into())
         }
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
     {
-        Err("SELECTOR ANDROID SAF DISPONIBLE ÚNICAMENTE EN ANDROID".into())
+        // SAFETY: despacha la presentación de UIDocumentPickerViewController en el hilo principal de UIKit.
+        if unsafe { rerbr_ios_pick_rbr_zip() } != 0 {
+            Ok(())
+        } else {
+            Err("NO SE PUDO ABRIR EL SELECTOR DE ARCHIVOS .ZIP DE iOS".into())
+        }
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        Err("SELECTOR NATIVO DISPONIBLE EN iOS/iPadOS Y ANDROID".into())
     }
 }
 
@@ -162,9 +387,18 @@ pub fn request_reimport_persisted_folder() -> Result<(), String> {
             Err("NO SE PUDO INICIAR LA REIMPORTACIÓN SAF".into())
         }
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
     {
-        Err("REIMPORTACIÓN SAF DISPONIBLE ÚNICAMENTE EN ANDROID".into())
+        // SAFETY: resuelve el marcador de seguridad guardado en NSUserDefaults en el hilo principal.
+        if unsafe { rerbr_ios_reimport_persisted_folder() } != 0 {
+            Ok(())
+        } else {
+            Err("NO SE PUDO INICIAR LA REIMPORTACIÓN DE CARPETA EN iOS".into())
+        }
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        Err("REIMPORTACIÓN NATIVA DISPONIBLE EN iOS/iPadOS Y ANDROID".into())
     }
 }
 
@@ -186,6 +420,7 @@ impl ResourceHealthReport {
     }
 
     pub fn inspect(documents: Option<&Path>, content: &Catalog, ngp_experimental: bool) -> Self {
+        let catalog_summary = content.universal_summary(ngp_experimental);
         let Some(doc_root) = documents else {
             return Self {
                 target_rbr_dir: "ALMACENAMIENTO PRIVADO NO DISPONIBLE".into(),
@@ -196,9 +431,12 @@ impl ResourceHealthReport {
                 ready_to_drive: false,
                 headline: "ERROR: ALMACENAMIENTO DE LA APLICACIÓN NO DISPONIBLE".into(),
                 missing_items: vec!["RERBR_PROBE_DOCUMENTS NO DEFINIDO".into()],
+                catalog_summary,
+                storage: StorageBreakdown::default(),
             };
         };
 
+        let storage = StorageBreakdown::scan_documents(doc_root);
         let rbr_root = doc_root.join("RBR");
         let target_rbr_dir = rbr_root.display().to_string();
         let mut missing_items = Vec::new();
@@ -239,7 +477,7 @@ impl ResourceHealthReport {
             }
         }
 
-        // 3. Contar vehiculos conducibles y tramos listos
+        // 3. Contar vehículos conducibles y tramos listos
         let drivable_entries: Vec<_> = content
             .vehicles
             .iter()
@@ -255,8 +493,14 @@ impl ResourceHealthReport {
             .any(|v| !v.descriptor.is_ngp_experimental_car());
 
         if drivable_vehicles == 0 {
-            let focus_dir = cars::resolve(&rbr_root, "Cars/FORD_FOCUS_2006");
-            if focus_dir.is_some() {
+            if let Some(inc) = content.non_drivable_vehicles.first() {
+                missing_items.push(format!(
+                    "VEHÍCULO {} ({}): {}",
+                    inc.name,
+                    inc.status.label_es(),
+                    inc.reason
+                ));
+            } else if cars::resolve(&rbr_root, "Cars/FORD_FOCUS_2006").is_some() {
                 for req in [
                     "Cars/FORD_FOCUS_2006/focus06.sgc",
                     "Cars/FORD_FOCUS_2006/focus06.ini",
@@ -311,10 +555,13 @@ impl ResourceHealthReport {
             core_ok && physics_backend_ok && drivable_vehicles > 0 && ready_stages > 0;
 
         let headline = if ready_to_drive {
-            format!("LISTO PARA CONDUCIR: {drivable_vehicles} COCHE(S) · {ready_stages} TRAMO(S)")
+            format!(
+                "LISTO PARA CONDUCIR: {drivable_vehicles} COCHE(S) · {ready_stages} TRAMO(S) · {}",
+                universal_importer::format_bytes(storage.total_bytes)
+            )
         } else {
             format!(
-                "RECURSOS INCOMPLETOS ({drivable_vehicles} COCHES · {ready_stages} TRAMOS) — IMPORTA CARPETA RBR"
+                "RECURSOS INCOMPLETOS ({drivable_vehicles} COCHES · {ready_stages} TRAMOS) — IMPORTA CARPETA O .ZIP"
             )
         };
 
@@ -327,6 +574,8 @@ impl ResourceHealthReport {
             ready_to_drive,
             headline,
             missing_items,
+            catalog_summary,
+            storage,
         }
     }
 }

@@ -57,6 +57,38 @@ impl EntryState {
     }
 }
 
+/// Estado universal normalizado exigido para cada recurso en iOS y Android:
+/// - `Installed`: conducible/listo con todas sus dependencias presentes.
+/// - `Incomplete`: reconocido y soportado, pero faltan archivos propios o compartidos.
+/// - `Incompatible`: sin físicas soportadas (p. ej. solo malla 3D o descriptor no soportado).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UniversalStatus {
+    Installed,
+    Incomplete,
+    Incompatible,
+}
+
+impl UniversalStatus {
+    pub fn label_es(self) -> &'static str {
+        match self {
+            Self::Installed => "INSTALADO",
+            Self::Incomplete => "INCOMPLETO",
+            Self::Incompatible => "INCOMPATIBLE",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UniversalCatalogSummary {
+    pub vehicles_installed: usize,
+    pub vehicles_incomplete: usize,
+    pub vehicles_incompatible: usize,
+    pub vehicle_duplicates: usize,
+    pub stages_installed: usize,
+    pub stages_incomplete: usize,
+    pub stages_incompatible: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileAudit {
     /// False when the private Documents root is unavailable or not inspected.
@@ -179,12 +211,64 @@ impl VehicleEntry {
     pub fn can_showroom_view(&self) -> bool {
         self.has_3d_model && !self.model_missing && !self.using_fallback_model
     }
+
+    pub fn universal_status(&self, ngp_experimental: bool) -> UniversalStatus {
+        if self.classification == VehicleClassification::VisualInspectionOnly {
+            return if self.has_3d_model && !self.model_missing {
+                UniversalStatus::Incompatible
+            } else {
+                UniversalStatus::Incomplete
+            };
+        }
+        let backend_ok = if self.descriptor.is_ngp_experimental_car() {
+            ngp_experimental
+                && matches!(
+                    self.classification,
+                    VehicleClassification::RsfNgpVerified | VehicleClassification::RsfNgpPartial
+                )
+        } else {
+            self.descriptor.validate_current_backend().is_ok()
+        };
+        if !backend_ok {
+            return UniversalStatus::Incompatible;
+        }
+        if self.model_missing
+            || self.using_fallback_model
+            || (self.files.checked && !self.files.missing.is_empty())
+        {
+            UniversalStatus::Incomplete
+        } else {
+            UniversalStatus::Installed
+        }
+    }
 }
 #[derive(Debug, Clone)]
 pub struct StageEntry {
     pub descriptor: StageDescriptor,
     pub state: EntryState,
     pub files: FileAudit,
+}
+
+impl StageEntry {
+    pub fn universal_status(&self) -> UniversalStatus {
+        if self.state == EntryState::Unsupported {
+            UniversalStatus::Incompatible
+        } else if self.files.checked && !self.files.missing.is_empty() {
+            UniversalStatus::Incomplete
+        } else if self.files.checked && self.files.missing.is_empty() {
+            UniversalStatus::Installed
+        } else {
+            UniversalStatus::Incomplete
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonDrivableVehicleReport {
+    pub id: String,
+    pub name: String,
+    pub status: UniversalStatus,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -195,6 +279,8 @@ pub struct Catalog {
     pub inspected: bool,
     public_beta: bool,
     vehicle_aliases: BTreeMap<usize, usize>,
+    raw_summary: Option<UniversalCatalogSummary>,
+    pub non_drivable_vehicles: Vec<NonDrivableVehicleReport>,
 }
 impl Catalog {
     /// Descriptor-only catalog (no filesystem access). Used before an explicit scan.
@@ -301,6 +387,8 @@ impl Catalog {
             inspected: false,
             public_beta: false,
             vehicle_aliases: BTreeMap::new(),
+            raw_summary: None,
+            non_drivable_vehicles: Vec::new(),
         }
     }
     /// Builds the current catalog and performs small read-only existence checks
@@ -331,6 +419,50 @@ impl Catalog {
 
     pub fn is_public_beta(&self) -> bool {
         self.public_beta
+    }
+
+    pub fn duplicate_alias_count(&self) -> usize {
+        self.vehicle_aliases.len()
+    }
+
+    pub fn universal_summary(&self, ngp_experimental: bool) -> UniversalCatalogSummary {
+        if let Some(mut saved) = self.raw_summary {
+            // Re-sincronizar tramos por si cambiaron tras inspección
+            saved.stages_installed = 0;
+            saved.stages_incomplete = 0;
+            saved.stages_incompatible = 0;
+            for st in &self.stages {
+                match st.universal_status() {
+                    UniversalStatus::Installed => saved.stages_installed += 1,
+                    UniversalStatus::Incomplete => saved.stages_incomplete += 1,
+                    UniversalStatus::Incompatible => saved.stages_incompatible += 1,
+                }
+            }
+            return saved;
+        }
+        self.compute_summary(ngp_experimental)
+    }
+
+    fn compute_summary(&self, ngp_experimental: bool) -> UniversalCatalogSummary {
+        let mut s = UniversalCatalogSummary {
+            vehicle_duplicates: self.vehicle_aliases.len(),
+            ..UniversalCatalogSummary::default()
+        };
+        for v in &self.vehicles {
+            match v.universal_status(ngp_experimental) {
+                UniversalStatus::Installed => s.vehicles_installed += 1,
+                UniversalStatus::Incomplete => s.vehicles_incomplete += 1,
+                UniversalStatus::Incompatible => s.vehicles_incompatible += 1,
+            }
+        }
+        for st in &self.stages {
+            match st.universal_status() {
+                UniversalStatus::Installed => s.stages_installed += 1,
+                UniversalStatus::Incomplete => s.stages_incomplete += 1,
+                UniversalStatus::Incompatible => s.stages_incompatible += 1,
+            }
+        }
+        s
     }
 
     fn public_beta(self) -> Self {
@@ -369,22 +501,61 @@ impl Catalog {
         let previous = std::mem::take(&mut self.vehicle_aliases);
         let mut groups = Vec::with_capacity(self.vehicles.len());
         let mut retained = BTreeMap::new();
+        let mut summary = UniversalCatalogSummary {
+            vehicle_duplicates: previous.len(),
+            ..UniversalCatalogSummary::default()
+        };
+        let mut non_drivable = Vec::new();
         for (old, entry) in std::mem::take(&mut self.vehicles).into_iter().enumerate() {
             let group = previous.get(&old).map_or(old, |&parent| groups[parent]);
             groups.push(group);
-            if entry.files.checked
+            let ready = entry.files.checked
                 && entry.can_showroom_view()
                 && entry.capability(true) == DriveCapability::Drivable
-                && backend_ready(&entry.descriptor)
-            {
+                && backend_ready(&entry.descriptor);
+            if ready {
+                summary.vehicles_installed += 1;
                 let index = self.vehicles.len();
                 let first = *retained.entry(group).or_insert(index);
                 if first != index {
                     self.vehicle_aliases.insert(index, first);
                 }
                 self.vehicles.push(entry);
+            } else {
+                // Solo contabilizar en diagnóstico coches con algún archivo presente en disco
+                if entry.files.present > 0 || entry.has_3d_model {
+                    let st = if entry.classification == VehicleClassification::VisualInspectionOnly
+                    {
+                        UniversalStatus::Incompatible
+                    } else if !entry.files.missing.is_empty()
+                        || entry.model_missing
+                        || entry.using_fallback_model
+                    {
+                        UniversalStatus::Incomplete
+                    } else {
+                        UniversalStatus::Incompatible
+                    };
+                    match st {
+                        UniversalStatus::Installed => summary.vehicles_installed += 1,
+                        UniversalStatus::Incomplete => summary.vehicles_incomplete += 1,
+                        UniversalStatus::Incompatible => summary.vehicles_incompatible += 1,
+                    }
+                    let reason = entry
+                        .files
+                        .missing_label()
+                        .or_else(|| entry.notes.first().cloned())
+                        .unwrap_or_else(|| st.label_es().to_string());
+                    non_drivable.push(NonDrivableVehicleReport {
+                        id: entry.descriptor.id,
+                        name: entry.descriptor.name,
+                        status: st,
+                        reason,
+                    });
+                }
             }
         }
+        self.raw_summary = Some(summary);
+        self.non_drivable_vehicles = non_drivable;
         self
     }
     pub fn scan_root(root: &Path, selection: &Selection) -> Self {
@@ -1237,44 +1408,44 @@ pub struct ImportStep {
     pub state: StepState,
 }
 
-/// Honest roadmap exposed by the Content Manager. No package format is installable.
+/// Pipeline universal de importación compartido entre iOS (`UIDocumentPickerViewController`) y Android (`SAF`).
 pub const IMPORT_STEPS: [ImportStep; 6] = [
     ImportStep {
-        label: "FILES PICKER",
-        detail: "IPADOS DOCUMENT PICKER NOT CONNECTED",
-        state: StepState::Unavailable,
-    },
-    ImportStep {
-        label: "PACKAGE INSPECTION",
-        detail: "MANIFEST FORMAT NOT DEFINED",
+        label: "SELECTOR NATIVO",
+        detail: "ARCHIVOS DE iOS / iCLOUD DRIVE Y ANDROID SAF (CARPETAS Y .ZIP)",
         state: StepState::Planned,
     },
     ImportStep {
-        label: "DEPENDENCY CHECK",
-        detail: "CONTENT CATALOG NOT IMPLEMENTED",
+        label: "FILTRADO SELECTIVO",
+        detail: "SOLO RECURSOS DEL MOTOR (CARS, MAPS, RSFDATA, AUDIO, NGP 7.4)",
         state: StepState::Planned,
     },
     ImportStep {
-        label: "PHYSICS VALIDATION",
-        detail: "CAPABILITY CHECK NOT IMPLEMENTED",
+        label: "DEDUPLICACIÓN",
+        detail: "IMPORTACIÓN INCREMENTAL SIN COPIAS DUPLICADAS NI SOBRESCRITURA NGP 7.5",
         state: StepState::Planned,
     },
     ImportStep {
-        label: "PRIVATE INSTALL",
-        detail: "TRANSACTIONAL INSTALL DISABLED",
-        state: StepState::Unavailable,
+        label: "AUDITORÍA DE DEPENDENCIAS",
+        detail: "VERIFICA ARCHIVOS PROPIOS Y COMPARTIDOS POR VEHÍCULO Y TRAMO",
+        state: StepState::Planned,
     },
     ImportStep {
-        label: "ACTIVATE CONTENT",
-        detail: "IMPORT ACTIVATION DISABLED",
-        state: StepState::Unavailable,
+        label: "ESCRITURA ATÓMICA",
+        detail: "CONFIRMACIÓN MEDIANTE .PART Y PRESERVACIÓN DE MAYÚSCULAS APFS/EXT4",
+        state: StepState::Planned,
+    },
+    ImportStep {
+        label: "RECARGA EN CALIENTE",
+        detail: "ACTUALIZACIÓN AUTOMÁTICA DEL CATÁLOGO LOCAL SIN REINICIAR",
+        state: StepState::Planned,
     },
 ];
 
-pub const IMPORT_FORMATS: [&str; 0] = [];
+pub const IMPORT_FORMATS: [&str; 2] = ["RBR-FOLDER", "ZIP"];
 
 pub fn import_available() -> bool {
-    false
+    cfg!(any(target_os = "ios", target_os = "android"))
 }
 
 /// Descriptor gate for the current backend. This is not NGP physics certification.
@@ -1409,12 +1580,18 @@ mod tests {
     }
 
     #[test]
-    fn import_model_does_not_advertise_any_installable_format() {
-        assert!(!import_available());
-        assert!(IMPORT_FORMATS.is_empty());
-        assert!(IMPORT_STEPS
-            .iter()
-            .all(|step| step.state != StepState::Unavailable || !step.detail.is_empty()));
+    fn universal_import_model_exposes_folder_and_zip_formats_and_status_summary() {
+        assert_eq!(IMPORT_FORMATS, ["RBR-FOLDER", "ZIP"]);
+        assert_eq!(
+            import_available(),
+            cfg!(any(target_os = "ios", target_os = "android"))
+        );
+        assert!(IMPORT_STEPS.iter().all(|step| !step.detail.is_empty()));
         assert!(physics_report(&Selection::default()).0);
+
+        let catalog = Catalog::descriptors(&Selection::default());
+        let summary = catalog.universal_summary(false);
+        assert_eq!(summary.vehicles_installed, 8);
+        assert_eq!(summary.vehicles_incompatible, 1);
     }
 }

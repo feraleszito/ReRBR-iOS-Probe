@@ -7,6 +7,7 @@ pub mod engine_audio;
 pub use rbr_formats;
 pub use rbr_gameplay;
 pub use rbr_school;
+pub use sha2;
 mod handles;
 pub mod inputs;
 pub mod measure;

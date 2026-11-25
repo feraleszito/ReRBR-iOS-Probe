@@ -13,6 +13,7 @@ pub mod fmod_synth;
 pub mod fsb5_vorbis_setup;
 pub mod gamepad;
 pub mod layout;
+pub mod leaderboard;
 pub(crate) mod loading;
 pub mod menu;
 pub mod ngp_experimental;
@@ -27,6 +28,7 @@ pub mod resource_import;
 pub mod rsf_catalog;
 pub mod school;
 mod ui;
+pub mod universal_importer;
 pub mod vorbis;
 mod worker;
 use crate::{
@@ -131,6 +133,8 @@ pub struct Runtime {
     last_session_snapshot: Option<ngp_experimental::SessionTelemetrySnapshot>,
     pub records: records::RecordStore,
     pub last_record_outcome: Option<records::RecordOutcome>,
+    pub leaderboards: leaderboard::LeaderboardStore,
+    pub last_leaderboard_result: Option<leaderboard::LeaderboardSubmitResult>,
     split_tracker: records::SplitTracker,
     last_finish_splits_ms: Vec<u64>,
     last_run_prev_pb_splits_ms: Option<Vec<u64>>,
@@ -174,7 +178,7 @@ impl Runtime {
         Self::new_for_catalog(PUBLIC_BETA)
     }
 
-    fn new_for_catalog(public_beta: bool) -> Self {
+    pub(crate) fn new_for_catalog(public_beta: bool) -> Self {
         let settings = menu::Settings::load();
         let default_selection = rerbr_content::Selection::default();
         let scanned = Catalog::scan_for_app(&default_selection, public_beta);
@@ -218,7 +222,7 @@ impl Runtime {
         audio::set_menu_music_active(true);
         let saf_init = resource_import::query_android_saf();
         let last_saf_epoch = saf_init.completion_epoch;
-        let android_import = cfg!(target_os = "android").then(|| {
+        let android_import = cfg!(any(target_os = "android", target_os = "ios")).then(|| {
             let health =
                 resource_import::ResourceHealthReport::inspect_env(&content, ngp_experimental);
             resource_import::AndroidImportView {
@@ -226,6 +230,9 @@ impl Runtime {
                 health,
             }
         });
+        let loaded_records = records::RecordStore::load();
+        let loaded_leaderboards =
+            leaderboard::LeaderboardStore::load_with_migration(&loaded_records);
         Self {
             #[cfg(feature = "physics-stage")]
             view: cameras::View::from_index(settings.camera),
@@ -298,8 +305,10 @@ impl Runtime {
             active_school_result: None,
             school_incident_banner: None,
             last_session_snapshot: None,
-            records: records::RecordStore::load(),
+            records: loaded_records,
             last_record_outcome: None,
+            leaderboards: loaded_leaderboards,
+            last_leaderboard_result: None,
             split_tracker: records::SplitTracker::default(),
             last_finish_splits_ms: Vec::new(),
             last_run_prev_pb_splits_ms: None,
@@ -1183,6 +1192,18 @@ impl Runtime {
                     self.menu.career_garage_cursor = 0;
                     self.showroom_camera
                         .set_mode(crate::car::showroom::ShowroomMode::Garage);
+                } else if page == menu::Page::Leaderboards {
+                    self.menu.leaderboard_page = 0;
+                    if self.menu.page == menu::Page::StageDetail {
+                        self.menu.leaderboard_stage = self.menu.inspected_stage;
+                    } else if let Some(pos) = self
+                        .content
+                        .stages
+                        .iter()
+                        .position(|s| s.descriptor.id == self.selection.stage.id)
+                    {
+                        self.menu.leaderboard_stage = pos;
+                    }
                 } else if page == menu::Page::CareerCreate {
                     self.career_create_return_dealership =
                         self.menu.page.dealership_kind().map(|_| self.menu.page);
@@ -3053,7 +3074,10 @@ impl Runtime {
             }
             ImportAndroidFolder => match resource_import::request_open_rbr_folder() {
                 Ok(()) => {
-                    self.message = Some("ABRIENDO SELECTOR DE CARPETAS ANDROID SAF...".into());
+                    self.message = Some(format!(
+                        "ABRIENDO SELECTOR DE CARPETAS ({})...",
+                        resource_import::AndroidImportView::platform_picker_tag()
+                    ));
                 }
                 Err(err) => {
                     self.message = Some(err);
@@ -3061,7 +3085,10 @@ impl Runtime {
             },
             ImportAndroidZip => match resource_import::request_open_rbr_zip() {
                 Ok(()) => {
-                    self.message = Some("ABRIENDO SELECTOR DE PAQUETE .ZIP ANDROID SAF...".into());
+                    self.message = Some(format!(
+                        "ABRIENDO SELECTOR DE PAQUETES .ZIP ({})...",
+                        resource_import::AndroidImportView::platform_picker_tag()
+                    ));
                 }
                 Err(err) => {
                     self.message = Some(err);
@@ -3086,6 +3113,104 @@ impl Runtime {
                         "OFF"
                     }
                 ));
+            }
+            CleanTempImportFiles => {
+                if let Some(doc) =
+                    std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from)
+                {
+                    match universal_importer::clean_temp_part_files(&doc) {
+                        Ok((files, bytes)) => {
+                            self.reload_installed_resources();
+                            self.message = Some(format!(
+                                "LIMPIEZA COMPLETADA: {files} ARCHIVO(S) .PART ({})",
+                                universal_importer::format_bytes(bytes)
+                            ));
+                        }
+                        Err(err) => self.message = Some(err),
+                    }
+                } else {
+                    self.message = Some("DIRECTORIO DOCUMENTS NO DISPONIBLE".into());
+                }
+            }
+            UninstallInspectedStage => {
+                let target_id = self
+                    .content
+                    .stages
+                    .get(self.menu.inspected_stage)
+                    .map(|s| (s.descriptor.id.clone(), s.descriptor.name.clone()));
+                if let Some((sid, sname)) = target_id {
+                    if sid == self.selection.stage.id {
+                        self.message =
+                            Some("NO SE PUEDE LIBERAR EL TRAMO ACTUALMENTE SELECCIONADO".into());
+                    } else if let Some(doc) =
+                        std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from)
+                    {
+                        match universal_importer::remove_stage_assets(
+                            &doc,
+                            &sid,
+                            &self.content.stages,
+                        ) {
+                            Ok(freed) => {
+                                self.reload_installed_resources();
+                                self.message = Some(format!(
+                                    "TRAMO {sname} LIBERADO ({} RECUPERADOS)",
+                                    universal_importer::format_bytes(freed)
+                                ));
+                            }
+                            Err(err) => self.message = Some(err),
+                        }
+                    }
+                }
+            }
+            UninstallInspectedVehicle => {
+                let target_v = self
+                    .content
+                    .vehicles
+                    .get(self.menu.inspected_vehicle)
+                    .map(|v| (v.descriptor.id.clone(), v.descriptor.name.clone()));
+                if let Some((vid, vname)) = target_v {
+                    if vid == self.selection.vehicle.id {
+                        self.message =
+                            Some("NO SE PUEDE LIBERAR EL VEHÍCULO ACTUALMENTE SELECCIONADO".into());
+                    } else if let Some(doc) =
+                        std::env::var_os("RERBR_PROBE_DOCUMENTS").map(std::path::PathBuf::from)
+                    {
+                        match universal_importer::remove_vehicle_assets(
+                            &doc,
+                            &vid,
+                            &self.content.vehicles,
+                        ) {
+                            Ok(freed) => {
+                                self.reload_installed_resources();
+                                self.message = Some(format!(
+                                    "VEHÍCULO {vname} LIBERADO ({} RECUPERADOS)",
+                                    universal_importer::format_bytes(freed)
+                                ));
+                            }
+                            Err(err) => self.message = Some(err),
+                        }
+                    }
+                }
+            }
+            LeaderboardPrevStage => {
+                let len = self.content.stages.len().max(1);
+                self.menu.leaderboard_stage = (self.menu.leaderboard_stage + len - 1) % len;
+                self.menu.leaderboard_page = 0;
+            }
+            LeaderboardNextStage => {
+                let len = self.content.stages.len().max(1);
+                self.menu.leaderboard_stage = (self.menu.leaderboard_stage + 1) % len;
+                self.menu.leaderboard_page = 0;
+            }
+            LeaderboardCycleFilter => {
+                self.menu.leaderboard_filter = self.menu.leaderboard_filter.next();
+                self.menu.leaderboard_page = 0;
+            }
+            LeaderboardPrevPage => {
+                self.menu.leaderboard_page = self.menu.leaderboard_page.saturating_sub(1);
+            }
+            LeaderboardNextPage => {
+                self.menu.leaderboard_page = self.menu.leaderboard_page.saturating_add(1);
             }
         }
     }
@@ -3285,6 +3410,41 @@ impl Runtime {
                     eprintln!("records SAVE ERROR: {err}");
                 }
             }
+            let (sim_steps, stage_len_m) = {
+                let st = self.worker.state.lock().unwrap();
+                let steps = (st.timing.sim_elapsed_seconds.max(0.0) * 720.0).round() as u64;
+                let dist = (st.timing.finish_distance - st.timing.start_distance)
+                    .max(0.0)
+                    .round() as u32;
+                (steps, dist)
+            };
+            let pilot_name = self
+                .career
+                .profile
+                .as_ref()
+                .map(|p| p.pilot_name.clone())
+                .unwrap_or_else(|| self.pilot_draft_name.clone());
+            let car_category = self
+                .selection
+                .vehicle
+                .category
+                .clone()
+                .unwrap_or_else(|| "Rally".into());
+            let lb_res = self
+                .leaderboards
+                .submit(&leaderboard::LeaderboardSubmission {
+                    run: submission.clone(),
+                    pilot_name,
+                    car_category,
+                    sim_steps,
+                    stage_length_m: stage_len_m,
+                });
+            if lb_res.accepted {
+                if let Err(err) = self.leaderboards.save() {
+                    eprintln!("leaderboards SAVE ERROR: {err}");
+                }
+            }
+            self.last_leaderboard_result = Some(lb_res);
             if self.active_career_stage {
                 let stage_id = self.selection.stage.id.clone();
                 let vehicle_id = self.selection.vehicle.id.clone();
@@ -3944,6 +4104,8 @@ impl Runtime {
             selected_career_difficulty: self.selected_career_difficulty,
             selected_championship_kind: self.selected_championship_kind,
             selected_service_tyre: self.selected_service_tyre,
+            leaderboards: Some(&self.leaderboards),
+            last_leaderboard_result: self.last_leaderboard_result.as_ref(),
         }
     }
     fn save_active_career(&mut self) {
@@ -3993,7 +4155,7 @@ impl Runtime {
         size: (u32, u32),
     ) {
         self.drawable_size = size;
-        if cfg!(target_os = "android") {
+        if cfg!(any(target_os = "android", target_os = "ios")) {
             let saf = resource_import::query_android_saf();
             let completed = saf.completion_epoch != self.last_saf_epoch;
             if let Some(imp) = self.android_import.as_mut() {

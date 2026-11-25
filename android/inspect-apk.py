@@ -43,6 +43,9 @@ with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory() as tmp:
         "Java_org_rerbr_mobile_GameActivity_safeArea",
         "Java_org_rerbr_mobile_GameActivity_importStatus",
         "Java_org_rerbr_mobile_GameActivity_persistedUriState",
+        "Java_org_rerbr_mobile_GameActivity_nativeNormalizeRbrRel",
+        "Java_org_rerbr_mobile_GameActivity_nativeCheckPreserveCoreFile",
+        "Java_org_rerbr_mobile_GameActivity_nativeImportZipFd",
         "Java_org_rerbr_mobile_GameAudio_render",
     ):
         if symbol not in symbols:

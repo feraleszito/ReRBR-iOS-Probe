@@ -229,6 +229,143 @@ unsafe extern "system" fn Java_org_rerbr_mobile_GameActivity_persistedUriState(
     saf.persisted_label = label_str;
 }
 
+unsafe fn rust_to_jstring(env: *mut JNIEnv, text: &str) -> jstring {
+    if env.is_null() {
+        return std::ptr::null_mut();
+    }
+    let Ok(cstr) = std::ffi::CString::new(text) else {
+        return std::ptr::null_mut();
+    };
+    let fns = &**env;
+    (fns.NewStringUTF.unwrap())(env, cstr.as_ptr())
+}
+
+#[no_mangle]
+unsafe extern "system" fn Java_org_rerbr_mobile_GameActivity_nativeNormalizeRbrRel(
+    env: *mut JNIEnv,
+    _: jclass,
+    raw_path: jstring,
+) -> jstring {
+    #[cfg(feature = "physics-drive")]
+    {
+        let input = jstring_to_rust(env, raw_path);
+        if let Some(canon) = crate::driving::universal_importer::normalize_rbr_rel_path(&input) {
+            return rust_to_jstring(env, &canon);
+        }
+    }
+    #[cfg(not(feature = "physics-drive"))]
+    {
+        let _ = (env, raw_path);
+    }
+    std::ptr::null_mut()
+}
+
+#[no_mangle]
+unsafe extern "system" fn Java_org_rerbr_mobile_GameActivity_nativeCheckPreserveCoreFile(
+    env: *mut JNIEnv,
+    _: jclass,
+    dest_rbr_dir: jstring,
+    canonical_rel: jstring,
+    candidate_part_path: jstring,
+) -> jstring {
+    #[cfg(feature = "physics-drive")]
+    {
+        let rbr_dir = jstring_to_rust(env, dest_rbr_dir);
+        let canon = jstring_to_rust(env, canonical_rel);
+        let part = jstring_to_rust(env, candidate_part_path);
+        if let Some(note) = crate::driving::universal_importer::should_preserve_existing_core_file(
+            std::path::Path::new(&rbr_dir),
+            &canon,
+            std::path::Path::new(&part),
+        ) {
+            return rust_to_jstring(env, &note);
+        }
+    }
+    #[cfg(not(feature = "physics-drive"))]
+    {
+        let _ = (env, dest_rbr_dir, canonical_rel, candidate_part_path);
+    }
+    std::ptr::null_mut()
+}
+
+#[no_mangle]
+unsafe extern "system" fn Java_org_rerbr_mobile_GameActivity_nativeImportZipFd(
+    env: *mut JNIEnv,
+    _: jclass,
+    detached_fd: jint,
+    label: jstring,
+    dest_documents_dir: jstring,
+) -> jboolean {
+    if detached_fd < 0 {
+        return 0;
+    }
+    #[cfg(feature = "physics-drive")]
+    {
+        use std::io::{Seek, SeekFrom};
+        use std::os::fd::FromRawFd;
+        let mut file = std::fs::File::from_raw_fd(detached_fd);
+        if file.seek(SeekFrom::End(0)).is_err() || file.seek(SeekFrom::Start(0)).is_err() {
+            // FD remoto no buscable (pipe): `file` cierra el FD al salir y Java usa respaldo por stream.
+            return 0;
+        }
+        let label_str = jstring_to_rust(env, label);
+        let docs_str = jstring_to_rust(env, dest_documents_dir);
+        let res = crate::driving::universal_importer::import_zip_reader_into_documents(
+            file,
+            &label_str,
+            std::path::Path::new(&docs_str),
+            &mut |prog| {
+                {
+                    let mut saf = SAF.lock().unwrap();
+                    saf.state = 1;
+                    saf.files_done = prog.files_done;
+                    saf.files_total = prog.files_total;
+                    saf.bytes_done = prog.bytes_done;
+                    saf.detail = prog.detail;
+                }
+                if let Some(waker) = WAKER.get() {
+                    waker.wake();
+                }
+            },
+        );
+        match res {
+            Ok(summary) => {
+                {
+                    let mut saf = SAF.lock().unwrap();
+                    saf.state = 2;
+                    saf.files_done = summary.total_relevant_files();
+                    saf.files_total = summary.total_relevant_files();
+                    saf.bytes_done = summary.total_relevant_bytes();
+                    saf.detail = summary.headline_es();
+                    saf.completion_epoch = saf.completion_epoch.wrapping_add(1);
+                }
+                if let Some(waker) = WAKER.get() {
+                    waker.wake();
+                }
+                1
+            }
+            Err(err) => {
+                {
+                    let mut saf = SAF.lock().unwrap();
+                    saf.state = 3;
+                    saf.detail = err;
+                }
+                if let Some(waker) = WAKER.get() {
+                    waker.wake();
+                }
+                1
+            }
+        }
+    }
+    #[cfg(not(feature = "physics-drive"))]
+    {
+        use std::os::fd::FromRawFd;
+        let _ = (env, label, dest_documents_dir);
+        let _ = std::fs::File::from_raw_fd(detached_fd);
+        0
+    }
+}
+
 #[cfg(feature = "physics-drive")]
 #[no_mangle]
 unsafe extern "system" fn Java_org_rerbr_mobile_GameAudio_render(

@@ -7,35 +7,31 @@ import android.content.SharedPreferences;
 import android.content.UriPermission;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 /**
- * Selector e importador selectivo de recursos RBR mediante Storage Access Framework (SAF).
+ * Adaptador Android Storage Access Framework (SAF) sobre la capa universal de importación en Rust.
  *
- * - Nunca asume que un content:// Uri sea una ruta POSIX del sistema de archivos.
- * - Conserva permisos de lectura persistentes (takePersistableUriPermission).
- * - Copia unicamente los archivos necesarios al almacenamiento privado de la app (files/RBR),
- *   evitando copiar los ~10,54 GB de una instalacion completa cuando hay decenas de coches/tramos.
- * - Permite fusion incremental (por ejemplo, importar carpeta RBR y despues carpeta NGP 7.4).
+ * - Nunca asume que un content:// Uri sea una ruta POSIX convencional.
+ * - Conserva permisos persistentes de lectura (takePersistableUriPermission).
+ * - Los archivos .zip se delegan al extractor Rust compartido (`nativeImportZipFd`) mediante
+ *   descriptor de archivo (`ParcelFileDescriptor`), con respaldo por stream si el proveedor es remoto.
+ * - Las reglas de rutas permitidas (`nativeNormalizeRbrRel`) y la protección de NGP 7.4.778
+ *   (`nativeCheckPreserveCoreFile`) viven íntegramente en Rust para paridad 1:1 con iOS.
  */
 final class SafResourceImporter {
     static final int STATE_IDLE = 0;
@@ -46,7 +42,6 @@ final class SafResourceImporter {
     private static final String PREFS_NAME = "org.rerbr.mobile.saf";
     private static final String KEY_TREE_URI = "tree_uri";
     private static final String KEY_TREE_LABEL = "tree_label";
-    private static final long MAX_ZIP_IMPORT_BYTES = 900L * 1024L * 1024L;
 
     interface Listener {
         void onStatus(int state, int filesDone, int filesTotal, long bytesDone, String detail);
@@ -92,10 +87,13 @@ final class SafResourceImporter {
         this.listener = listener;
     }
 
-    File targetRbrRoot() {
+    File targetDocumentsRoot() {
         File ext = context.getExternalFilesDir(null);
-        File base = ext != null ? ext : context.getFilesDir();
-        return new File(base, "RBR");
+        return ext != null ? ext : context.getFilesDir();
+    }
+
+    File targetRbrRoot() {
+        return new File(targetDocumentsRoot(), "RBR");
     }
 
     void syncPersistedState() {
@@ -131,13 +129,14 @@ final class SafResourceImporter {
         startTreeImport(treeUri, label);
     }
 
-    void handleZipPicked(Uri docUri, int intentFlags) {
-        if (docUri == null) {
+    void handleZipsPicked(List<Uri> docUris, int intentFlags) {
+        if (docUris == null || docUris.isEmpty()) {
             return;
         }
-        takePersistableRead(docUri, intentFlags);
-        String label = queryDisplayName(docUri);
-        startZipImport(docUri, label);
+        for (Uri u : docUris) {
+            takePersistableRead(u, intentFlags);
+        }
+        startZipBatchImport(new ArrayList<>(docUris));
     }
 
     void reimportPersistedTree() {
@@ -221,13 +220,13 @@ final class SafResourceImporter {
         worker.start();
     }
 
-    private void startZipImport(Uri zipUri, String label) {
+    private void startZipBatchImport(List<Uri> zipUris) {
         if (!running.compareAndSet(false, true)) {
             return;
         }
         Thread worker = new Thread(() -> {
             try {
-                runZipImport(zipUri, label);
+                runZipBatchImport(zipUris);
             } catch (Exception e) {
                 String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
                 listener.onStatus(STATE_ERROR, 0, 0, 0L, "ERROR ZIP SAF: " + msg);
@@ -241,86 +240,32 @@ final class SafResourceImporter {
 
     private void runTreeImport(Uri treeUri, String label) throws IOException {
         ContentResolver resolver = context.getContentResolver();
-        listener.onStatus(STATE_RUNNING, 0, 0, 0L, "ANALIZANDO ÁRBOL SAF: " + label);
+        listener.onStatus(STATE_RUNNING, 0, 0, 0L, "ANALIZANDO ÁRBOL SAF UNIVERSAL: " + label);
 
         String treeRootDocId = DocumentsContract.getTreeDocumentId(treeUri);
-        String rbrDocId = locateLogicalRbrRoot(resolver, treeUri, treeRootDocId);
-        if (rbrDocId == null) {
+        RootSelection rootSel = locateLogicalRoot(resolver, treeUri, treeRootDocId);
+        if (rootSel == null) {
             listener.onStatus(
                 STATE_ERROR,
                 0,
                 0,
                 0L,
-                "LA CARPETA NO CONTIENE RECURSOS RBR RECONOCIBLES (Cars/, Maps/, Plugins/NGP.dll, physics.rbz)"
+                "LA CARPETA NO CONTIENE RECURSOS RBR/RSF RECONOCIBLES (Cars/, Maps/, Plugins/NGP.dll, physics.rbz)"
             );
             return;
         }
 
-        List<DocNode> rootChildren = listChildren(resolver, treeUri, rbrDocId);
         List<CopyTask> plan = new ArrayList<>();
         Set<String> plannedLower = new HashSet<>();
-
-        // 1. Archivos base compartidos y NGP 7.4
-        for (String topFile : new String[] {"physics.rbz", "misc.rbz", "Scripts.rbz", "season.dat"}) {
-            DocNode n = findIgnoreCase(rootChildren, topFile);
-            if (n != null && !n.isDir()) {
-                addTask(plan, plannedLower, treeUri, n, topFile);
-            }
-        }
-        DocNode rootNgp = findIgnoreCase(rootChildren, "NGP.dll");
-        if (rootNgp != null && !rootNgp.isDir()) {
-            addTask(plan, plannedLower, treeUri, rootNgp, "Plugins/NGP.dll");
-        }
-        DocNode pluginsDir = findDirIgnoreCase(rootChildren, "Plugins");
-        if (pluginsDir != null) {
-            DocNode ngp = findIgnoreCase(listChildren(resolver, treeUri, pluginsDir.docId), "NGP.dll");
-            if (ngp != null && !ngp.isDir()) {
-                addTask(plan, plannedLower, treeUri, ngp, "Plugins/NGP.dll");
-            }
-        }
-
-        // Espectadores (.sgs)
-        DocNode sgsDir = findDirIgnoreCase(rootChildren, "Sgs");
-        if (sgsDir != null) {
-            for (DocNode s : listChildren(resolver, treeUri, sgsDir.docId)) {
-                String low = s.name.toLowerCase(Locale.ROOT);
-                if (!s.isDir() && low.contains("spectator_") && low.endsWith(".sgs")) {
-                    addTask(plan, plannedLower, treeUri, s, "Sgs/" + s.name);
-                }
-            }
-        }
-
-        // Atlas de iconos visuales de copiloto (ligero: ~660 KB en lugar de todo Generic/)
-        DocNode genericDir = findDirIgnoreCase(rootChildren, "Generic");
-        if (genericDir != null) {
-            List<DocNode> genKids = listChildren(resolver, treeUri, genericDir.docId);
-            for (String res : new String[] {"1280", "1024", "800", "640"}) {
-                DocNode bnk = findIgnoreCase(genKids, "PC_Generic_" + res + ".bnk");
-                DocNode p01 = findIgnoreCase(genKids, "PC_" + res + "_01.dds");
-                DocNode p05 = findIgnoreCase(genKids, "PC_" + res + "_05.dds");
-                if (bnk != null && p01 != null && p05 != null) {
-                    addTask(plan, plannedLower, treeUri, bnk, "Generic/" + bnk.name);
-                    addTask(plan, plannedLower, treeUri, p01, "Generic/PC_" + res + "_01.dds");
-                    addTask(plan, plannedLower, treeUri, p05, "Generic/PC_" + res + "_05.dds");
-                    break;
-                }
-            }
-        }
-
-        // 2. Seleccion inteligente de tramo (evita copiar >6 GB de Maps si es instalacion completa)
-        DocNode mapsDir = findDirIgnoreCase(rootChildren, "Maps");
-        if (mapsDir == null) {
-            DocNode harwoodDir = findDirIgnoreCase(rootChildren, "Harwood");
-            if (harwoodDir != null) {
-                mapsDir = findDirIgnoreCase(listChildren(resolver, treeUri, harwoodDir.docId), "Maps");
-            }
-        }
-        if (mapsDir != null) {
-            planStageFiles(resolver, treeUri, mapsDir, plan, plannedLower);
-        }
-
-        // 3. Seleccion inteligente de vehiculo + fisicas NGP6 + audio FMOD / .eng
-        planVehicleFiles(resolver, treeUri, rootChildren, plan, plannedLower);
+        collectUniversalTreeTasks(
+            resolver,
+            treeUri,
+            rootSel.docId,
+            rootSel.virtualPrefix,
+            0,
+            plan,
+            plannedLower
+        );
 
         if (plan.isEmpty()) {
             listener.onStatus(
@@ -328,7 +273,7 @@ final class SafResourceImporter {
                 0,
                 0,
                 0L,
-                "NO SE ENCONTRARON ARCHIVOS ÚTILES DE RBR EN LA CARPETA SELECCIONADA"
+                "NO SE ENCONTRARON ARCHIVOS ÚTILES DE RBR/RSF EN LA CARPETA SELECCIONADA"
             );
             return;
         }
@@ -338,442 +283,192 @@ final class SafResourceImporter {
             throw new IOException("No se pudo crear " + destRoot.getAbsolutePath());
         }
 
-        long bytesCopied = 0L;
-        int skippedUpToDate = 0;
+        long bytesProcessed = 0L;
+        int copiedFiles = 0;
+        int reusedFiles = 0;
+        int protectedFiles = 0;
         int total = plan.size();
         byte[] buffer = new byte[128 * 1024];
 
         for (int i = 0; i < total; i++) {
             CopyTask task = plan.get(i);
-            File dst = safeResolveDest(destRoot, task.destRel);
+            File dst = resolveCasePreservingDest(destRoot, task.destRel);
             if (dst == null) {
                 continue;
             }
-            boolean smallConfig = task.destRel.endsWith(".ini") || task.destRel.endsWith(".json") || task.destRel.endsWith(".lsp");
-            if (!smallConfig && dst.isFile() && task.size > 0 && dst.length() == task.size) {
-                bytesCopied += task.size;
-                skippedUpToDate++;
-                listener.onStatus(STATE_RUNNING, i + 1, total, bytesCopied, "VERIFICADO: " + task.destRel);
+            boolean isCore = task.destRel.equalsIgnoreCase("Plugins/NGP.dll")
+                || task.destRel.equalsIgnoreCase("physics.rbz");
+            boolean isSmallCfg = task.destRel.endsWith(".ini")
+                || task.destRel.endsWith(".json")
+                || task.destRel.endsWith(".lsp");
+            if (!isCore && !isSmallCfg && dst.isFile() && task.size > 0 && dst.length() == task.size) {
+                bytesProcessed += task.size;
+                reusedFiles++;
+                listener.onStatus(STATE_RUNNING, i + 1, total, bytesProcessed, "REUTILIZADO: " + task.destRel);
                 continue;
             }
-            listener.onStatus(STATE_RUNNING, i, total, bytesCopied, "COPIANDO: " + task.destRel);
-            bytesCopied += copyUriAtomically(resolver, task.uri, dst, buffer);
-            listener.onStatus(STATE_RUNNING, i + 1, total, bytesCopied, "COPIADO: " + task.destRel);
+
+            listener.onStatus(STATE_RUNNING, i, total, bytesProcessed, "IMPORTANDO: " + task.destRel);
+            CopyOutcome out = copyUriWithCoreGuard(resolver, task.uri, destRoot, dst, task.destRel, buffer);
+            if (out.protectedNote != null) {
+                protectedFiles++;
+                listener.onStatus(STATE_RUNNING, i + 1, total, bytesProcessed, out.protectedNote);
+            } else if (out.reused) {
+                reusedFiles++;
+                bytesProcessed += out.bytes;
+                listener.onStatus(STATE_RUNNING, i + 1, total, bytesProcessed, "REUTILIZADO: " + task.destRel);
+            } else {
+                copiedFiles++;
+                bytesProcessed += out.bytes;
+                listener.onStatus(STATE_RUNNING, i + 1, total, bytesProcessed, "INSTALADO: " + task.destRel);
+            }
         }
 
         String summary = String.format(
             Locale.US,
-            "IMPORTACIÓN SAF COMPLETADA: %d ARCHIVOS (%.1f MiB, %d REUTILIZADOS)",
-            total,
-            bytesCopied / (1024.0 * 1024.0),
-            skippedUpToDate
+            "IMPORTACIÓN SAF COMPLETADA: %d NUEVOS · %d REUTILIZADOS · %d PROTEGIDOS (%.1f MiB)",
+            copiedFiles,
+            reusedFiles,
+            protectedFiles,
+            bytesProcessed / (1024.0 * 1024.0)
         );
-        listener.onStatus(STATE_DONE, total, total, bytesCopied, summary);
+        listener.onStatus(STATE_DONE, total, total, bytesProcessed, summary);
     }
 
-    private void planStageFiles(
-            ContentResolver resolver,
-            Uri treeUri,
-            DocNode mapsDir,
-            List<CopyTask> plan,
-            Set<String> plannedLower) {
-        List<DocNode> kids = listChildren(resolver, treeUri, mapsDir.docId);
-        DocNode texMap = findIgnoreCase(kids, "TextureFilenameMap.dat");
-        if (texMap != null && !texMap.isDir()) {
-            addTask(plan, plannedLower, treeUri, texMap, "Maps/TextureFilenameMap.dat");
-        }
-
-        List<String> lbsStems = new ArrayList<>();
-        for (DocNode k : kids) {
-            if (!k.isDir() && k.name.toLowerCase(Locale.ROOT).endsWith(".lbs")) {
-                lbsStems.add(k.name.substring(0, k.name.length() - 4));
-            }
-        }
-        if (lbsStems.isEmpty()) {
-            return;
-        }
-
-        if (lbsStems.size() <= 2) {
-            for (DocNode k : kids) {
-                if (!k.isDir() && isStageAssetName(k.name)) {
-                    addTask(plan, plannedLower, treeUri, k, "Maps/" + k.name);
-                }
-            }
-            return;
-        }
-
-        // Instalacion grande: elegir 1 tramo validado completo (evita copiar gigabytes de Maps/)
-        String chosenStem = null;
-        String[] preferred = new String[] {"track-20_O", "track-22_O", "track-41_N", "track-46_O"};
-        for (String cand : preferred) {
-            if (hasCompleteStage(kids, cand)) {
-                chosenStem = cand;
-                break;
-            }
-        }
-        if (chosenStem == null) {
-            for (String cand : lbsStems) {
-                if (hasCompleteStage(kids, cand)) {
-                    chosenStem = cand;
-                    break;
-                }
-            }
-        }
-        if (chosenStem == null) {
-            chosenStem = lbsStems.get(0);
-        }
-
-        for (String ext : new String[] {".lbs", ".col", ".trk", ".mat", ".dls", ".fnc", ".ini", "_textures.rbz"}) {
-            DocNode f = findIgnoreCase(kids, chosenStem + ext);
-            if (f != null && !f.isDir()) {
-                addTask(plan, plannedLower, treeUri, f, "Maps/" + f.name);
-            }
-        }
-        // Incluir archivos *_textures.rbz hermanos del mismo mapa (ej. track-20_N_textures.rbz para track-20_O)
-        int underscore = chosenStem.lastIndexOf('_');
-        if (underscore > 0) {
-            String mapPrefix = (chosenStem.substring(0, underscore) + "_").toLowerCase(Locale.ROOT);
-            for (DocNode k : kids) {
-                String low = k.name.toLowerCase(Locale.ROOT);
-                if (!k.isDir() && low.startsWith(mapPrefix) && low.endsWith("_textures.rbz")) {
-                    addTask(plan, plannedLower, treeUri, k, "Maps/" + k.name);
-                }
-            }
-        }
-    }
-
-    private boolean hasCompleteStage(List<DocNode> kids, String stem) {
-        for (String ext : new String[] {".lbs", ".col", ".trk", ".mat", ".dls", ".fnc", ".ini", "_textures.rbz"}) {
-            DocNode f = findIgnoreCase(kids, stem + ext);
-            if (f == null || f.isDir()) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private boolean isStageAssetName(String name) {
-        String low = name.toLowerCase(Locale.ROOT);
-        return low.equals("texturefilenamemap.dat")
-            || low.endsWith(".lbs")
-            || low.endsWith(".col")
-            || low.endsWith(".trk")
-            || low.endsWith(".mat")
-            || low.endsWith(".dls")
-            || low.endsWith(".fnc")
-            || low.endsWith(".ini")
-            || low.endsWith("_textures.rbz");
-    }
-
-    private void planVehicleFiles(
-            ContentResolver resolver,
-            Uri treeUri,
-            List<DocNode> rootChildren,
-            List<CopyTask> plan,
-            Set<String> plannedLower) {
-        DocNode carsDir = findDirIgnoreCase(rootChildren, "Cars");
-        DocNode rsfDataDir = findDirIgnoreCase(rootChildren, "rsfdata");
-        DocNode audioFmodDir = findDirIgnoreCase(rootChildren, "AudioFMOD");
-        DocNode audioDir = findDirIgnoreCase(rootChildren, "Audio");
-
-        List<DocNode> carsKids = carsDir != null ? listChildren(resolver, treeUri, carsDir.docId) : new ArrayList<>();
-        DocNode carsIni = findIgnoreCase(carsKids, "Cars.ini");
-        if (carsIni != null && !carsIni.isDir()) {
-            addTask(plan, plannedLower, treeUri, carsIni, "Cars/Cars.ini");
-        }
-
-        List<DocNode> carFolders = new ArrayList<>();
-        for (DocNode c : carsKids) {
-            if (c.isDir()) {
-                carFolders.add(c);
-            }
-        }
-
-        DocNode rsfCarsDir = null;
-        DocNode rsfCacheDir = null;
-        List<DocNode> rsfCacheKids = new ArrayList<>();
-        if (rsfDataDir != null) {
-            List<DocNode> rsfKids = listChildren(resolver, treeUri, rsfDataDir.docId);
-            rsfCarsDir = findDirIgnoreCase(rsfKids, "cars");
-            rsfCacheDir = findDirIgnoreCase(rsfKids, "cache");
-            if (rsfCacheDir != null) {
-                rsfCacheKids = listChildren(resolver, treeUri, rsfCacheDir.docId);
-                for (String cf : new String[] {"cars.json", "carmodels.json", "cargroups.json", "audiobank.ini"}) {
-                    DocNode node = findIgnoreCase(rsfCacheKids, cf);
-                    if (node != null && !node.isDir()) {
-                        addTask(plan, plannedLower, treeUri, node, "rsfdata/cache/" + cf);
-                    }
-                }
-            }
-        }
-
-        List<DocNode> rsfPackKids = rsfCarsDir != null ? listChildren(resolver, treeUri, rsfCarsDir.docId) : new ArrayList<>();
-        List<DocNode> fmodKids = audioFmodDir != null ? listChildren(resolver, treeUri, audioFmodDir.docId) : new ArrayList<>();
-
-        DocNode audioCarsDir = null;
-        List<DocNode> audioCarsKids = new ArrayList<>();
-        if (audioDir != null) {
-            audioCarsDir = findDirIgnoreCase(listChildren(resolver, treeUri, audioDir.docId), "Cars");
-            if (audioCarsDir != null) {
-                audioCarsKids = listChildren(resolver, treeUri, audioCarsDir.docId);
-                DocNode acIni = findIgnoreCase(audioCarsKids, "Cars.ini");
-                if (acIni != null && !acIni.isDir()) {
-                    addTask(plan, plannedLower, treeUri, acIni, "Audio/Cars/Cars.ini");
-                }
-            }
-        }
-
-        // Paquete minimo (<= 2 carpetas de coches): copiar todos los coches presentes en el paquete
-        if (carFolders.size() <= 2) {
-            for (DocNode folder : carFolders) {
-                addCarFolderTasks(resolver, treeUri, folder, plan, plannedLower);
-            }
-            if (rsfPackKids.size() <= 4) {
-                for (DocNode pk : rsfPackKids) {
-                    addRsfPackTasks(resolver, treeUri, pk, plan, plannedLower);
-                }
-            }
-            if (fmodKids.size() <= 8) {
-                for (DocNode bk : fmodKids) {
-                    if (!bk.isDir() && bk.name.toLowerCase(Locale.ROOT).endsWith(".bank")) {
-                        addTask(plan, plannedLower, treeUri, bk, "AudioFMOD/" + bk.name);
-                    }
-                }
-            }
-            if (audioCarsKids.size() <= 8) {
-                for (DocNode ek : audioCarsKids) {
-                    if (!ek.isDir() && ek.name.toLowerCase(Locale.ROOT).endsWith(".eng")) {
-                        addTask(plan, plannedLower, treeUri, ek, "Audio/Cars/" + ek.name);
-                    }
-                }
-            }
-            return;
-        }
-
-        // Instalacion grande (>2 coches): elegir 1 coche conducible completo sin copiar gigabytes de Cars/
-        DocNode focusFolder = findDirIgnoreCase(carFolders, "FORD_FOCUS_2006");
-        DocNode focusPack = findPackIgnoreCase(rsfPackKids, "Ford_Focus_Mk_II_RS_WRC_2006_ngp6");
-        DocNode focusBank = findIgnoreCase(fmodKids, "Focus_Mk2_WRC.bank");
-        if (focusFolder != null && focusPack != null) {
-            addCarFolderTasks(resolver, treeUri, focusFolder, plan, plannedLower);
-            addRsfPackTasks(resolver, treeUri, focusPack, plan, plannedLower);
-            addFmodBankAndStrings(treeUri, fmodKids, focusBank != null ? focusBank.name : null, plan, plannedLower);
-            return;
-        }
-
-        // Buscar cualquier coche RSF NGP6 completo usando rsfdata/cache/cars.json + carmodels.json + audiobank.ini
-        if (tryPlanFirstCompleteRsfCar(
-                resolver, treeUri, rsfCacheKids, carFolders, rsfPackKids, fmodKids, plan, plannedLower)) {
-            return;
-        }
-
-        // Fallback a coche original retail 1.02
-        String[][] retailCandidates = new String[][] {
-            {"impreza03", "subaru.eng"},
-            {"TOYOTA_COROLLA", "corolla.eng"},
-            {"CITROEN_XSARA", "xsara.eng"},
-            {"PEUGEOT_206", "206.eng"},
-            {"MITSUBISHI_LANCER", "lancer.eng"},
-            {"MG_ZR", "mg_zr.eng"},
-            {"HYUNDAI_ACCENT", "accent.eng"},
-            {"SUBARU_IMPREZA_2000", "impreza2000.eng"},
-        };
-        for (String[] rc : retailCandidates) {
-            DocNode cf = findDirIgnoreCase(carFolders, rc[0]);
-            if (cf != null) {
-                addCarFolderTasks(resolver, treeUri, cf, plan, plannedLower);
-                DocNode eng = findIgnoreCase(audioCarsKids, rc[1]);
-                if (eng != null && !eng.isDir()) {
-                    addTask(plan, plannedLower, treeUri, eng, "Audio/Cars/" + eng.name);
-                }
-                return;
-            }
-        }
-    }
-
-    private boolean tryPlanFirstCompleteRsfCar(
-            ContentResolver resolver,
-            Uri treeUri,
-            List<DocNode> cacheKids,
-            List<DocNode> carFolders,
-            List<DocNode> rsfPackKids,
-            List<DocNode> fmodKids,
-            List<CopyTask> plan,
-            Set<String> plannedLower) {
-        DocNode carsJsonNode = findIgnoreCase(cacheKids, "cars.json");
-        DocNode modelsJsonNode = findIgnoreCase(cacheKids, "carmodels.json");
-        if (carsJsonNode == null || modelsJsonNode == null) {
-            return false;
-        }
-        try {
-            String carsText = readSmallUtf8(resolver, DocumentsContract.buildDocumentUriUsingTree(treeUri, carsJsonNode.docId));
-            String modelsText = readSmallUtf8(resolver, DocumentsContract.buildDocumentUriUsingTree(treeUri, modelsJsonNode.docId));
-            Map<String, String> audioMap = new HashMap<>();
-            DocNode audioIniNode = findIgnoreCase(cacheKids, "audiobank.ini");
-            if (audioIniNode != null) {
-                String iniText = readSmallUtf8(resolver, DocumentsContract.buildDocumentUriUsingTree(treeUri, audioIniNode.docId));
-                for (String line : iniText.split("\n")) {
-                    int eq = line.indexOf('=');
-                    if (eq > 0 && !line.trim().startsWith(";") && !line.trim().startsWith("[")) {
-                        audioMap.put(line.substring(0, eq).trim().toLowerCase(Locale.ROOT), line.substring(eq + 1).trim());
-                    }
-                }
-            }
-            JSONArray modelsArr = new JSONArray(modelsText);
-            Map<String, String> modelFolderById = new HashMap<>();
-            for (int i = 0; i < modelsArr.length(); i++) {
-                JSONObject m = modelsArr.optJSONObject(i);
-                if (m != null) {
-                    String path = m.optString("path", "").replace('\\', '/');
-                    int slash = path.lastIndexOf('/');
-                    String folder = slash >= 0 ? path.substring(slash + 1) : path;
-                    modelFolderById.put(String.valueOf(m.opt("id")), folder);
-                }
-            }
-            JSONArray carsArr = new JSONArray(carsText);
-            for (int i = 0; i < carsArr.length(); i++) {
-                JSONObject c = carsArr.optJSONObject(i);
-                if (c == null) {
-                    continue;
-                }
-                String packName = c.optString("physics_Revision", c.optString("path", "")).trim();
-                String folderName = modelFolderById.get(String.valueOf(c.opt("carmodel_id")));
-                if (packName.isEmpty() || folderName == null || folderName.isEmpty()) {
-                    continue;
-                }
-                DocNode cf = findDirIgnoreCase(carFolders, folderName);
-                DocNode pk = findPackIgnoreCase(rsfPackKids, packName);
-                if (cf == null || pk == null) {
-                    continue;
-                }
-                String bankRaw = audioMap.get(packName.toLowerCase(Locale.ROOT));
-                if (bankRaw != null && !bankRaw.isEmpty()) {
-                    String bankName = bankRaw.toLowerCase(Locale.ROOT).endsWith(".bank") ? bankRaw : bankRaw + ".bank";
-                    if (findIgnoreCase(fmodKids, bankName) == null) {
-                        continue;
-                    }
-                    addCarFolderTasks(resolver, treeUri, cf, plan, plannedLower);
-                    addRsfPackTasks(resolver, treeUri, pk, plan, plannedLower);
-                    addFmodBankAndStrings(treeUri, fmodKids, bankName, plan, plannedLower);
-                    return true;
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return false;
-    }
-
-    private void addCarFolderTasks(
-            ContentResolver resolver,
-            Uri treeUri,
-            DocNode carFolder,
-            List<CopyTask> plan,
-            Set<String> plannedLower) {
-        List<DocNode> kids = listChildren(resolver, treeUri, carFolder.docId);
-        for (DocNode k : kids) {
-            String low = k.name.toLowerCase(Locale.ROOT);
-            if (!k.isDir() && (low.endsWith(".sgc") || low.endsWith(".ini"))) {
-                addTask(plan, plannedLower, treeUri, k, "Cars/" + carFolder.name + "/" + k.name);
-            } else if (k.isDir() && low.equals("textures")) {
-                for (DocNode t : listChildren(resolver, treeUri, k.docId)) {
-                    if (!t.isDir() && t.name.toLowerCase(Locale.ROOT).endsWith(".dds")) {
-                        addTask(plan, plannedLower, treeUri, t, "Cars/" + carFolder.name + "/textures/" + t.name);
-                    }
-                }
-            }
-        }
-    }
-
-    private void addRsfPackTasks(
-            ContentResolver resolver,
-            Uri treeUri,
-            DocNode packNode,
-            List<CopyTask> plan,
-            Set<String> plannedLower) {
-        if (!packNode.isDir()) {
-            addTask(plan, plannedLower, treeUri, packNode, "rsfdata/cars/" + packNode.name);
-            return;
-        }
-        addRecursiveDir(resolver, treeUri, packNode.docId, "rsfdata/cars/" + packNode.name, 3, plan, plannedLower);
-    }
-
-    private void addRecursiveDir(
+    private void collectUniversalTreeTasks(
             ContentResolver resolver,
             Uri treeUri,
             String dirDocId,
             String relPrefix,
-            int maxDepth,
+            int depth,
             List<CopyTask> plan,
             Set<String> plannedLower) {
-        if (maxDepth < 0) {
+        if (depth > 6) {
             return;
         }
-        for (DocNode k : listChildren(resolver, treeUri, dirDocId)) {
-            if (k.isDir()) {
-                addRecursiveDir(resolver, treeUri, k.docId, relPrefix + "/" + k.name, maxDepth - 1, plan, plannedLower);
+        List<DocNode> children = listChildren(resolver, treeUri, dirDocId);
+        for (DocNode child : children) {
+            String name = child.name;
+            String low = name.toLowerCase(Locale.ROOT);
+            if (child.isDir()) {
+                // Podar directorios irrelevantes antes de hacer consultas SAF adicionales
+                if (depth == 0 && (relPrefix == null || relPrefix.isEmpty())) {
+                    if (!low.equals("plugins")
+                            && !low.equals("cars")
+                            && !low.equals("maps")
+                            && !low.equals("harwood")
+                            && !low.equals("rsfdata")
+                            && !low.equals("audiofmod")
+                            && !low.equals("audio")
+                            && !low.equals("sgs")
+                            && !low.equals("generic")) {
+                        continue;
+                    }
+                }
+                String curRel = (relPrefix == null || relPrefix.isEmpty()) ? name : relPrefix + "/" + name;
+                String curLow = curRel.toLowerCase(Locale.ROOT);
+                // Dentro de Cars/<Modelo>/ solo existe `textures/` útil para el motor 3D (evita miles de queries en `carparts/` o `skins/`)
+                if (curLow.startsWith("cars/")) {
+                    int slashes = countSlashes(curLow);
+                    if (slashes >= 2 && !low.equals("textures")) {
+                        continue;
+                    }
+                }
+                if (curLow.startsWith("rsfdata/") && slashesEq(curLow, 1) && !low.equals("cache") && !low.equals("cars")) {
+                    continue;
+                }
+                if (curLow.startsWith("audio/") && slashesEq(curLow, 1)
+                        && !low.equals("cars") && !low.equals("speech") && !low.equals("music")) {
+                    continue;
+                }
+                collectUniversalTreeTasks(resolver, treeUri, child.docId, curRel, depth + 1, plan, plannedLower);
             } else {
-                addTask(plan, plannedLower, treeUri, k, relPrefix + "/" + k.name);
+                String candidateRel = (relPrefix == null || relPrefix.isEmpty()) ? name : relPrefix + "/" + name;
+                String canon = GameActivity.nativeNormalizeRbrRel(candidateRel);
+                if (canon != null && !canon.isEmpty()) {
+                    String key = canon.toLowerCase(Locale.ROOT);
+                    if (plannedLower.add(key)) {
+                        Uri docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, child.docId);
+                        plan.add(new CopyTask(docUri, canon, child.size));
+                    }
+                }
             }
         }
     }
 
-    private void addFmodBankAndStrings(
-            Uri treeUri,
-            List<DocNode> fmodKids,
-            String bankName,
-            List<CopyTask> plan,
-            Set<String> plannedLower) {
-        if (bankName == null || bankName.isEmpty()) {
-            return;
+    private static int countSlashes(String s) {
+        int c = 0;
+        for (int i = 0; i < s.length(); i++) {
+            if (s.charAt(i) == '/') c++;
         }
-        DocNode bank = findIgnoreCase(fmodKids, bankName);
-        if (bank != null && !bank.isDir()) {
-            addTask(plan, plannedLower, treeUri, bank, "AudioFMOD/" + bank.name);
-        }
-        String stem = bankName.toLowerCase(Locale.ROOT).endsWith(".bank")
-            ? bankName.substring(0, bankName.length() - 5)
-            : bankName;
-        DocNode strings = findIgnoreCase(fmodKids, stem + ".strings.bank");
-        if (strings != null && !strings.isDir()) {
-            addTask(plan, plannedLower, treeUri, strings, "AudioFMOD/" + strings.name);
-        } else {
-            DocNode master = findIgnoreCase(fmodKids, "Master.strings.bank");
-            if (master != null && !master.isDir()) {
-                addTask(plan, plannedLower, treeUri, master, "AudioFMOD/" + master.name);
-            }
+        return c;
+    }
+
+    private static boolean slashesEq(String s, int expected) {
+        return countSlashes(s) == expected;
+    }
+
+    private static final class RootSelection {
+        final String docId;
+        final String virtualPrefix;
+
+        RootSelection(String docId, String virtualPrefix) {
+            this.docId = docId;
+            this.virtualPrefix = virtualPrefix;
         }
     }
 
-    private DocNode findPackIgnoreCase(List<DocNode> packKids, String packName) {
-        DocNode dir = findDirIgnoreCase(packKids, packName);
-        if (dir != null) {
-            return dir;
-        }
-        return findIgnoreCase(packKids, packName + ".zip");
-    }
-
-    private String locateLogicalRbrRoot(ContentResolver resolver, Uri treeUri, String rootDocId) {
+    private RootSelection locateLogicalRoot(ContentResolver resolver, Uri treeUri, String rootDocId) {
         List<DocNode> top = listChildren(resolver, treeUri, rootDocId);
         if (looksLikeRbrContents(top)) {
-            return rootDocId;
+            return new RootSelection(rootDocId, "");
         }
         DocNode childRbr = findDirIgnoreCase(top, "RBR");
         if (childRbr != null && looksLikeRbrContents(listChildren(resolver, treeUri, childRbr.docId))) {
-            return childRbr.docId;
+            return new RootSelection(childRbr.docId, "");
+        }
+        if (hasExt(top, ".lbs") || findIgnoreCase(top, "TextureFilenameMap.dat") != null) {
+            return new RootSelection(rootDocId, "Maps");
+        }
+        if (findIgnoreCase(top, "Cars.ini") != null) {
+            return new RootSelection(rootDocId, "Cars");
+        }
+        if (hasExt(top, ".bank")) {
+            return new RootSelection(rootDocId, "AudioFMOD");
+        }
+        if (hasExt(top, ".sgc")) {
+            String folder = sanitizeLastFolderName(describeUri(treeUri));
+            return new RootSelection(rootDocId, "Cars/" + folder);
         }
         for (DocNode sub : top) {
             if (sub.isDir()) {
                 List<DocNode> subKids = listChildren(resolver, treeUri, sub.docId);
                 if (looksLikeRbrContents(subKids)) {
-                    return sub.docId;
+                    return new RootSelection(sub.docId, "");
                 }
                 DocNode nestedRbr = findDirIgnoreCase(subKids, "RBR");
                 if (nestedRbr != null && looksLikeRbrContents(listChildren(resolver, treeUri, nestedRbr.docId))) {
-                    return nestedRbr.docId;
+                    return new RootSelection(nestedRbr.docId, "");
                 }
             }
         }
         return null;
+    }
+
+    private String sanitizeLastFolderName(String raw) {
+        String clean = raw.replace('\\', '/').replace(':', '/');
+        int slash = clean.lastIndexOf('/');
+        String tail = slash >= 0 ? clean.substring(slash + 1).trim() : clean.trim();
+        return tail.isEmpty() ? "ImportedCar" : tail;
+    }
+
+    private boolean hasExt(List<DocNode> nodes, String extLower) {
+        for (DocNode n : nodes) {
+            if (!n.isDir() && n.name.toLowerCase(Locale.ROOT).endsWith(extLower)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean looksLikeRbrContents(List<DocNode> children) {
@@ -783,7 +478,15 @@ final class SafResourceImporter {
                     || low.equals("misc.rbz")
                     || low.equals("scripts.rbz")
                     || low.equals("ngp.dll")
-                    || (c.isDir() && (low.equals("cars") || low.equals("maps") || low.equals("plugins") || low.equals("rsfdata")))) {
+                    || (c.isDir()
+                        && (low.equals("cars")
+                            || low.equals("maps")
+                            || low.equals("plugins")
+                            || low.equals("rsfdata")
+                            || low.equals("audiofmod")
+                            || low.equals("audio")
+                            || low.equals("sgs")
+                            || low.equals("generic")))) {
                 return true;
             }
         }
@@ -835,37 +538,57 @@ final class SafResourceImporter {
         return null;
     }
 
-    private void addTask(
-            List<CopyTask> plan,
-            Set<String> plannedLower,
-            Uri treeUri,
-            DocNode node,
-            String destRel) {
-        String key = destRel.toLowerCase(Locale.ROOT);
-        if (plannedLower.add(key)) {
-            Uri docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, node.docId);
-            plan.add(new CopyTask(docUri, destRel, node.size));
-        }
-    }
-
-    private File safeResolveDest(File destRoot, String relPath) throws IOException {
-        String normalized = relPath.replace('\\', '/').trim();
+    private File resolveCasePreservingDest(File destRoot, String canonicalRel) throws IOException {
+        String normalized = canonicalRel.replace('\\', '/').trim();
         while (normalized.startsWith("/")) {
             normalized = normalized.substring(1);
         }
         if (normalized.isEmpty() || normalized.contains("..")) {
             return null;
         }
-        File target = new File(destRoot, normalized);
+        File cur = destRoot;
+        String[] parts = normalized.split("/");
+        for (String seg : parts) {
+            if (seg.isEmpty()) continue;
+            File matched = null;
+            File[] existing = cur.listFiles();
+            if (existing != null) {
+                for (File f : existing) {
+                    if (f.getName().equalsIgnoreCase(seg)) {
+                        matched = f;
+                        break;
+                    }
+                }
+            }
+            cur = matched != null ? matched : new File(cur, seg);
+        }
         String rootCanon = destRoot.getCanonicalPath();
-        String targetCanon = target.getCanonicalPath();
+        String targetCanon = cur.getCanonicalPath();
         if (!targetCanon.startsWith(rootCanon + File.separator) && !targetCanon.equals(rootCanon)) {
             return null;
         }
-        return target;
+        return cur;
     }
 
-    private long copyUriAtomically(ContentResolver resolver, Uri srcUri, File dst, byte[] buffer) throws IOException {
+    private static final class CopyOutcome {
+        final long bytes;
+        final boolean reused;
+        final String protectedNote;
+
+        CopyOutcome(long bytes, boolean reused, String protectedNote) {
+            this.bytes = bytes;
+            this.reused = reused;
+            this.protectedNote = protectedNote;
+        }
+    }
+
+    private CopyOutcome copyUriWithCoreGuard(
+            ContentResolver resolver,
+            Uri srcUri,
+            File destRbrRoot,
+            File dst,
+            String canonicalRel,
+            byte[] buffer) throws IOException {
         File parent = dst.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
             throw new IOException("No se pudo crear carpeta " + parent.getName());
@@ -888,6 +611,17 @@ final class SafResourceImporter {
             part.delete();
             throw e;
         }
+
+        String preserveNote = GameActivity.nativeCheckPreserveCoreFile(
+            destRbrRoot.getAbsolutePath(),
+            canonicalRel,
+            part.getAbsolutePath()
+        );
+        if (preserveNote != null && !preserveNote.isEmpty()) {
+            part.delete();
+            return new CopyOutcome(0L, false, preserveNote);
+        }
+
         if (dst.exists() && !dst.delete()) {
             part.delete();
             throw new IOException("No se pudo actualizar " + dst.getName());
@@ -896,16 +630,40 @@ final class SafResourceImporter {
             part.delete();
             throw new IOException("Fallo al confirmar archivo " + dst.getName());
         }
-        return total;
+        return new CopyOutcome(total, false, null);
     }
 
-    private void runZipImport(Uri zipUri, String label) throws IOException {
+    private void runZipBatchImport(List<Uri> zipUris) throws IOException {
         ContentResolver resolver = context.getContentResolver();
+        String docsPath = targetDocumentsRoot().getAbsolutePath();
+        int batchCount = zipUris.size();
+
+        for (int i = 0; i < batchCount; i++) {
+            Uri zipUri = zipUris.get(i);
+            String label = queryDisplayName(zipUri);
+            boolean handledByRust = false;
+            try {
+                ParcelFileDescriptor pfd = resolver.openFileDescriptor(zipUri, "r");
+                if (pfd != null) {
+                    int detached = pfd.detachFd();
+                    handledByRust = GameActivity.nativeImportZipFd(detached, label, docsPath);
+                }
+            } catch (Exception ignored) {
+                handledByRust = false;
+            }
+            if (!handledByRust) {
+                runStreamingZipFallback(resolver, zipUri, label);
+            }
+        }
+    }
+
+    /** Respaldo por stream únicamente cuando el proveedor SAF remoto no entrega un FD con Seek. */
+    private void runStreamingZipFallback(ContentResolver resolver, Uri zipUri, String label) throws IOException {
         File destRoot = targetRbrRoot();
         if (!destRoot.exists() && !destRoot.mkdirs()) {
             throw new IOException("No se pudo crear " + destRoot.getAbsolutePath());
         }
-        listener.onStatus(STATE_RUNNING, 0, 0, 0L, "EXTRAYENDO PAQUETE ZIP SAF: " + label);
+        listener.onStatus(STATE_RUNNING, 0, 0, 0L, "EXTRAYENDO STREAM ZIP SAF: " + label);
 
         byte[] buffer = new byte[128 * 1024];
         int filesDone = 0;
@@ -921,12 +679,20 @@ final class SafResourceImporter {
                     if (entry.isDirectory()) {
                         continue;
                     }
-                    String rel = normalizeZipEntryToRbrRel(entry.getName());
-                    if (rel == null) {
+                    String rel = GameActivity.nativeNormalizeRbrRel(entry.getName());
+                    if (rel == null || rel.isEmpty()) {
                         continue;
                     }
-                    File dst = safeResolveDest(destRoot, rel);
+                    File dst = resolveCasePreservingDest(destRoot, rel);
                     if (dst == null) {
+                        continue;
+                    }
+                    long entrySz = entry.getSize();
+                    boolean isCore = rel.equalsIgnoreCase("Plugins/NGP.dll") || rel.equalsIgnoreCase("physics.rbz");
+                    if (!isCore && entrySz > 4L * 1024L * 1024L && dst.isFile() && dst.length() == entrySz) {
+                        filesDone++;
+                        bytesDone += entrySz;
+                        listener.onStatus(STATE_RUNNING, filesDone, 0, bytesDone, "REUTILIZADO: " + rel);
                         continue;
                     }
                     File parent = dst.getParentFile();
@@ -938,15 +704,21 @@ final class SafResourceImporter {
                         int read;
                         while ((read = zis.read(buffer)) != -1) {
                             bytesDone += read;
-                            if (bytesDone > MAX_ZIP_IMPORT_BYTES) {
-                                throw new IOException("El ZIP supera el límite de paquete mínimo (900 MiB); usa SELECCIONAR CARPETA RBR");
-                            }
                             out.write(buffer, 0, read);
                         }
                         out.getFD().sync();
                     } catch (IOException e) {
                         part.delete();
                         throw e;
+                    }
+                    String preserve = GameActivity.nativeCheckPreserveCoreFile(
+                        destRoot.getAbsolutePath(), rel, part.getAbsolutePath()
+                    );
+                    if (preserve != null && !preserve.isEmpty()) {
+                        part.delete();
+                        filesDone++;
+                        listener.onStatus(STATE_RUNNING, filesDone, 0, bytesDone, preserve);
+                        continue;
                     }
                     if (dst.exists()) {
                         dst.delete();
@@ -967,7 +739,7 @@ final class SafResourceImporter {
                 0,
                 0,
                 0L,
-                "EL ZIP NO CONTIENE ARCHIVOS RBR VÁLIDOS (ESPERADO RBR/Cars, RBR/Maps, RBR/Plugins)"
+                "EL ZIP NO CONTIENE ARCHIVOS RBR/RSF VÁLIDOS (ESPERADO RBR/Cars, RBR/Maps, RBR/Plugins)"
             );
             return;
         }
@@ -978,63 +750,5 @@ final class SafResourceImporter {
             bytesDone / (1024.0 * 1024.0)
         );
         listener.onStatus(STATE_DONE, filesDone, filesDone, bytesDone, summary);
-    }
-
-    private String normalizeZipEntryToRbrRel(String rawName) {
-        String clean = rawName.replace('\\', '/').trim();
-        while (clean.startsWith("/")) {
-            clean = clean.substring(1);
-        }
-        if (clean.isEmpty() || clean.contains("..")) {
-            return null;
-        }
-        String lower = clean.toLowerCase(Locale.ROOT);
-        if (lower.startsWith("rbr/")) {
-            clean = clean.substring(4);
-        } else {
-            int idx = lower.indexOf("/rbr/");
-            if (idx >= 0) {
-                clean = clean.substring(idx + 5);
-            }
-        }
-        String cl = clean.toLowerCase(Locale.ROOT);
-        if (cl.equals("ngp.dll")) {
-            return "Plugins/NGP.dll";
-        }
-        if (cl.equals("physics.rbz")
-                || cl.equals("misc.rbz")
-                || cl.equals("scripts.rbz")
-                || cl.equals("season.dat")
-                || cl.startsWith("plugins/")
-                || cl.startsWith("cars/")
-                || cl.startsWith("maps/")
-                || cl.startsWith("rsfdata/")
-                || cl.startsWith("audiofmod/")
-                || cl.startsWith("audio/")
-                || cl.startsWith("sgs/")
-                || cl.startsWith("generic/")) {
-            return clean;
-        }
-        return null;
-    }
-
-    private String readSmallUtf8(ContentResolver resolver, Uri uri) throws IOException {
-        try (InputStream in = resolver.openInputStream(uri)) {
-            if (in == null) {
-                return "";
-            }
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            byte[] buf = new byte[16 * 1024];
-            int n;
-            int total = 0;
-            while ((n = in.read(buf)) != -1) {
-                total += n;
-                if (total > 2 * 1024 * 1024) {
-                    break;
-                }
-                bos.write(buf, 0, n);
-            }
-            return bos.toString(StandardCharsets.UTF_8.name());
-        }
     }
 }

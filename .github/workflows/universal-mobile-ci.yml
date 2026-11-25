@@ -1,0 +1,131 @@
+name: RBR Mobile Universal Content & Leaderboards (iOS IPA + Android APK)
+
+on:
+  push:
+    branches: [feat/universal-content-leaderboards]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: universal-mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios_experimental_ipa:
+    name: iOS/iPadOS Experimental ARM64 IPA
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Xcode 16.4 and iPhoneOS SDK
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Install pinned Rust 1.97.1 toolchain and iOS ARM64 target
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-apple-ios
+
+      - name: Cache Rust iOS build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          key: ios-universal-xcode-16.4
+
+      - name: Build, test, and verify experimental iOS/iPadOS IPA
+        env:
+          PROBE_MODE: physics-stage
+          CAREER_DEV_MODE: 'false'
+          VEHICLE_CATALOG: beta
+        run: |
+          bash scripts/build-ios.sh
+          cp build/RBR-Mobile-Beta.ipa build/RBR-Mobile-iOS-Experimental-Universal.ipa
+          (cd build && shasum -a 256 RBR-Mobile-iOS-Experimental-Universal.ipa RBR-Mobile-Beta.ipa > SHA256SUMS)
+
+      - name: Upload experimental iOS IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RBR-Mobile-iOS-Experimental-Universal
+          path: |
+            build/RBR-Mobile-iOS-Experimental-Universal.ipa
+            build/RBR-Mobile-Beta.ipa
+            build/SHA256SUMS
+            build/package-verification.log
+          if-no-files-found: error
+          retention-days: 14
+
+  android_universal_apk:
+    name: Android ARM64 Universal APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install pinned Rust 1.97.1 toolchain and Android ARM64 target
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-linux-android
+
+      - name: Cache Rust Android build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          key: android-universal-arm64
+
+      - name: Verify sources, host unit tests, and Android ARM64 clippy
+        run: |
+          cargo fmt --all -- --check
+          python3 scripts/verify.py
+          python3 scripts/extract-minimal-pack.py --help >/dev/null
+          cargo test --locked --lib --features public-beta
+          cargo clippy --locked --lib --target aarch64-linux-android --features public-beta -- -D warnings
+
+      - name: Assemble Android ARM64 APK with SDK 35 and NDK
+        run: |
+          test -d "$ANDROID_NDK_HOME/toolchains/llvm"
+          gradle -p android --console=plain :app:assembleDebug
+          mkdir -p build
+          cp android/app/build/outputs/apk/debug/app-debug.apk build/RBR-Mobile-Android-Universal.apk
+
+      - name: Verify APK signature, 16 KiB ELF alignment, JNI exports, and zero commercial assets
+        run: |
+          apk=build/RBR-Mobile-Android-Universal.apk
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          "$tools/apksigner" verify --verbose "$apk"
+          "$tools/zipalign" -c -P 16 -v 4 "$apk"
+          "$tools/aapt" dump badging "$apk" | tee build/android-manifest.txt
+          grep -F "launchable-activity: name='org.rerbr.mobile.GameActivity'" build/android-manifest.txt
+          python3 android/inspect-apk.py "$apk"
+          (cd build && sha256sum RBR-Mobile-Android-Universal.apk > SHA256SUMS)
+
+      - name: Upload updated Android ARM64 APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RBR-Mobile-Android-Universal
+          path: |
+            build/RBR-Mobile-Android-Universal.apk
+            build/SHA256SUMS
+            build/android-manifest.txt
+          if-no-files-found: error
+          retention-days: 14

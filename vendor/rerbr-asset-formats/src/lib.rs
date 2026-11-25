@@ -18,3 +18,4 @@ pub mod rbz;
 #[allow(dead_code)]
 mod sg_framing;
 pub mod stage_textures;
+pub use zip;

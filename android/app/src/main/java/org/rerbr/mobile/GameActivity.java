@@ -23,6 +23,9 @@ public final class GameActivity extends NativeActivity implements SensorEventLis
     private static native void safeArea(double left, double top, double right, double bottom, boolean phone);
     private static native void importStatus(int state, int filesDone, int filesTotal, long bytesDone, String detail);
     private static native void persistedUriState(boolean available, String label);
+    static native boolean nativeImportZipFd(int detachedFd, String label, String destDocumentsDir);
+    static native String nativeNormalizeRbrRel(String rawPath);
+    static native String nativeCheckPreserveCoreFile(String destRbrDir, String canonicalRel, String candidatePartPath);
 
     private SensorManager sensors;
     private Sensor gravity;
@@ -100,6 +103,7 @@ public final class GameActivity extends NativeActivity implements SensorEventLis
                 Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
                 intent.setType("*/*");
+                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
                 intent.putExtra(
                     Intent.EXTRA_MIME_TYPES,
                     new String[] {"application/zip", "application/x-zip-compressed", "application/octet-stream"}
@@ -141,8 +145,22 @@ public final class GameActivity extends NativeActivity implements SensorEventLis
                 importStatus(SafResourceImporter.STATE_IDLE, 0, 0, 0L, "SELECCIÓN DE CARPETA CANCELADA");
             }
         } else if (requestCode == REQ_OPEN_RBR_ZIP) {
-            if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
-                safImporter.handleZipPicked(data.getData(), data.getFlags());
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                java.util.List<android.net.Uri> uris = new java.util.ArrayList<>();
+                if (data.getClipData() != null) {
+                    android.content.ClipData clip = data.getClipData();
+                    for (int i = 0; i < clip.getItemCount(); i++) {
+                        android.net.Uri u = clip.getItemAt(i).getUri();
+                        if (u != null) uris.add(u);
+                    }
+                } else if (data.getData() != null) {
+                    uris.add(data.getData());
+                }
+                if (!uris.isEmpty()) {
+                    safImporter.handleZipsPicked(uris, data.getFlags());
+                } else {
+                    importStatus(SafResourceImporter.STATE_IDLE, 0, 0, 0L, "SELECCIÓN DE ARCHIVO ZIP CANCELADA");
+                }
             } else {
                 importStatus(SafResourceImporter.STATE_IDLE, 0, 0, 0L, "SELECCIÓN DE ARCHIVO ZIP CANCELADA");
             }

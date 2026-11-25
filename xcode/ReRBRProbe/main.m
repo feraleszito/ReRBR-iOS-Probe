@@ -4,6 +4,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <GameController/GameController.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -355,6 +356,268 @@ int rerbr_poll_pilot_name(char *out, int cap) {
     return 1;
 }
 
+// ============================================================================
+// Adaptador nativo iOS/iPadOS para importación universal de recursos RBR/RSF
+// mediante UIDocumentPickerViewController + URLs de seguridad + NSFileCoordinator.
+// La lógica de validación, filtrado, deduplicación y descompresión ZIP vive en Rust.
+// ============================================================================
+extern void rerbr_ios_import_begin_batch(uint32_t count, const char *utf8_label);
+extern void rerbr_ios_import_process_path(
+    const char *utf8_path,
+    int is_directory,
+    uint32_t batch_index,
+    uint32_t batch_total
+);
+extern void rerbr_ios_import_finish_batch(void);
+extern void rerbr_ios_import_cancel_or_fail(int is_error, const char *utf8_message);
+extern void rerbr_ios_set_persisted_folder_state(int available, const char *utf8_label);
+
+static NSString *const kRerbrFolderBookmarkKey = @"org.rerbr.probe.rbr_folder_bookmark";
+static NSString *const kRerbrFolderLabelKey = @"org.rerbr.probe.rbr_folder_label";
+
+@interface RerbrDocumentPickerCoordinator : NSObject <UIDocumentPickerDelegate>
+@property (nonatomic, assign) BOOL pickingFolder;
+@property (nonatomic, assign) BOOL busy;
+@end
+
+@implementation RerbrDocumentPickerCoordinator
+
++ (instancetype)shared {
+    static RerbrDocumentPickerCoordinator *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [[RerbrDocumentPickerCoordinator alloc] init];
+    });
+    return instance;
+}
+
+- (UIViewController *)topPresenter {
+    UIWindow *keyWindow = rerbr_key_window();
+    UIViewController *vc = keyWindow.rootViewController;
+    while (vc.presentedViewController != nil) {
+        vc = vc.presentedViewController;
+    }
+    return vc;
+}
+
+- (void)syncSavedBookmarkState {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSData *bookmark = [defaults dataForKey:kRerbrFolderBookmarkKey];
+    NSString *label = [defaults stringForKey:kRerbrFolderLabelKey] ?: @"Carpeta RBR";
+    if (bookmark != nil && bookmark.length > 0) {
+        rerbr_ios_set_persisted_folder_state(1, label.UTF8String ?: "Carpeta RBR");
+    } else {
+        rerbr_ios_set_persisted_folder_state(0, "");
+    }
+}
+
+- (void)presentPickerForFolder:(BOOL)folder {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.busy) {
+            return;
+        }
+        UIViewController *presenter = [self topPresenter];
+        if (presenter == nil) {
+            rerbr_ios_import_cancel_or_fail(1, "VENTANA DE iOS AÚN NO DISPONIBLE PARA PRESENTAR ARCHIVOS");
+            return;
+        }
+        self.pickingFolder = folder;
+        NSArray<UTType *> *types = folder
+            ? @[UTTypeFolder]
+            : @[UTTypeZip, UTTypeArchive];
+        UIDocumentPickerViewController *picker =
+            [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types];
+        picker.delegate = self;
+        picker.allowsMultipleSelection = !folder;
+        picker.shouldShowFileExtensions = YES;
+        [presenter presentViewController:picker animated:YES completion:nil];
+    });
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    (void)controller;
+    rerbr_ios_import_cancel_or_fail(0, "SELECCIÓN EN ARCHIVOS DE iOS CANCELADA");
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller
+    didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
+{
+    (void)controller;
+    if (urls.count == 0) {
+        rerbr_ios_import_cancel_or_fail(0, "NINGÚN RECURSO SELECCIONADO");
+        return;
+    }
+    if (self.busy) {
+        return;
+    }
+    self.busy = YES;
+    BOOL folderMode = self.pickingFolder;
+    NSArray<NSURL *> *pickedUrls = [urls copy];
+
+    if (folderMode) {
+        NSURL *folderUrl = pickedUrls.firstObject;
+        BOOL scoped = [folderUrl startAccessingSecurityScopedResource];
+        NSError *bmErr = nil;
+        NSData *bookmark = [folderUrl bookmarkDataWithOptions:0
+                               includingResourceValuesForKeys:nil
+                                                relativeToURL:nil
+                                                        error:&bmErr];
+        NSString *label = folderUrl.lastPathComponent ?: @"Carpeta RBR";
+        if (bookmark != nil && bmErr == nil) {
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            [defaults setObject:bookmark forKey:kRerbrFolderBookmarkKey];
+            [defaults setObject:label forKey:kRerbrFolderLabelKey];
+            rerbr_ios_set_persisted_folder_state(1, label.UTF8String ?: "Carpeta RBR");
+        }
+        if (scoped) {
+            [folderUrl stopAccessingSecurityScopedResource];
+        }
+    }
+
+    NSString *firstLabel = pickedUrls.firstObject.lastPathComponent ?: @"Recursos RBR";
+    rerbr_ios_import_begin_batch((uint32_t)pickedUrls.count, firstLabel.UTF8String ?: "Recursos RBR");
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+            uint32_t total = (uint32_t)pickedUrls.count;
+            BOOL hadFatalCoordError = NO;
+            for (uint32_t i = 0; i < total; i++) {
+                NSURL *url = pickedUrls[i];
+                BOOL scoped = [url startAccessingSecurityScopedResource];
+                NSError *coordError = nil;
+                __block BOOL invoked = NO;
+                NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+                [coordinator coordinateReadingItemAtURL:url
+                                                options:0
+                                                  error:&coordError
+                                             byAccessor:^(NSURL *newURL) {
+                    invoked = YES;
+                    NSNumber *isDirValue = nil;
+                    [newURL getResourceValue:&isDirValue forKey:NSURLIsDirectoryKey error:nil];
+                    BOOL isDir = isDirValue != nil ? isDirValue.boolValue : folderMode;
+                    const char *fsPath = newURL.fileSystemRepresentation;
+                    if (fsPath != NULL) {
+                        rerbr_ios_import_process_path(fsPath, isDir ? 1 : 0, i, total);
+                    } else {
+                        rerbr_ios_import_cancel_or_fail(1, "NO SE PUDO OBTENER RUTA POSIX DEL ARCHIVO EN iOS");
+                    }
+                }];
+                if (!invoked && coordError != nil) {
+                    hadFatalCoordError = YES;
+                    NSString *errText = [NSString stringWithFormat:@"ERROR DE ACCESO iOS/iCLOUD: %@",
+                                         coordError.localizedDescription ?: @"No disponible"];
+                    rerbr_ios_import_cancel_or_fail(1, errText.UTF8String ?: "ERROR DE ACCESO iOS");
+                }
+                if (scoped) {
+                    [url stopAccessingSecurityScopedResource];
+                }
+                if (hadFatalCoordError) {
+                    break;
+                }
+            }
+            if (!hadFatalCoordError) {
+                rerbr_ios_import_finish_batch();
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.busy = NO;
+            });
+        }
+    });
+}
+
+- (void)reimportSavedFolder {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.busy) {
+            return;
+        }
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        NSData *bookmark = [defaults dataForKey:kRerbrFolderBookmarkKey];
+        if (bookmark == nil || bookmark.length == 0) {
+            rerbr_ios_set_persisted_folder_state(0, "");
+            rerbr_ios_import_cancel_or_fail(1, "SIN CARPETA GUARDADA — SELECCIONA CARPETA EN ARCHIVOS DE iOS");
+            return;
+        }
+        BOOL stale = NO;
+        NSError *resolveErr = nil;
+        NSURL *resolvedUrl = [NSURL URLByResolvingBookmarkData:bookmark
+                                                       options:0
+                                                 relativeToURL:nil
+                                           bookmarkDataIsStale:&stale
+                                                         error:&resolveErr];
+        if (resolvedUrl == nil || resolveErr != nil) {
+            rerbr_ios_set_persisted_folder_state(0, "");
+            rerbr_ios_import_cancel_or_fail(1, "EL MARCADOR DE SEGURIDAD DE iOS CADUCÓ — SELECCIONA LA CARPETA DE NUEVO");
+            return;
+        }
+        self.busy = YES;
+        NSString *label = resolvedUrl.lastPathComponent ?: @"Carpeta RBR";
+        if (stale) {
+            BOOL scopedRefresh = [resolvedUrl startAccessingSecurityScopedResource];
+            NSData *fresh = [resolvedUrl bookmarkDataWithOptions:0
+                                  includingResourceValuesForKeys:nil
+                                                   relativeToURL:nil
+                                                           error:nil];
+            if (fresh != nil) {
+                [defaults setObject:fresh forKey:kRerbrFolderBookmarkKey];
+            }
+            if (scopedRefresh) {
+                [resolvedUrl stopAccessingSecurityScopedResource];
+            }
+        }
+        rerbr_ios_import_begin_batch(1, label.UTF8String ?: "Carpeta RBR");
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            @autoreleasepool {
+                BOOL scoped = [resolvedUrl startAccessingSecurityScopedResource];
+                NSError *coordError = nil;
+                __block BOOL invoked = NO;
+                NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+                [coordinator coordinateReadingItemAtURL:resolvedUrl
+                                                options:0
+                                                  error:&coordError
+                                             byAccessor:^(NSURL *newURL) {
+                    invoked = YES;
+                    const char *fsPath = newURL.fileSystemRepresentation;
+                    if (fsPath != NULL) {
+                        rerbr_ios_import_process_path(fsPath, 1, 0, 1);
+                    } else {
+                        rerbr_ios_import_cancel_or_fail(1, "NO SE PUDO ABRIR LA CARPETA AUTORIZADA EN iOS");
+                    }
+                }];
+                if (!invoked && coordError != nil) {
+                    NSString *errText = [NSString stringWithFormat:@"ERROR REIMPORTANDO DESDE iOS/iCLOUD: %@",
+                                         coordError.localizedDescription ?: @"No disponible"];
+                    rerbr_ios_import_cancel_or_fail(1, errText.UTF8String ?: "ERROR REIMPORTANDO");
+                } else {
+                    rerbr_ios_import_finish_batch();
+                }
+                if (scoped) {
+                    [resolvedUrl stopAccessingSecurityScopedResource];
+                }
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self.busy = NO;
+                });
+            }
+        });
+    });
+}
+
+@end
+
+int rerbr_ios_pick_rbr_folder(void) {
+    [[RerbrDocumentPickerCoordinator shared] presentPickerForFolder:YES];
+    return 1;
+}
+
+int rerbr_ios_pick_rbr_zip(void) {
+    [[RerbrDocumentPickerCoordinator shared] presentPickerForFolder:NO];
+    return 1;
+}
+
+int rerbr_ios_reimport_persisted_folder(void) {
+    [[RerbrDocumentPickerCoordinator shared] reimportSavedFolder];
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
@@ -376,6 +639,7 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "harwood: Documents path unavailable; diagnostic will skip\n");
         }
         // Do not call UIApplicationMain here: winit invokes it and owns the UIKit loop.
+        [[RerbrDocumentPickerCoordinator shared] syncSavedBookmarkState];
         rerbr_probe_audio_setup();
         return rerbr_probe_main();
     }

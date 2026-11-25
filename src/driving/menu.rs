@@ -19,7 +19,9 @@ pub enum Page {
     StageDetail,
     Content,
     ContentImport,
+    ContentStorage,
     ContentCompatibility,
+    Leaderboards,
     Settings,
     Controls,
     SoundSettings,
@@ -81,6 +83,7 @@ impl Page {
                 | Self::About
                 | Self::Content
                 | Self::ContentImport
+                | Self::ContentStorage
                 | Self::ContentCompatibility
                 | Self::GamepadSettings
                 | Self::PacenoteHudSettings
@@ -443,6 +446,14 @@ pub enum Command {
     ImportAndroidZip,
     ReimportAndroidFolder,
     ToggleTouchSteering,
+    CleanTempImportFiles,
+    UninstallInspectedStage,
+    UninstallInspectedVehicle,
+    LeaderboardPrevStage,
+    LeaderboardNextStage,
+    LeaderboardCycleFilter,
+    LeaderboardPrevPage,
+    LeaderboardNextPage,
 }
 
 pub const MAX_VISIBLE_ROWS: usize = 10;
@@ -615,6 +626,8 @@ pub struct Context<'a> {
     pub selected_career_difficulty: super::career::CareerDifficulty,
     pub selected_championship_kind: super::career::ChampionshipKind,
     pub selected_service_tyre: super::career::TyreCompound,
+    pub leaderboards: Option<&'a super::leaderboard::LeaderboardStore>,
+    pub last_leaderboard_result: Option<&'a super::leaderboard::LeaderboardSubmitResult>,
 }
 
 #[derive(Debug)]
@@ -631,6 +644,9 @@ pub struct Menu {
     pub inspected_stage: usize,
     pub garage_page: usize,
     pub stage_page: usize,
+    pub leaderboard_stage: usize,
+    pub leaderboard_filter: super::leaderboard::LeaderboardFilter,
+    pub leaderboard_page: usize,
     pub row_scroll: usize,
     pub focused_row: usize,
     pub gamepad_focus_active: bool,
@@ -650,6 +666,9 @@ impl Default for Menu {
             inspected_stage: 0,
             garage_page: 0,
             stage_page: 0,
+            leaderboard_stage: 0,
+            leaderboard_filter: super::leaderboard::LeaderboardFilter::StageAllCars,
+            leaderboard_page: 0,
             row_scroll: 0,
             focused_row: 0,
             gamepad_focus_active: false,
@@ -789,9 +808,11 @@ impl Menu {
             Page::Drive => "CONTRARRELOJ",
             Page::Garage | Page::GarageDetail => "GARAJE 3D",
             Page::Stages | Page::StageDetail => "SELECCIONAR TRAMO",
-            Page::Content | Page::ContentImport | Page::ContentCompatibility => {
-                "AJUSTES — CONTENIDO"
-            }
+            Page::Content
+            | Page::ContentImport
+            | Page::ContentStorage
+            | Page::ContentCompatibility => "AJUSTES — CONTENIDO",
+            Page::Leaderboards => "CLASIFICACIÓN DE TIEMPOS",
             Page::Settings => "AJUSTES",
             Page::Controls => "AJUSTES — CONTROLES",
             Page::SoundSettings => "AJUSTES — SONIDO",
@@ -990,6 +1011,10 @@ impl Menu {
                         },
                     },
                     Row::action(
+                        "CLASIFICACIÓN DE TIEMPOS (LOCAL)",
+                        Command::Open(Page::Leaderboards),
+                    ),
+                    Row::action(
                         format!("MODO NGP EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
                         Command::ToggleExperimentalMode,
                     ),
@@ -997,7 +1022,10 @@ impl Menu {
                 ];
                 if ctx.android_import.is_some() {
                     rows.push(Row::action(
-                        "IMPORTAR RECURSOS RBR (ANDROID SAF)",
+                        format!(
+                            "IMPORTAR RECURSOS RBR ({})",
+                            super::resource_import::AndroidImportView::platform_picker_tag()
+                        ),
                         Command::Open(Page::ContentImport),
                     ));
                 }
@@ -1268,10 +1296,18 @@ impl Menu {
                         },
                     ));
                     rows.push(Row::info(
+                        "ESTADO RECURSO",
+                        entry.universal_status().label_es(),
+                    ));
+                    rows.push(Row::info(
                         "RÉCORD PERSONAL",
                         ctx.inspected_stage_pb_ms
                             .map(super::records::format_time_ms)
                             .unwrap_or_else(|| "SIN RÉCORD".into()),
+                    ));
+                    rows.push(Row::action(
+                        "VER CLASIFICACIÓN DEL TRAMO",
+                        Command::Open(Page::Leaderboards),
                     ));
                 }
                 if let Some(missing) = entry.and_then(|e| e.files.missing_label()) {
@@ -1284,58 +1320,78 @@ impl Menu {
                 rows.push(Row::action("VOLVER", Command::Back));
                 rows
             }
-            Page::Content => vec![
-                Row::action(
-                    format!(
-                        "COCHES DISPONIBLES ({} EN CATÁLOGO)",
-                        ctx.content.vehicles.len()
-                    ),
-                    Command::Open(Page::Garage),
-                ),
-                Row::action(
-                    format!(
-                        "TRAMOS DISPONIBLES ({} EN CATÁLOGO)",
-                        ctx.content.stages.len()
-                    ),
-                    Command::Open(Page::Stages),
-                ),
-                Row::action(
-                    format!("MODO NGP EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
-                    Command::ToggleExperimentalMode,
-                ),
-                Row::action(
-                    "DIAGNÓSTICO NGP / FMOD (10 ETAPAS)",
-                    Command::RunFocusDiagnostics,
-                ),
-                Row::action(
-                    "INFORME DE COMPATIBILIDAD Y BACKEND",
-                    Command::Open(Page::ContentCompatibility),
-                ),
-                Row::action("ACTUALIZAR AUDITORÍA DE DOCUMENTS", Command::InspectContent),
-                if ctx.android_import.is_some() {
+            Page::Content => {
+                let usum = ctx.content.universal_summary(ctx.ngp_experimental);
+                let storage_tag = ctx
+                    .android_import
+                    .map(|imp| {
+                        super::universal_importer::format_bytes(imp.health.storage.total_bytes)
+                    })
+                    .unwrap_or_else(|| "VER ESPACIO".into());
+                vec![
                     Row::action(
-                        "IMPORTAR RECURSOS RBR (ANDROID SAF)",
-                        Command::Open(Page::ContentImport),
-                    )
-                } else {
-                    Row::disabled("IMPORT FROM IPAD FILES - UNAVAILABLE")
-                },
-                Row::action("VOLVER A AJUSTES", Command::Back),
-                Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
-            ],
+                        format!(
+                            "BIBLIOTECA DE VEHÍCULOS ({} INST · {} INC · {} INCOMP)",
+                            usum.vehicles_installed,
+                            usum.vehicles_incomplete,
+                            usum.vehicles_incompatible
+                        ),
+                        Command::Open(Page::Garage),
+                    ),
+                    Row::action(
+                        format!(
+                            "BIBLIOTECA DE TRAMOS ({} INSTALADOS / {} TOTAL)",
+                            usum.stages_installed,
+                            ctx.content.stages.len()
+                        ),
+                        Command::Open(Page::Stages),
+                    ),
+                    Row::action(
+                        format!("ADMINISTRAR ALMACENAMIENTO ({storage_tag})"),
+                        Command::Open(Page::ContentStorage),
+                    ),
+                    Row::action(
+                        format!("MODO NGP EXPERIMENTAL: {}", on_off(ctx.ngp_experimental)),
+                        Command::ToggleExperimentalMode,
+                    ),
+                    Row::action(
+                        "DIAGNÓSTICO NGP / FMOD (10 ETAPAS)",
+                        Command::RunFocusDiagnostics,
+                    ),
+                    Row::action(
+                        "INFORME DE COMPATIBILIDAD Y BACKEND",
+                        Command::Open(Page::ContentCompatibility),
+                    ),
+                    Row::action("ACTUALIZAR CATÁLOGO EN CALIENTE", Command::InspectContent),
+                    if ctx.android_import.is_some() {
+                        Row::action(
+                            format!(
+                                "IMPORTAR CARPETA O .ZIP ({})",
+                                super::resource_import::AndroidImportView::platform_picker_tag()
+                            ),
+                            Command::Open(Page::ContentImport),
+                        )
+                    } else {
+                        Row::disabled("IMPORT FROM IPAD FILES - UNAVAILABLE")
+                    },
+                    Row::action("VOLVER A AJUSTES", Command::Back),
+                ]
+            }
             Page::ContentImport => {
                 if let Some(imp) = ctx.android_import {
                     let busy = imp.saf.phase == super::resource_import::SafPhase::Running;
+                    let picker_tag =
+                        super::resource_import::AndroidImportView::platform_picker_tag();
                     let mut rows = vec![
                         Row {
-                            label: "SELECCIONAR CARPETA RBR (SELECTOR ANDROID SAF)".into(),
+                            label: format!("SELECCIONAR CARPETA RBR ({picker_tag})"),
                             kind: RowKind::Action {
                                 command: Command::ImportAndroidFolder,
                                 enabled: !busy,
                             },
                         },
                         Row {
-                            label: "IMPORTAR PAQUETE MÍNIMO .ZIP (ANDROID SAF)".into(),
+                            label: format!("IMPORTAR PAQUETE(S) .ZIP ({picker_tag})"),
                             kind: RowKind::Action {
                                 command: Command::ImportAndroidZip,
                                 enabled: !busy,
@@ -1356,7 +1412,7 @@ impl Menu {
                             },
                         },
                         Row::info(
-                            "ESTADO SAF",
+                            "PROGRESO / ESTADO",
                             if imp.saf.detail.is_empty() {
                                 imp.saf.phase.label().to_string()
                             } else {
@@ -1364,20 +1420,27 @@ impl Menu {
                             },
                         ),
                         Row::info(
-                            "BALANCE MOTOR",
+                            "CATÁLOGO Y MOTOR",
                             format!(
-                                "{} · {} COCHE(S) · {} TRAMO(S)",
+                                "{} · {} COCHE(S) · {} TRAMO(S) · {}",
                                 imp.health.ngp_status_label,
                                 imp.health.drivable_vehicles,
-                                imp.health.ready_stages
+                                imp.health.ready_stages,
+                                super::universal_importer::format_bytes(
+                                    imp.health.storage.total_bytes
+                                )
                             ),
                         ),
                     ];
-                    for missing in imp.health.missing_items.iter().take(3) {
-                        rows.push(Row::info("REQUERIDO", missing.clone()));
+                    for missing in imp.health.missing_items.iter().take(2) {
+                        rows.push(Row::info("DEPENDENCIA", missing.clone()));
                     }
                     rows.push(Row::action(
-                        "VOLVER A AUDITAR RECURSOS",
+                        "ADMINISTRAR ALMACENAMIENTO",
+                        Command::Open(Page::ContentStorage),
+                    ));
+                    rows.push(Row::action(
+                        "ACTUALIZAR CATÁLOGO SIN REINICIAR",
                         Command::InspectContent,
                     ));
                     rows.push(Row::action("VOLVER", Command::Back));
@@ -1390,6 +1453,220 @@ impl Menu {
                     rows.push(Row::action("VOLVER A AJUSTES", Command::Back));
                     rows
                 }
+            }
+            Page::ContentStorage => {
+                let usum = ctx.content.universal_summary(ctx.ngp_experimental);
+                let st = ctx
+                    .android_import
+                    .map(|imp| imp.health.storage.clone())
+                    .unwrap_or_else(super::universal_importer::StorageBreakdown::scan_env);
+                let mut rows = vec![
+                    Row::info(
+                        "ESPACIO TOTAL RBR",
+                        format!(
+                            "{} ({} ARCHIVOS)",
+                            super::universal_importer::format_bytes(st.total_bytes),
+                            st.total_files
+                        ),
+                    ),
+                    Row::info(
+                        "VEHÍCULOS (3D + NGP)",
+                        super::universal_importer::format_bytes(st.vehicles_bytes),
+                    ),
+                    Row::info(
+                        "TRAMOS (MAPAS + TEXTURAS)",
+                        super::universal_importer::format_bytes(st.stages_bytes),
+                    ),
+                    Row::info(
+                        "AUDIO (FMOD + VOCES)",
+                        super::universal_importer::format_bytes(st.audio_bytes),
+                    ),
+                    Row::info(
+                        "NÚCLEO COMPARTIDO",
+                        super::universal_importer::format_bytes(st.shared_core_bytes),
+                    ),
+                    Row::info(
+                        "ESTADO RECURSOS",
+                        format!(
+                            "COCHES: {} INST · {} INC · {} INCOMP ({} DUP) | TRAMOS: {} INST · {} INC",
+                            usum.vehicles_installed,
+                            usum.vehicles_incomplete,
+                            usum.vehicles_incompatible,
+                            usum.vehicle_duplicates,
+                            usum.stages_installed,
+                            usum.stages_incomplete
+                        ),
+                    ),
+                    Row {
+                        label: format!(
+                            "LIMPIAR TEMPORALES .PART ({} ARCHIVOS · {})",
+                            st.temp_part_files,
+                            super::universal_importer::format_bytes(st.temp_part_bytes)
+                        ),
+                        kind: RowKind::Action {
+                            command: Command::CleanTempImportFiles,
+                            enabled: st.temp_part_files > 0,
+                        },
+                    },
+                ];
+                if let Some(inspected_st) = ctx.content.stages.get(self.inspected_stage) {
+                    let can_remove = inspected_st.files.present > 0
+                        && inspected_st.descriptor.id != ctx.selection.stage.id;
+                    rows.push(Row {
+                        label: format!(
+                            "LIBERAR TRAMO INSPECCIONADO ({})",
+                            inspected_st.descriptor.name
+                        ),
+                        kind: RowKind::Action {
+                            command: Command::UninstallInspectedStage,
+                            enabled: can_remove,
+                        },
+                    });
+                }
+                if let Some(inspected_v) = ctx.content.vehicles.get(self.inspected_vehicle) {
+                    let can_remove = (inspected_v.files.present > 0 || inspected_v.has_3d_model)
+                        && inspected_v.descriptor.id != ctx.selection.vehicle.id;
+                    rows.push(Row {
+                        label: format!(
+                            "LIBERAR COCHE INSPECCIONADO ({})",
+                            inspected_v.descriptor.name
+                        ),
+                        kind: RowKind::Action {
+                            command: Command::UninstallInspectedVehicle,
+                            enabled: can_remove,
+                        },
+                    });
+                }
+                rows.push(Row::action("VOLVER A CONTENIDO", Command::Back));
+                rows
+            }
+            Page::Leaderboards => {
+                const LB_PER_PAGE: usize = 5;
+                let stage_count = ctx.content.stages.len().max(1);
+                let st_idx = self.leaderboard_stage.min(stage_count - 1);
+                let target_stage = ctx
+                    .content
+                    .stages
+                    .get(st_idx)
+                    .map(|e| &e.descriptor)
+                    .unwrap_or(stage);
+                let mut rows = Vec::new();
+                if self.leaderboard_filter
+                    != super::leaderboard::LeaderboardFilter::PersonalBestsByStage
+                {
+                    rows.push(Row::stepper(
+                        "TRAMO",
+                        Command::LeaderboardPrevStage,
+                        Command::LeaderboardNextStage,
+                        format!("{} ({})", target_stage.name, target_stage.surface()),
+                    ));
+                }
+                rows.push(Row::action(
+                    format!("FILTRO: {}", self.leaderboard_filter.label_es()),
+                    Command::LeaderboardCycleFilter,
+                ));
+
+                if let Some(lb) = ctx.leaderboards {
+                    match self.leaderboard_filter {
+                        super::leaderboard::LeaderboardFilter::StageAllCars
+                        | super::leaderboard::LeaderboardFilter::StageCurrentCar => {
+                            let car_filter = (self.leaderboard_filter
+                                == super::leaderboard::LeaderboardFilter::StageCurrentCar)
+                                .then_some(vehicle.id.as_str());
+                            let entries = lb.stage_entries(&target_stage.id, car_filter);
+                            let pb_line = entries
+                                .first()
+                                .map(|best| {
+                                    format!(
+                                        "{} · {} [{}]",
+                                        super::records::format_time_ms(best.total_ms),
+                                        best.car_name,
+                                        best.physics_badge()
+                                    )
+                                })
+                                .unwrap_or_else(|| "SIN TIEMPOS VÁLIDOS REGISTRADOS".into());
+                            rows.push(Row::info("MEJOR TIEMPO PERSONAL", pb_line));
+
+                            if entries.is_empty() {
+                                rows.push(Row::info(
+                                    "CLASIFICACIÓN LOCAL",
+                                    "COMPLETA UN TRAMO VÁLIDO PARA REGISTRAR TU TIEMPO",
+                                ));
+                            } else {
+                                let total_pages = entries.len().div_ceil(LB_PER_PAGE);
+                                let p_idx =
+                                    self.leaderboard_page.min(total_pages.saturating_sub(1));
+                                let start = p_idx * LB_PER_PAGE;
+                                let end = (start + LB_PER_PAGE).min(entries.len());
+                                let leader_ms = entries[0].total_ms;
+                                for (offset, entry) in entries[start..end].iter().enumerate() {
+                                    let rank = start + offset + 1;
+                                    rows.push(Row::info(
+                                        format!("#{rank} · {}", entry.verification.ui_badge()),
+                                        super::leaderboard::format_leaderboard_row(
+                                            rank, entry, leader_ms,
+                                        ),
+                                    ));
+                                }
+                                if total_pages > 1 {
+                                    rows.push(Row::stepper(
+                                        "PÁGINA",
+                                        Command::LeaderboardPrevPage,
+                                        Command::LeaderboardNextPage,
+                                        format!("{}/{}", p_idx + 1, total_pages),
+                                    ));
+                                }
+                            }
+                        }
+                        super::leaderboard::LeaderboardFilter::PersonalBestsByStage => {
+                            let bests = lb.personal_bests_by_stage();
+                            rows.push(Row::info(
+                                "TRAMOS CON TIEMPO",
+                                format!("{} TRAMO(S) COMPLETADO(S)", bests.len()),
+                            ));
+                            if bests.is_empty() {
+                                rows.push(Row::info(
+                                    "RESUMEN PERSONAL",
+                                    "AÚN NO HAY TIEMPOS REGISTRADOS EN NINGÚN TRAMO",
+                                ));
+                            } else {
+                                let total_pages = bests.len().div_ceil(LB_PER_PAGE);
+                                let p_idx =
+                                    self.leaderboard_page.min(total_pages.saturating_sub(1));
+                                let start = p_idx * LB_PER_PAGE;
+                                let end = (start + LB_PER_PAGE).min(bests.len());
+                                for entry in &bests[start..end] {
+                                    rows.push(Row::info(
+                                        entry.stage_name.clone(),
+                                        format!(
+                                            "{} · {} [{}·{}]",
+                                            super::records::format_time_ms(entry.total_ms),
+                                            entry.car_name,
+                                            entry.physics_badge(),
+                                            entry.verification.ui_badge()
+                                        ),
+                                    ));
+                                }
+                                if total_pages > 1 {
+                                    rows.push(Row::stepper(
+                                        "PÁGINA",
+                                        Command::LeaderboardPrevPage,
+                                        Command::LeaderboardNextPage,
+                                        format!("{}/{}", p_idx + 1, total_pages),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    rows.push(Row::info(
+                        "CLASIFICACIÓN LOCAL",
+                        "SIN TIEMPOS REGISTRADOS EN ESTA SESIÓN",
+                    ));
+                }
+                rows.push(Row::action("IR A CONTRARRELOJ", Command::Open(Page::Drive)));
+                rows.push(Row::action("VOLVER", Command::Back));
+                rows
             }
             Page::ContentCompatibility => {
                 let vehicle_ok = if ctx.ngp_experimental {
@@ -2024,6 +2301,25 @@ impl Menu {
                         super::records::format_time_ms(pb),
                     ));
                 }
+                if let Some(lbr) = ctx.last_leaderboard_result {
+                    if lbr.accepted {
+                        if let Some(rank) = lbr.stage_rank {
+                            let tag = if lbr.is_stage_record {
+                                "MEJOR TIEMPO LOCAL DEL TRAMO"
+                            } else {
+                                "CLASIFICACIÓN LOCAL"
+                            };
+                            rows.push(Row::info(
+                                "PUESTO EN TRAMO",
+                                format!("#{rank} DE {} ({tag})", lbr.stage_total_entries),
+                            ));
+                        }
+                    }
+                }
+                rows.push(Row::action(
+                    "VER TABLA DE CLASIFICACIÓN",
+                    Command::Open(Page::Leaderboards),
+                ));
                 if ctx.active_career_stage {
                     if let Some(out) = ctx.last_career_stage_outcome {
                         let summary = if out.championship_finished {
@@ -2697,17 +2993,27 @@ impl Menu {
             Page::ContentImport => {
                 if let Some(imp) = ctx.android_import {
                     vec![
-                        "SELECTOR NATIVO ANDROID (SAF) · COPIA SELECTIVA A CARPETA PRIVADA".into(),
+                        format!(
+                            "SELECTOR NATIVO ({}) · EXTRACCIÓN SELECTIVA SIN DUPLICAR",
+                            super::resource_import::AndroidImportView::platform_picker_tag()
+                        ),
                         format!("DESTINO: {}", imp.health.target_rbr_dir),
                     ]
                 } else {
                     vec![
-                        "FUTURE FILES IMPORT PIPELINE - NOT AVAILABLE".into(),
-                        "NO PACKAGE FORMAT IS CLAIMED INSTALLABLE".into(),
-                        "STEPS BELOW ARE ARCHITECTURE, NOT ENABLED ACTIONS".into(),
+                        "IMPORTACIÓN UNIVERSAL DE CARPETAS RBR/RSF Y PAQUETES .ZIP".into(),
+                        "ACTIVA EN iOS/iPadOS (UIDOCUMENTPICKER) Y ANDROID (SAF)".into(),
                     ]
                 }
             }
+            Page::ContentStorage => vec![
+                "DESGLOSE DE ESPACIO OCUPADO POR VEHÍCULOS, TRAMOS, AUDIO Y NÚCLEO".into(),
+                "LOS RÉCORDS PERSONALES Y EL PERFIL DE CARRERA NUNCA SE BORRAN AQUÍ".into(),
+            ],
+            Page::Leaderboards => vec![
+                "CLASIFICACIÓN LOCAL EN DISPOSITIVO (NO EQUIVALE A RÉCORD MUNDIAL)".into(),
+                "FORMATO VERSIONADO CON HASH DE INTEGRIDAD LISTO PARA FUTURO ONLINE".into(),
+            ],
             Page::ContentCompatibility => {
                 let (_, report) = physics_report(ctx.selection);
                 vec![
@@ -2901,6 +3207,14 @@ impl Menu {
         }
     }
 
+    pub(crate) fn main_content_rect() -> Rect {
+        Rect::new(0.502, 0.022, 0.120, 0.068)
+    }
+
+    pub(crate) fn main_leaderboards_rect() -> Rect {
+        Rect::new(0.630, 0.022, 0.118, 0.068)
+    }
+
     fn main_quick_drive_rect() -> Rect {
         Rect::new(0.755, 0.022, 0.220, 0.068)
     }
@@ -3005,6 +3319,12 @@ impl Menu {
             Page::Main => {
                 if Self::main_quick_drive_rect().contains(x, y) {
                     return Some(Command::StartRally);
+                }
+                if Self::main_leaderboards_rect().contains(x, y) {
+                    return Some(Command::Open(Page::Leaderboards));
+                }
+                if Self::main_content_rect().contains(x, y) {
+                    return Some(Command::Open(Page::Content));
                 }
                 if Self::show_main_android_import_banner(ctx)
                     && Self::main_android_import_rect().contains(x, y)
@@ -3927,29 +4247,38 @@ impl Menu {
         canvas.text(0.040 * 640.0, 0.068 * h, "SHOWROOM", 0.56, DIM);
 
         // Top-center active car & stage summary pill.
-        let summary_rect = Rect::new(0.245, 0.022, 0.495, 0.068);
+        let summary_rect = Rect::new(0.224, 0.022, 0.270, 0.068);
         ui::panel(canvas, summary_rect, [16, 20, 28, 210], LINE);
         let (sx, sy, sw, _) = ui::px(summary_rect, canvas);
         let car_label = format!("COCHE: {}", vehicle.name);
         let stage_label = format!("TRAMO: {} ({})", stage.name, stage.surface());
         ui::text_clipped(
             canvas,
-            sx + 10.0,
+            sx + 8.0,
             sy + 4.0,
-            sw - 20.0,
+            sw - 16.0,
             &car_label,
-            0.68,
+            0.62,
             TEXT,
         );
         ui::text_clipped(
             canvas,
-            sx + 10.0,
+            sx + 8.0,
             sy + 17.5,
-            sw - 20.0,
+            sw - 16.0,
             &stage_label,
-            0.58,
+            0.54,
             INFO,
         );
+
+        // Quick Main Menu access to Content Manager (RECURSOS) and Local Leaderboards (TIEMPOS).
+        let content_rect = Self::main_content_rect();
+        ui::panel(canvas, content_rect, [20, 28, 42, 228], INFO);
+        ui::text_center(canvas, content_rect, "RECURSOS", 0.62, TEXT);
+
+        let lb_rect = Self::main_leaderboards_rect();
+        ui::panel(canvas, lb_rect, [24, 34, 48, 228], GOOD);
+        ui::text_center(canvas, lb_rect, "TIEMPOS", 0.62, TEXT);
 
         // Top-right 1-tap quick drive CTA so existing driving & stage testing are always 1 tap away.
         let drive_rect = Self::main_quick_drive_rect();
@@ -5215,6 +5544,8 @@ mod tests {
             selected_career_difficulty: crate::driving::career::CareerDifficulty::Beginner,
             selected_championship_kind: crate::driving::career::ChampionshipKind::Regional,
             selected_service_tyre: crate::driving::career::TyreCompound::GravelHard,
+            leaderboards: None,
+            last_leaderboard_result: None,
         }
     }
 
@@ -5895,7 +6226,9 @@ mod tests {
             Page::StageDetail,
             Page::Content,
             Page::ContentImport,
+            Page::ContentStorage,
             Page::ContentCompatibility,
+            Page::Leaderboards,
             Page::Settings,
             Page::Controls,
             Page::SoundSettings,

@@ -101,7 +101,7 @@
                     "-framework", CoreText, "-framework", QuartzCore,
                     "-framework", Metal, "-framework", Security, "-framework", CoreMotion,
                     "-framework", AudioToolbox, "-framework", AVFoundation,
-                    "-framework", GameController
+                    "-framework", GameController, "-framework", UniformTypeIdentifiers
                 );
                 PRODUCT_BUNDLE_IDENTIFIER = org.rerbr.probe;
                 PRODUCT_NAME = ReRBRProbe;
