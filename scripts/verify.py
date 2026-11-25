@@ -127,9 +127,12 @@ def verify_sources():
     assets = ROOT / "vendor/rerbr-asset-formats"
     asset_manifest = tomllib.loads((assets / "Cargo.toml").read_text())
     require(asset_manifest["package"]["license"] == "GPL-3.0-or-later", "retain asset-reader license")
-    require(asset_manifest["dependencies"] == {
-        "zip": {"version": "=9.0.3", "default-features": False, "features": ["deflate-flate2-zlib-rs"]},
+    asset_dependencies = asset_manifest["dependencies"]
+    require(asset_dependencies.get("zip") == {
+        "version": "=9.0.3", "default-features": False, "features": ["deflate-flate2-zlib-rs"],
     }, "asset readers must use only the selected pure-Rust ZIP backend")
+    require(asset_dependencies.get("bcdec_rs") == "=0.2.0", "asset readers must use the pinned DDS decoder")
+    require(set(asset_dependencies) == {"zip", "bcdec_rs"}, "unexpected asset-reader dependency")
     asset_imports = dict(re.findall(
         r"^\| (src/\S+|LICENSE|rustfmt\.toml) \| [^|]+ \| `([0-9a-f]{64})` \|$",
         (assets / "UPSTREAM.md").read_text(), re.MULTILINE,

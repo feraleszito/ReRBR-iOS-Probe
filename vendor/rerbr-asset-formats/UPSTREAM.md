@@ -6,16 +6,19 @@ Selected file readers from the owner's local ReRBR source snapshot, inspected on
 integration are **GPL-3.0-or-later**; the complete license is in LICENSE.
 
 The local source checkout has no Git metadata.
-No upstream commit ID is claimed. These SHA-256 values identify the imported
-bytes. Every listed file, including unit tests and formatting configuration,
-is copied unchanged.
+No upstream commit ID is claimed. The SHA-256 column identifies the bytes shipped
+in this crate. All listed files except `src/dds.rs` are byte-identical imports.
+The original DDS reader has SHA-256
+`61ce085c58c063ee81e1127146d31731c4a5299f0570e06f0b33326d9b2f316b`.
+Commit `e9e0da6` adapted it to preserve DDS color-space and payload metadata and
+decode BC1, BC2, BC3 and BC7 rows using `bcdec_rs` 0.2.0.
 
 | Local file | Original source | SHA-256 |
 | --- | --- | --- |
 | LICENSE | LICENSE | `3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986` |
 | rustfmt.toml | rustfmt.toml | `93ed1668bb2ca659e88711456b72320bf2f53369ecf278c4a61af0cb63cc3a1e` |
 | src/damage.rs | crates/rbr-formats/src/damage.rs | `1a9ebcc4729d4cf9fc1ec1c4bed98d436e3c65e3240c850c6e22ff0bdc465d46` |
-| src/dds.rs | crates/rbr-formats/src/dds.rs | `61ce085c58c063ee81e1127146d31731c4a5299f0570e06f0b33326d9b2f316b` |
+| src/dds.rs | crates/rbr-formats/src/dds.rs (adapted) | `5cebcc6f68376a49a7c47843ada12085e0e57ed8016ae5db168c45c50955e358` |
 | src/ini.rs | crates/rbr-formats/src/ini.rs | `ddc7aede9b45b30dded36d67800179cf4ea68f9da1293bfb6b14cd1798e0f162` |
 | src/le.rs | crates/rbr-formats/src/le.rs | `043b0d9b1f8537721adfb9d5d3670a3f3089ed158141bbe52542acfe14793880` |
 | src/rbz.rs | crates/rbr-formats/src/rbz.rs | `c0f858ad759ec7c6a1f4e136a09a616c2f66551e6c2dcfa1dd899fd9c2460188` |
