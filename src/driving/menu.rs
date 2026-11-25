@@ -439,6 +439,10 @@ pub enum Command {
     ScrollRowsDown,
     SettingsCardStep(i32),
     SettingsCardActivate(usize),
+    ImportAndroidFolder,
+    ImportAndroidZip,
+    ReimportAndroidFolder,
+    ToggleTouchSteering,
 }
 
 pub const MAX_VISIBLE_ROWS: usize = 10;
@@ -564,6 +568,8 @@ pub struct Context<'a> {
     pub hud_rpm_style: HudRpmStyle,
     pub invert_pedals: bool,
     pub clutch_help: bool,
+    pub touch_steering: bool,
+    pub android_import: Option<&'a super::resource_import::AndroidImportView>,
     pub ctrl_opacity: f32,
     pub global_opacity: f32,
     pub stage_result: Option<super::race::StageResult>,
@@ -959,7 +965,7 @@ impl Menu {
                     .personal_best_ms
                     .map(|ms| format!(" · PB {}", super::records::format_time_ms(ms)))
                     .unwrap_or_default();
-                vec![
+                let mut rows = vec![
                     Row::action(
                         if available {
                             format!("COCHE ACTIVO: {}", vehicle.name)
@@ -988,8 +994,15 @@ impl Menu {
                         Command::ToggleExperimentalMode,
                     ),
                     Row::action("DIAGNÓSTICO NGP (10 ETAPAS)", Command::RunFocusDiagnostics),
-                    Row::action("VOLVER", Command::Back),
-                ]
+                ];
+                if ctx.android_import.is_some() {
+                    rows.push(Row::action(
+                        "IMPORTAR RECURSOS RBR (ANDROID SAF)",
+                        Command::Open(Page::ContentImport),
+                    ));
+                }
+                rows.push(Row::action("VOLVER", Command::Back));
+                rows
             }
             Page::Garage => {
                 const PER_PAGE: usize = 9;
@@ -1299,17 +1312,84 @@ impl Menu {
                     Command::Open(Page::ContentCompatibility),
                 ),
                 Row::action("ACTUALIZAR AUDITORÍA DE DOCUMENTS", Command::InspectContent),
-                Row::disabled("IMPORT FROM IPAD FILES - UNAVAILABLE"),
+                if ctx.android_import.is_some() {
+                    Row::action(
+                        "IMPORTAR RECURSOS RBR (ANDROID SAF)",
+                        Command::Open(Page::ContentImport),
+                    )
+                } else {
+                    Row::disabled("IMPORT FROM IPAD FILES - UNAVAILABLE")
+                },
                 Row::action("VOLVER A AJUSTES", Command::Back),
                 Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
             ],
             Page::ContentImport => {
-                let mut rows = IMPORT_STEPS
-                    .iter()
-                    .map(|step| Row::info(step.label, step.detail))
-                    .collect::<Vec<_>>();
-                rows.push(Row::action("VOLVER A AJUSTES", Command::Back));
-                rows
+                if let Some(imp) = ctx.android_import {
+                    let busy = imp.saf.phase == super::resource_import::SafPhase::Running;
+                    let mut rows = vec![
+                        Row {
+                            label: "SELECCIONAR CARPETA RBR (SELECTOR ANDROID SAF)".into(),
+                            kind: RowKind::Action {
+                                command: Command::ImportAndroidFolder,
+                                enabled: !busy,
+                            },
+                        },
+                        Row {
+                            label: "IMPORTAR PAQUETE MÍNIMO .ZIP (ANDROID SAF)".into(),
+                            kind: RowKind::Action {
+                                command: Command::ImportAndroidZip,
+                                enabled: !busy,
+                            },
+                        },
+                        Row {
+                            label: if imp.saf.has_persisted_uri {
+                                format!(
+                                    "REIMPORTAR CARPETA AUTORIZADA ({})",
+                                    imp.saf.persisted_label
+                                )
+                            } else {
+                                "REIMPORTAR CARPETA AUTORIZADA (NINGUNA GUARDADA)".into()
+                            },
+                            kind: RowKind::Action {
+                                command: Command::ReimportAndroidFolder,
+                                enabled: !busy && imp.saf.has_persisted_uri,
+                            },
+                        },
+                        Row::info(
+                            "ESTADO SAF",
+                            if imp.saf.detail.is_empty() {
+                                imp.saf.phase.label().to_string()
+                            } else {
+                                imp.saf.detail.clone()
+                            },
+                        ),
+                        Row::info(
+                            "BALANCE MOTOR",
+                            format!(
+                                "{} · {} COCHE(S) · {} TRAMO(S)",
+                                imp.health.ngp_status_label,
+                                imp.health.drivable_vehicles,
+                                imp.health.ready_stages
+                            ),
+                        ),
+                    ];
+                    for missing in imp.health.missing_items.iter().take(3) {
+                        rows.push(Row::info("REQUERIDO", missing.clone()));
+                    }
+                    rows.push(Row::action(
+                        "VOLVER A AUDITAR RECURSOS",
+                        Command::InspectContent,
+                    ));
+                    rows.push(Row::action("VOLVER", Command::Back));
+                    rows
+                } else {
+                    let mut rows = IMPORT_STEPS
+                        .iter()
+                        .map(|step| Row::info(step.label, step.detail))
+                        .collect::<Vec<_>>();
+                    rows.push(Row::action("VOLVER A AJUSTES", Command::Back));
+                    rows
+                }
             }
             Page::ContentCompatibility => {
                 let vehicle_ok = if ctx.ngp_experimental {
@@ -1631,56 +1711,70 @@ impl Menu {
                 Row::action("RESTABLECER", Command::CtrlReset),
                 Row::action("VOLVER", Command::Back),
             ],
-            Page::Controls => vec![
-                Row::stepper(
-                    "SENSIBILIDAD GIROSCOPIO",
-                    Command::SensDown,
-                    Command::SensUp,
-                    format!("{:.2}", ctx.sensitivity),
-                ),
-                Row::stepper(
-                    "ZONA MUERTA DIRECCIÓN",
-                    Command::DeadDown,
-                    Command::DeadUp,
-                    format!("{:.2}", ctx.dead_zone),
-                ),
-                Row {
-                    label: "CALIBRAR GIROSCOPIO (POSICIÓN ACTUAL)".into(),
-                    kind: RowKind::Action {
-                        command: Command::Calibrate,
-                        enabled: ctx.steering_ready,
+            Page::Controls => {
+                let mut rows = vec![
+                    Row::stepper(
+                        "SENSIBILIDAD GIROSCOPIO",
+                        Command::SensDown,
+                        Command::SensUp,
+                        format!("{:.2}", ctx.sensitivity),
+                    ),
+                    Row::stepper(
+                        "ZONA MUERTA DIRECCIÓN",
+                        Command::DeadDown,
+                        Command::DeadUp,
+                        format!("{:.2}", ctx.dead_zone),
+                    ),
+                    Row {
+                        label: "CALIBRAR GIROSCOPIO (POSICIÓN ACTUAL)".into(),
+                        kind: RowKind::Action {
+                            command: Command::Calibrate,
+                            enabled: ctx.steering_ready,
+                        },
                     },
-                },
-                Row::action("RESTABLECER CALIBRACIÓN", Command::ResetCalibration),
-                Row::action(
-                    format!(
-                        "INVERTIR PEDALES (ACEL. / FRENO): {}",
-                        on_off(ctx.invert_pedals)
+                    Row::action("RESTABLECER CALIBRACIÓN", Command::ResetCalibration),
+                    Row::action(
+                        format!(
+                            "INVERTIR PEDALES (ACEL. / FRENO): {}",
+                            on_off(ctx.invert_pedals)
+                        ),
+                        Command::ToggleInvertPedals,
                     ),
-                    Command::ToggleInvertPedals,
-                ),
-                Row::action(
-                    format!("AYUDA DE EMBRAGUE: {}", on_off(ctx.clutch_help)),
-                    Command::ToggleClutchHelp,
-                ),
-                Row::action(
-                    "EDITAR CONTROLES TÁCTILES EN PANTALLA",
-                    Command::Open(Page::ControlsEditor),
-                ),
-                Row::action(
-                    format!(
-                        "MANDO / GAMEPAD: {}",
-                        if ctx.gamepad_connected {
-                            ctx.gamepad_name.unwrap_or("CONECTADO")
-                        } else {
-                            "SIN MANDO"
-                        }
+                    Row::action(
+                        format!("AYUDA DE EMBRAGUE: {}", on_off(ctx.clutch_help)),
+                        Command::ToggleClutchHelp,
                     ),
-                    Command::Open(Page::GamepadSettings),
-                ),
-                Row::action("VOLVER A AJUSTES", Command::Back),
-                Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
-            ],
+                ];
+                if ctx.android_import.is_some() {
+                    rows.push(Row::action(
+                        format!(
+                            "DIRECCIÓN TÁCTIL (< / > EN PANTALLA): {}",
+                            on_off(ctx.touch_steering)
+                        ),
+                        Command::ToggleTouchSteering,
+                    ));
+                }
+                rows.extend([
+                    Row::action(
+                        "EDITAR CONTROLES TÁCTILES EN PANTALLA",
+                        Command::Open(Page::ControlsEditor),
+                    ),
+                    Row::action(
+                        format!(
+                            "MANDO / GAMEPAD: {}",
+                            if ctx.gamepad_connected {
+                                ctx.gamepad_name.unwrap_or("CONECTADO")
+                            } else {
+                                "SIN MANDO"
+                            }
+                        ),
+                        Command::Open(Page::GamepadSettings),
+                    ),
+                    Row::action("VOLVER A AJUSTES", Command::Back),
+                    Row::action("MENÚ PRINCIPAL", Command::ResetToMain),
+                ]);
+                rows
+            }
             Page::SoundSettings => vec![
                 Row::stepper(
                     "VOLUMEN MOTOR Y EFECTOS",
@@ -2600,11 +2694,20 @@ impl Menu {
                 "GESTIÓN DE COCHES, TRAMOS Y AUDITORÍA DE ARCHIVOS EN DOCUMENTS".into(),
                 "DIAGNÓSTICO DE FÍSICAS NGP 7.4 Y BANCOS DE AUDIO FMOD".into(),
             ],
-            Page::ContentImport => vec![
-                "FUTURE FILES IMPORT PIPELINE - NOT AVAILABLE".into(),
-                "NO PACKAGE FORMAT IS CLAIMED INSTALLABLE".into(),
-                "STEPS BELOW ARE ARCHITECTURE, NOT ENABLED ACTIONS".into(),
-            ],
+            Page::ContentImport => {
+                if let Some(imp) = ctx.android_import {
+                    vec![
+                        "SELECTOR NATIVO ANDROID (SAF) · COPIA SELECTIVA A CARPETA PRIVADA".into(),
+                        format!("DESTINO: {}", imp.health.target_rbr_dir),
+                    ]
+                } else {
+                    vec![
+                        "FUTURE FILES IMPORT PIPELINE - NOT AVAILABLE".into(),
+                        "NO PACKAGE FORMAT IS CLAIMED INSTALLABLE".into(),
+                        "STEPS BELOW ARE ARCHITECTURE, NOT ENABLED ACTIONS".into(),
+                    ]
+                }
+            }
             Page::ContentCompatibility => {
                 let (_, report) = physics_report(ctx.selection);
                 vec![
@@ -2802,6 +2905,21 @@ impl Menu {
         Rect::new(0.755, 0.022, 0.220, 0.068)
     }
 
+    pub(crate) fn main_android_import_rect() -> Rect {
+        Rect::new(0.140, 0.118, 0.720, 0.064)
+    }
+
+    pub(crate) fn show_main_android_import_banner(ctx: &Context) -> bool {
+        ctx.android_import.is_some_and(|imp| {
+            !imp.health.ready_to_drive
+                || matches!(
+                    imp.saf.phase,
+                    super::resource_import::SafPhase::Running
+                        | super::resource_import::SafPhase::Error
+                )
+        })
+    }
+
     fn main_section_rect(&self, index: usize) -> Rect {
         let count = MainSection::ALL.len();
         let total_w = 0.956;
@@ -2888,6 +3006,11 @@ impl Menu {
                 if Self::main_quick_drive_rect().contains(x, y) {
                     return Some(Command::StartRally);
                 }
+                if Self::show_main_android_import_banner(ctx)
+                    && Self::main_android_import_rect().contains(x, y)
+                {
+                    return Some(Command::Open(Page::ContentImport));
+                }
                 for idx in 0..MainSection::ALL.len() {
                     if self.main_section_rect(idx).contains(x, y) {
                         return Some(Command::MainSectionActivate(idx));
@@ -2934,6 +3057,9 @@ impl Menu {
                     return Some(Command::GarageNextCar);
                 }
                 if Self::garage_action_rect().contains(x, y) {
+                    if ctx.content.vehicles.is_empty() && ctx.android_import.is_some() {
+                        return Some(Command::Open(Page::ContentImport));
+                    }
                     if let Some(entry) = ctx.content.vehicles.get(active_idx) {
                         let cap = entry.capability(ctx.ngp_experimental);
                         if cap == DriveCapability::Drivable {
@@ -3536,7 +3662,11 @@ impl Menu {
         ui::text_center(
             canvas,
             Rect::new(0.0, 0.24, 1.0, 0.05),
-            "iOS ALPHA",
+            if cfg!(target_os = "android") {
+                "ANDROID ARM64 · VULKAN"
+            } else {
+                "iOS ALPHA"
+            },
             0.95,
             DIM,
         );
@@ -3730,7 +3860,11 @@ impl Menu {
         ui::text_center(
             canvas,
             Rect::new(0.18, 0.816, 0.64, 0.042),
-            "iOS / iPadOS · SHOWROOM 3D",
+            if cfg!(target_os = "android") {
+                "ANDROID ARM64 · SHOWROOM 3D"
+            } else {
+                "iOS / iPadOS · SHOWROOM 3D"
+            },
             0.70,
             DIM,
         );
@@ -3822,8 +3956,29 @@ impl Menu {
         ui::panel(canvas, drive_rect, [156, 30, 30, 238], [240, 110, 110, 255]);
         ui::text_center(canvas, drive_rect, "INICIAR TRAMO", 0.78, TEXT);
 
-        // Optional non-blocking notice (coming soon / status / showroom loading).
-        if let Some(notice) = ctx.coming_soon_notice {
+        // Optional non-blocking notice (coming soon / Android SAF import / status).
+        if Self::show_main_android_import_banner(ctx) {
+            if let Some(imp) = ctx.android_import {
+                let brect = Self::main_android_import_rect();
+                let (fill, border, text_col) = match imp.saf.phase {
+                    super::resource_import::SafPhase::Running => ([18, 42, 68, 238], INFO, TEXT),
+                    super::resource_import::SafPhase::Error => ([90, 22, 22, 240], BAD, TEXT),
+                    _ => ([128, 36, 20, 238], WARN, TEXT),
+                };
+                ui::panel(canvas, brect, fill, border);
+                let (bx, by, bw, bh) = ui::px(brect, canvas);
+                let label = imp.banner_label();
+                ui::text_clipped(
+                    canvas,
+                    bx + 12.0,
+                    by + (bh - 11.0).max(0.0) * 0.5,
+                    bw - 24.0,
+                    &label,
+                    0.66,
+                    text_col,
+                );
+            }
+        } else if let Some(notice) = ctx.coming_soon_notice {
             let nrect = Rect::new(0.18, 0.120, 0.64, 0.052);
             ui::panel(canvas, nrect, [16, 20, 28, 224], WARN);
             let (nx, ny, nw, nh) = ui::px(nrect, canvas);
@@ -4281,11 +4436,27 @@ impl Menu {
         } else {
             ui::text_center(
                 canvas,
-                card,
-                "NO HAY COCHES DETECTADOS EN DOCUMENTS/RBR/CARS",
-                0.82,
+                Rect::new(0.115, 0.735, 0.770, 0.080),
+                "NO HAY COCHES DETECTADOS EN RBR/CARS",
+                0.80,
                 WARN,
             );
+            if ctx.android_import.is_some() {
+                let action_rect = Self::garage_action_rect();
+                ui::panel(
+                    canvas,
+                    action_rect,
+                    [156, 30, 30, 238],
+                    [240, 110, 110, 255],
+                );
+                ui::text_center(
+                    canvas,
+                    action_rect,
+                    "IMPORTAR RECURSOS RBR (SAF)",
+                    0.62,
+                    TEXT,
+                );
+            }
         }
     }
 
@@ -4837,6 +5008,7 @@ pub struct Settings {
     pub hud_rpm_style: HudRpmStyle,
     pub invert_pedals: bool,
     pub clutch_help: bool,
+    pub touch_steering: bool,
     pub volume: f64,
     pub music_volume: f64,
     pub codriver_volume: f64,
@@ -4857,6 +5029,7 @@ impl Default for Settings {
             hud_rpm_style: HudRpmStyle::default(),
             invert_pedals: false,
             clutch_help: true,
+            touch_steering: cfg!(target_os = "android"),
             volume: 0.8,
             music_volume: 0.70,
             codriver_volume: 0.85,
@@ -4895,6 +5068,7 @@ impl Settings {
                 "minimal_hud" => settings.minimal_hud = value == "true",
                 "invert_pedals" => settings.invert_pedals = value == "true",
                 "clutch_help" => settings.clutch_help = value == "true",
+                "touch_steering" => settings.touch_steering = value == "true",
                 "volume" => {
                     if let Ok(v) = value.parse::<f64>() {
                         if v.is_finite() {
@@ -4957,6 +5131,9 @@ impl Settings {
                 out.push_str(&format!("last_driven_vehicle_id={}\n", id.trim()));
             }
         }
+        if cfg!(target_os = "android") || self.touch_steering {
+            out.push_str(&format!("touch_steering={}\n", self.touch_steering));
+        }
         out
     }
     pub fn save(&self) {
@@ -4999,6 +5176,8 @@ mod tests {
             hud_rpm_style: HudRpmStyle::default(),
             invert_pedals: false,
             clutch_help: false,
+            touch_steering: false,
+            android_import: None,
             ctrl_opacity: 0.5,
             global_opacity: 0.5,
             stage_result: None,

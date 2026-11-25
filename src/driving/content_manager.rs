@@ -320,6 +320,15 @@ impl Catalog {
         }
     }
 
+    pub fn scan_root_for_app(root: &Path, selection: &Selection, public_beta: bool) -> Self {
+        let catalog = Self::scan_root(root, selection);
+        if public_beta {
+            catalog.public_beta()
+        } else {
+            catalog
+        }
+    }
+
     pub fn is_public_beta(&self) -> bool {
         self.public_beta
     }

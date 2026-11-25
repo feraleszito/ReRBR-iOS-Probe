@@ -25,6 +25,8 @@ enum Pedal {
     Throttle,
     Handbrake,
     Clutch,
+    SteerLeft,
+    SteerRight,
 }
 fn pressure(y: f64, rect: super::layout::Rect, invert_pedals: bool) -> f32 {
     let top_margin = 0.02_f64.min(f64::from(rect.h) * 0.2);
@@ -55,6 +57,7 @@ pub struct Controls {
     pub selected_gear: u32,
     pub automatic: bool,
     pub invert_pedals: bool,
+    pub touch_steering: bool,
     forward_gears: u32,
 }
 impl Default for Controls {
@@ -69,6 +72,7 @@ impl Default for Controls {
             selected_gear: 1,
             automatic: false,
             invert_pedals: false,
+            touch_steering: cfg!(target_os = "android"),
             forward_gears: rerbr_content::VehicleDescriptor::default().forward_gears,
         }
     }
@@ -142,6 +146,12 @@ impl Controls {
                 Some(EditableControl::Clutch) => Some(Pedal::Clutch),
                 Some(EditableControl::Brake) => Some(Pedal::Brake),
                 Some(EditableControl::Throttle) => Some(Pedal::Throttle),
+                None if self.touch_steering && layout.steer_left_rect().contains(x, y) => {
+                    Some(Pedal::SteerLeft)
+                }
+                None if self.touch_steering && layout.steer_right_rect().contains(x, y) => {
+                    Some(Pedal::SteerRight)
+                }
                 None => None,
             };
             if let Some(pedal) = pedal {
@@ -173,21 +183,43 @@ impl Controls {
                             .throttle
                             .max(pressure(y, layout.throttle, self.invert_pedals))
                 }
+                Pedal::SteerLeft | Pedal::SteerRight => {}
             }
         }
         levels
+    }
+    pub fn touch_steer_axis(&self) -> f64 {
+        let mut left = false;
+        let mut right = false;
+        for &(pedal, _) in self.touches.values() {
+            match pedal {
+                Pedal::SteerLeft => left = true,
+                Pedal::SteerRight => right = true,
+                _ => {}
+            }
+        }
+        match (left, right) {
+            (true, false) => -1.0,
+            (false, true) => 1.0,
+            _ => 0.0,
+        }
     }
     pub fn input(&mut self, tilt: f64, seconds: f64) -> Control {
         self.input_in(&DrivingLayout::default(), tilt, seconds)
     }
     pub fn input_in(&mut self, layout: &DrivingLayout, tilt: f64, seconds: f64) -> Control {
-        let d = if tilt.is_finite() {
-            (tilt - self.centre + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
-                - std::f64::consts::PI
+        let touch_axis = self.touch_steer_axis();
+        let target = if touch_axis != 0.0 {
+            touch_axis
         } else {
-            0.0
+            let d = if tilt.is_finite() {
+                (tilt - self.centre + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+                    - std::f64::consts::PI
+            } else {
+                0.0
+            };
+            d.signum() * ((d.abs() - self.dead_zone).max(0.0) * self.sensitivity).min(1.0)
         };
-        let target = d.signum() * ((d.abs() - self.dead_zone).max(0.0) * self.sensitivity).min(1.0);
         let a = 1.0 - (-seconds.clamp(0.0, 0.1) / 0.035).exp();
         self.filtered += (target - self.filtered) * a;
         let levels = self.levels_in(layout);
@@ -377,5 +409,55 @@ mod tests {
         assert_eq!((inverted.brake, inverted.throttle), (0.0, 1.0));
         let lv = c.levels();
         assert_eq!((lv.brake, lv.throttle), (0.0, 1.0));
+    }
+    #[test]
+    fn touch_steering_buttons_steer_when_tilt_is_nan_without_blocking_pedals() {
+        let layout = DrivingLayout::default();
+        let mut c = Controls::new();
+        c.touch_steering = true;
+        let sl = layout.steer_left_rect();
+        let sr = layout.steer_right_rect();
+        assert!(sl.right() < layout.cluster.x);
+        assert!(sr.x > layout.cluster.right());
+        assert!(sl.x > layout.brake.right());
+        assert!(sr.right() < layout.throttle.x);
+
+        // Hold throttle + steer left with NaN sensor tilt (e.g. BrowserStack flat device)
+        c.touch_layout(
+            &layout,
+            1,
+            f64::from(layout.throttle.center_x()),
+            f64::from(layout.throttle.bottom() - 0.01),
+            true,
+            false,
+        );
+        c.touch_layout(
+            &layout,
+            2,
+            f64::from(sl.center_x()),
+            f64::from(sl.y + sl.h * 0.5),
+            true,
+            false,
+        );
+        for _ in 0..8 {
+            let inp = c.input_in(&layout, f64::NAN, 0.02);
+            assert!(inp.throttle > 0.95);
+        }
+        assert!(c.input_in(&layout, f64::NAN, 0.02).steering < -0.8);
+
+        // Release steer left and press steer right
+        c.touch_layout(&layout, 2, 0.0, 0.0, false, true);
+        c.touch_layout(
+            &layout,
+            3,
+            f64::from(sr.center_x()),
+            f64::from(sr.y + sr.h * 0.5),
+            true,
+            false,
+        );
+        for _ in 0..12 {
+            let _ = c.input_in(&layout, f64::NAN, 0.02);
+        }
+        assert!(c.input_in(&layout, f64::NAN, 0.02).steering > 0.8);
     }
 }

@@ -23,6 +23,7 @@ mod private_tests;
 mod race;
 pub mod records;
 pub mod replay;
+pub mod resource_import;
 pub mod rsf_catalog;
 pub mod school;
 mod ui;
@@ -119,6 +120,7 @@ pub struct Runtime {
     motion_polled_this_frame: bool,
     recover_car_frames: u32,
     pub pacenote_atlas: Option<pacenote_icons::PacenoteIconAtlas>,
+    pub pacenote_atlas_dirty: bool,
     pacenote_atlas_status: String,
     pub pacenote_hud: pacenote_icons::PacenoteHudSettings,
     pub championship: championship::ChampionshipCalendar,
@@ -158,6 +160,9 @@ pub struct Runtime {
     selected_career_difficulty: career::CareerDifficulty,
     selected_championship_kind: career::ChampionshipKind,
     selected_service_tyre: career::TyreCompound,
+    pub android_import: Option<resource_import::AndroidImportView>,
+    last_saf_epoch: u64,
+    showroom_reset_pending: bool,
 }
 impl Default for Runtime {
     fn default() -> Self {
@@ -188,6 +193,7 @@ impl Runtime {
         controls.sensitivity = settings.sensitivity;
         controls.dead_zone = settings.dead_zone;
         controls.invert_pedals = settings.invert_pedals;
+        controls.touch_steering = settings.touch_steering;
         audio::set_master_volume(settings.volume as f32);
         audio::set_music_volume(settings.music_volume as f32);
         audio::set_codriver_volume(settings.codriver_volume as f32);
@@ -210,6 +216,16 @@ impl Runtime {
                 None => (None, "DOCUMENTS NO DISPONIBLE".into()),
             };
         audio::set_menu_music_active(true);
+        let saf_init = resource_import::query_android_saf();
+        let last_saf_epoch = saf_init.completion_epoch;
+        let android_import = cfg!(target_os = "android").then(|| {
+            let health =
+                resource_import::ResourceHealthReport::inspect_env(&content, ngp_experimental);
+            resource_import::AndroidImportView {
+                saf: saf_init,
+                health,
+            }
+        });
         Self {
             #[cfg(feature = "physics-stage")]
             view: cameras::View::from_index(settings.camera),
@@ -273,6 +289,7 @@ impl Runtime {
             motion_polled_this_frame: false,
             recover_car_frames: 0,
             pacenote_atlas,
+            pacenote_atlas_dirty: false,
             pacenote_atlas_status,
             pacenote_hud: pacenote_icons::PacenoteHudSettings::load(),
             championship: championship::ChampionshipCalendar::load_default(),
@@ -312,7 +329,62 @@ impl Runtime {
             selected_career_difficulty: career::CareerDifficulty::Beginner,
             selected_championship_kind: career::ChampionshipKind::Regional,
             selected_service_tyre: career::TyreCompound::GravelHard,
+            android_import,
+            last_saf_epoch,
+            showroom_reset_pending: false,
         }
+    }
+
+    pub fn take_showroom_reset(&mut self) -> bool {
+        std::mem::take(&mut self.showroom_reset_pending)
+    }
+
+    /// Re-escanea en caliente `RERBR_PROBE_DOCUMENTS/RBR` tras importar recursos por SAF (o bajo demanda),
+    /// actualizando catálogo de coches y tramos, selección activa, showroom 3D, atlas de notas y música.
+    pub fn reload_installed_resources(&mut self) {
+        let public_beta = self.content.is_public_beta();
+        let scanned = Catalog::scan_for_app(&self.selection, public_beta);
+        let stage = restored_stage(&scanned, &self.selection.stage.id);
+        let preferred_vehicle = self
+            .last_driven_vehicle_id
+            .as_deref()
+            .unwrap_or(&self.selection.vehicle.id);
+        let vehicle = restored_vehicle(&scanned, preferred_vehicle, self.ngp_experimental);
+        let _ = self.controls.configure_vehicle(&vehicle);
+        self.selection = rerbr_content::Selection { vehicle, stage };
+        self.content = Catalog::scan_for_app(&self.selection, public_beta);
+        self.title_vehicle_order = shuffled_showroom_candidates(&self.content);
+        self.showroom_error = None;
+        self.showroom_reset_pending = true;
+
+        if let Some(doc) = std::env::var_os("RERBR_PROBE_DOCUMENTS") {
+            let doc_path = std::path::Path::new(&doc);
+            audio::init_menu_music(doc_path);
+            match pacenote_icons::PacenoteIconAtlas::load_from_documents(doc_path) {
+                Ok(atlas) => {
+                    self.pacenote_atlas_status = format!("{} OK", atlas.bank_name);
+                    self.pacenote_atlas = Some(atlas);
+                    self.pacenote_atlas_dirty = true;
+                }
+                Err(err) => {
+                    self.pacenote_atlas_status = err;
+                }
+            }
+        }
+        self.championship = championship::ChampionshipCalendar::load_default();
+        self.school = school::SchoolCatalog::load_default();
+
+        let health = resource_import::ResourceHealthReport::inspect_env(
+            &self.content,
+            self.ngp_experimental,
+        );
+        let headline = health.headline.clone();
+        if let Some(imp) = self.android_import.as_mut() {
+            imp.health = health;
+        }
+        self.message = Some(headline.clone());
+        self.coming_soon_notice = Some((headline, Instant::now() + Duration::from_secs(6)));
+        self.save_settings();
     }
 
     fn career_boot_overrides(&self) -> rerbr_sim::drive::BootOverrides {
@@ -917,6 +989,7 @@ impl Runtime {
             hud_rpm_style: self.hud_rpm_style,
             invert_pedals: self.controls.invert_pedals,
             clutch_help: self.clutch_help,
+            touch_steering: self.controls.touch_steering,
             volume: self.volume,
             music_volume: self.music_volume,
             codriver_volume: self.codriver_volume,
@@ -1170,10 +1243,23 @@ impl Runtime {
                 }
                 self.content =
                     Catalog::scan_for_app(&self.selection, self.content.is_public_beta());
+                if let Some(imp) = self.android_import.as_mut() {
+                    imp.health = resource_import::ResourceHealthReport::inspect_env(
+                        &self.content,
+                        self.ngp_experimental,
+                    );
+                }
                 if self.content.is_public_beta()
                     && self.content.vehicle(&self.selection.vehicle.id).is_none()
                 {
-                    self.message = Some("COCHE NO DISPONIBLE EN LA BETA".into());
+                    let detail = self
+                        .android_import
+                        .as_ref()
+                        .and_then(|imp| imp.health.missing_items.first().cloned())
+                        .unwrap_or_else(|| "COCHE NO DISPONIBLE EN LA BETA".into());
+                    self.coming_soon_notice =
+                        Some((detail.clone(), Instant::now() + Duration::from_secs(5)));
+                    self.message = Some(detail);
                     return;
                 }
                 if self.selection.vehicle.is_ngp_experimental_car() {
@@ -1202,6 +1288,8 @@ impl Runtime {
                         Ok(())
                     });
                 if let Err(error) = result {
+                    self.coming_soon_notice =
+                        Some((error.clone(), Instant::now() + Duration::from_secs(5)));
                     self.message = Some(error);
                 } else if self.selection.vehicle.is_ngp_experimental_car() {
                     self.refresh_diagnostics_for_selected();
@@ -1653,9 +1741,7 @@ impl Runtime {
                 ));
             }
             InspectContent => {
-                self.content =
-                    Catalog::scan_for_app(&self.selection, self.content.is_public_beta());
-                self.message = Some(self.content.summary());
+                self.reload_installed_resources();
             }
             CheckPhysics => {
                 let (passed, report) = content_manager::physics_report(&self.selection);
@@ -2965,6 +3051,42 @@ impl Runtime {
                 let card = menu::SettingsCard::from_index(self.menu.settings_card);
                 self.apply_command(Open(card.target_page()));
             }
+            ImportAndroidFolder => match resource_import::request_open_rbr_folder() {
+                Ok(()) => {
+                    self.message = Some("ABRIENDO SELECTOR DE CARPETAS ANDROID SAF...".into());
+                }
+                Err(err) => {
+                    self.message = Some(err);
+                }
+            },
+            ImportAndroidZip => match resource_import::request_open_rbr_zip() {
+                Ok(()) => {
+                    self.message = Some("ABRIENDO SELECTOR DE PAQUETE .ZIP ANDROID SAF...".into());
+                }
+                Err(err) => {
+                    self.message = Some(err);
+                }
+            },
+            ReimportAndroidFolder => match resource_import::request_reimport_persisted_folder() {
+                Ok(()) => {
+                    self.message = Some("REIMPORTANDO CARPETA AUTORIZADA...".into());
+                }
+                Err(err) => {
+                    self.message = Some(err);
+                }
+            },
+            ToggleTouchSteering => {
+                self.controls.touch_steering = !self.controls.touch_steering;
+                self.controls.clear();
+                self.message = Some(format!(
+                    "DIRECCIÓN TÁCTIL (< / >): {}",
+                    if self.controls.touch_steering {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
+                ));
+            }
         }
     }
     fn refresh_pilot_draft_name(&mut self) {
@@ -3050,10 +3172,6 @@ impl Runtime {
             if self.menu.page.is_showroom_page() {
                 match t.phase {
                     TouchPhase::Started => {
-                        if self.menu.is_showroom_orbit_zone(x, y) {
-                            self.showroom_drag = Some((t.id, x as f32, y as f32));
-                            return;
-                        }
                         let cmd = {
                             let context = self.context();
                             let rows = self.menu.rows(&context);
@@ -3061,6 +3179,10 @@ impl Runtime {
                         };
                         if let Some(command) = cmd {
                             self.menu_command(command);
+                            return;
+                        }
+                        if self.menu.is_showroom_orbit_zone(x, y) {
+                            self.showroom_drag = Some((t.id, x as f32, y as f32));
                         }
                     }
                     TouchPhase::Moved => {
@@ -3770,6 +3892,8 @@ impl Runtime {
             hud_rpm_style: self.hud_rpm_style,
             invert_pedals: self.controls.invert_pedals,
             clutch_help: self.clutch_help,
+            touch_steering: self.controls.touch_steering,
+            android_import: self.android_import.as_ref(),
             ctrl_opacity: self.controls_layout.opacity_for(self.selected_control),
             global_opacity: self.controls_layout.global_opacity,
             stage_result: self.race.result(),
@@ -3869,6 +3993,20 @@ impl Runtime {
         size: (u32, u32),
     ) {
         self.drawable_size = size;
+        if cfg!(target_os = "android") {
+            let saf = resource_import::query_android_saf();
+            let completed = saf.completion_epoch != self.last_saf_epoch;
+            if let Some(imp) = self.android_import.as_mut() {
+                imp.saf = saf;
+            }
+            if completed {
+                self.last_saf_epoch = self
+                    .android_import
+                    .as_ref()
+                    .map_or(0, |imp| imp.saf.completion_epoch);
+                self.reload_installed_resources();
+            }
+        }
         if !std::mem::take(&mut self.motion_polled_this_frame)
             && self.menu.page != menu::Page::Paused
         {
@@ -4317,6 +4455,24 @@ impl Runtime {
             levels.throttle,
             throttle_op,
         );
+        if self.controls.touch_steering {
+            let axis = self.controls.touch_steer_axis();
+            let op = self.controls_layout.global_opacity.clamp(0.10, 1.00);
+            draw_control(
+                canvas,
+                layout.steer_left_rect(),
+                "< IZQ",
+                if axis < 0.0 { 1.0 } else { 0.0 },
+                op,
+            );
+            draw_control(
+                canvas,
+                layout.steer_right_rect(),
+                "DER >",
+                if axis > 0.0 { 1.0 } else { 0.0 },
+                op,
+            );
+        }
     }
     fn draw_telemetry(&self, canvas: &mut Canvas, layout: &DrivingLayout, state: &worker::Shared) {
         let rect = layout.telemetry;
@@ -4413,6 +4569,7 @@ impl Runtime {
         } else if !self.experimental_visual_only
             && !self.tilt.is_finite()
             && !self.gamepad.connected
+            && !self.controls.touch_steering
         {
             banners.push(("HOLD DEVICE IN LANDSCAPE TO STEER".into(), WARN));
         }
@@ -4960,6 +5117,19 @@ fn restored_stage(catalog: &Catalog, id: &str) -> rerbr_content::StageDescriptor
         .filter(|entry| {
             stage_supported(&entry.descriptor)
                 && (!entry.files.checked || entry.files.missing.is_empty())
+        })
+        .or_else(|| {
+            catalog.stage(&default.id).filter(|entry| {
+                stage_supported(&entry.descriptor)
+                    && (!entry.files.checked || entry.files.missing.is_empty())
+            })
+        })
+        .or_else(|| {
+            catalog.stages.iter().find(|entry| {
+                stage_supported(&entry.descriptor)
+                    && entry.files.checked
+                    && entry.files.missing.is_empty()
+            })
         })
         .or_else(|| catalog.stage(&default.id))
         .map(|entry| entry.descriptor.clone())

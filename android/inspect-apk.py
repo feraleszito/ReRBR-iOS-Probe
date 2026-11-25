@@ -37,8 +37,14 @@ with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory() as tmp:
     if not loads or any(int(row[-1], 16) < 16384 for row in loads):
         sys.exit("ELF load segment alignment below 16 KiB")
     symbols = {line.split()[-1] for line in inspect("--dyn-syms", "--wide").splitlines() if line.split() and " UND " not in line}
-    for symbol in ("ANativeActivity_onCreate", "Java_org_rerbr_mobile_GameActivity_sensorRoll",
-                   "Java_org_rerbr_mobile_GameActivity_safeArea", "Java_org_rerbr_mobile_GameAudio_render"):
+    for symbol in (
+        "ANativeActivity_onCreate",
+        "Java_org_rerbr_mobile_GameActivity_sensorRoll",
+        "Java_org_rerbr_mobile_GameActivity_safeArea",
+        "Java_org_rerbr_mobile_GameActivity_importStatus",
+        "Java_org_rerbr_mobile_GameActivity_persistedUriState",
+        "Java_org_rerbr_mobile_GameAudio_render",
+    ):
         if symbol not in symbols:
             sys.exit(f"Missing native entry point: {symbol}")
     print(inspect("-d"))

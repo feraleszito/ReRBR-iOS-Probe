@@ -272,6 +272,9 @@ impl Scene {
         } else {
             #[cfg(feature = "physics-drive")]
             let drew_showroom = if !self.failed && self.benchmark.driving.is_showroom_page() {
+                if self.benchmark.driving.take_showroom_reset() {
+                    self.showroom.unload();
+                }
                 if let Some((mode, primary, fallbacks)) = self.benchmark.driving.showroom_request()
                 {
                     self.benchmark.driving.showroom_camera.set_mode(mode);

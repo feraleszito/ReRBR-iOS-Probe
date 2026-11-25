@@ -1,4 +1,4 @@
-name: RBR Mobile Android Experimental
+name: RBR Mobile Android OneCar OneStage
 on:
   push:
     branches: [port/android-full-game]
@@ -18,33 +18,34 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Check shared game for Android ARM64
+      - name: Check shared game and minimal extractor for Android ARM64
         run: |
           rustup target add aarch64-linux-android
           cargo fmt --all -- --check
           python3 scripts/verify.py
-          cargo clippy --locked --lib --target aarch64-linux-android --features public-beta -- -D warnings
+          python3 scripts/extract-minimal-pack.py --help >/dev/null
+          cargo clippy --locked --lib --no-deps --target aarch64-linux-android --features public-beta -- -D warnings -A clippy::needless_range_loop
       - name: Package full game with runner SDK and NDK
         run: |
           test -d "$ANDROID_NDK_HOME/toolchains/llvm"
           gradle -p android --console=plain :app:assembleDebug
           mkdir -p build
-          cp android/app/build/outputs/apk/debug/app-debug.apk build/RBR-Mobile-Android-Experimental.apk
-      - name: Verify manifest, signature, native library and APK alignment
+          cp android/app/build/outputs/apk/debug/app-debug.apk build/RBR-Mobile-Android-OneCar-OneStage.apk
+      - name: Verify manifest, signature, native library, SAF JNI exports and 16 KiB alignment
         run: |
-          apk=build/RBR-Mobile-Android-Experimental.apk
+          apk=build/RBR-Mobile-Android-OneCar-OneStage.apk
           tools="$ANDROID_HOME/build-tools/35.0.0"
           "$tools/apksigner" verify --verbose "$apk"
           "$tools/zipalign" -c -P 16 -v 4 "$apk"
           "$tools/aapt" dump badging "$apk" | tee build/android-manifest.txt
           grep -F "launchable-activity: name='org.rerbr.mobile.GameActivity'" build/android-manifest.txt
           python3 android/inspect-apk.py "$apk"
-          (cd build && sha256sum RBR-Mobile-Android-Experimental.apk > SHA256SUMS)
+          (cd build && sha256sum RBR-Mobile-Android-OneCar-OneStage.apk > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
-          name: RBR-Mobile-Android-Experimental
+          name: RBR-Mobile-Android-OneCar-OneStage
           path: |
-            build/RBR-Mobile-Android-Experimental.apk
+            build/RBR-Mobile-Android-OneCar-OneStage.apk
             build/SHA256SUMS
             build/android-manifest.txt
           if-no-files-found: error

@@ -360,6 +360,15 @@ impl Runtime {
                 }
             }
         }
+        #[cfg(feature = "physics-drive")]
+        if self.driving.pacenote_atlas_dirty {
+            self.driving.pacenote_atlas_dirty = false;
+            if let (Some(h), Some(atlas)) =
+                (self.hud.as_mut(), self.driving.pacenote_atlas.as_ref())
+            {
+                h.upload_rgba_atlas(device, queue, atlas.width, atlas.height, &atlas.rgba8);
+            }
+        }
         if let Some(hud) = &self.hud {
             #[cfg(feature = "physics-drive")]
             {

@@ -386,6 +386,14 @@ impl Default for DrivingLayout {
     }
 }
 impl DrivingLayout {
+    pub fn steer_left_rect(&self) -> Rect {
+        let x = (self.brake.right() + 0.012).clamp(0.16, 0.24);
+        Rect::new(x, 0.76, 0.115, 0.19)
+    }
+    pub fn steer_right_rect(&self) -> Rect {
+        let x = (self.throttle.x - 0.127).clamp(0.645, 0.725);
+        Rect::new(x, 0.76, 0.115, 0.19)
+    }
     pub fn engine_start_rect(&self) -> Option<Rect> {
         (0..4)
             .map(|i| {

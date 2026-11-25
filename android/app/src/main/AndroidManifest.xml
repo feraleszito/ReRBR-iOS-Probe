@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
-    <application android:label="RBR Mobile Experimental" android:allowBackup="false"
+    <application android:label="RBR Mobile" android:allowBackup="false"
         android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
         <activity android:name=".GameActivity" android:exported="true"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode"
