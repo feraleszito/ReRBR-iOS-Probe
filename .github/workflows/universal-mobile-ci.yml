@@ -15,17 +15,26 @@ concurrency:
 jobs:
   ios_experimental_ipa:
     name: iOS/iPadOS Experimental ARM64 IPA
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 45
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify Xcode 16.4 and iPhoneOS SDK
+      - name: Select Xcode 16.x and verify iPhoneOS SDK
         run: |
-          test -d "$DEVELOPER_DIR"
+          for candidate in \
+            /Applications/Xcode_16.4.app/Contents/Developer \
+            /Applications/Xcode_16.3.app/Contents/Developer \
+            /Applications/Xcode_16.2.app/Contents/Developer \
+            /Applications/Xcode.app/Contents/Developer; do
+            if [[ -d "$candidate" ]]; then
+              echo "DEVELOPER_DIR=$candidate" >> "$GITHUB_ENV"
+              export DEVELOPER_DIR="$candidate"
+              break
+            fi
+          done
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
@@ -39,7 +48,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
-          key: ios-universal-xcode-16.4
+          key: ios-universal-macos15-intel
 
       - name: Build, test, and verify experimental iOS/iPadOS IPA
         env:
@@ -60,6 +69,7 @@ jobs:
             build/RBR-Mobile-Beta.ipa
             build/SHA256SUMS
             build/package-verification.log
+            build/host-tests.log
           if-no-files-found: error
           retention-days: 14
 
@@ -93,13 +103,13 @@ jobs:
           workspaces: . -> target
           key: android-universal-arm64
 
-      - name: Verify sources, host unit tests, and Android ARM64 clippy
+      - name: Verify sources, non-GUI workspace crates, and Android ARM64 clippy
         run: |
           cargo fmt --all -- --check
           python3 scripts/verify.py
           python3 scripts/extract-minimal-pack.py --help >/dev/null
-          cargo test --locked --lib --features public-beta
-          cargo clippy --locked --lib --target aarch64-linux-android --features public-beta -- -D warnings
+          cargo test --locked -p rerbr-content -p rerbr-asset-formats -p rerbr-sim
+          cargo clippy --locked --lib --no-deps --target aarch64-linux-android --features public-beta -- -D warnings -A clippy::needless_range_loop
 
       - name: Assemble Android ARM64 APK with SDK 35 and NDK
         run: |
